@@ -8,10 +8,14 @@ avoids maintaining a separate XML file per scene.
 
 from __future__ import annotations
 import textwrap
+from pathlib import Path
 from experiments.scene_config import SceneConfig, ObstacleConfig
 
-# Absolute path to panda.xml so MuJoCo can resolve it regardless of cwd.
-_PANDA_XML = "./simulation_assets/model/franka_emika_panda/panda.xml"
+# Directory that contains panda.xml and its assets/ subfolder.
+# The generated XML is written here so that meshdir="assets" resolves
+# the same way it does for the checked-in safety_scene.xml.
+PANDA_DIR = Path("simulation_assets/model/franka_emika_panda")
+_PANDA_XML = "panda.xml"   # relative — temp file lives in the same dir
 
 
 def _obstacle_xml(obs: ObstacleConfig, idx: int) -> str:
@@ -80,28 +84,31 @@ def build_scene_xml(cfg: SceneConfig) -> str:
                     contype="0" conaffinity="0"/>
             </body>
 
+            <!-- Camera matches Bridge V2 training distribution: side-front view
+                 at roughly arm height, looking slightly downward at the workspace.
+                 The desk surface is at z=0.20; the arm workspace is at z=0.20-0.60. -->
             <camera name="static_cam"
-              pos="0.05 -0.75 1.3"
-              euler="0.8 -0.3236 -0.26"
-              fovy="45"/>
+              pos="0.15 -0.78 0.55"
+              euler="1.15 0 -0.18"
+              fovy="50"/>
 
-            <!-- DESK -->
+            <!-- DESK: wooden table surface at z=0.20 (body centre z=0.10, half-h=0.10) -->
             <body name="desk" pos="{desk_x:.4f} {desk_y:.4f} 0.1">
-              <geom name="desk_geom" type="box" size="0.3 0.3 0.1"
-                    rgba="0.7 0.5 0.3 1" contype="1" conaffinity="1"/>
+              <geom name="desk_geom" type="box" size="0.35 0.35 0.1"
+                    rgba="0.65 0.45 0.25 1" contype="1" conaffinity="1"/>
             </body>
 
-            <!-- START MARKER: red cube -->
-            <body name="red" pos="{sx:.4f} {sy:.4f} {sz + 0.1:.4f}">
+            <!-- START MARKER: red cube ON the desk surface (z_centre = 0.23) -->
+            <body name="red" pos="{sx:.4f} {sy:.4f} 0.23">
               <freejoint/>
               <geom name="block_red" type="box" size="0.03 0.03 0.03"
-                    rgba="1 0 0 1" density="500"/>
+                    rgba="0.9 0.1 0.1 1" density="500"/>
             </body>
 
-            <!-- GOAL MARKER: green cube (ghost, no collision) -->
-            <body name="green" pos="{gx:.4f} {gy:.4f} {gz - 0.17:.4f}">
+            <!-- GOAL MARKER: green cube ON the desk surface, visual only -->
+            <body name="green" pos="{gx:.4f} {gy:.4f} 0.23">
               <geom name="block_green" type="box" size="0.03 0.03 0.03"
-                    rgba="0.2 0.8 0.2 0.4" contype="0" conaffinity="0"/>
+                    rgba="0.1 0.8 0.1 0.6" contype="0" conaffinity="0"/>
             </body>
 
             {obstacle_blocks}

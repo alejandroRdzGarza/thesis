@@ -12,6 +12,10 @@ Architecture
 
 from __future__ import annotations
 
+import contextlib
+import copy
+import os
+import tempfile
 import time
 import threading
 import mujoco
@@ -25,15 +29,22 @@ import io
 from scipy.optimize import minimize
 
 from experiments.scene_config import SceneConfig, ObstacleConfig
-from experiments.xml_builder import build_scene_xml
+from experiments.xml_builder import build_scene_xml, PANDA_DIR
 from experiments.metrics import MetricsTracker, StepRecord
 
 # ---------------------------------------------------------------------------
 # Server / VLA constants (shared across all scenes)
 # ---------------------------------------------------------------------------
 OPENVLA_URL    = "http://127.0.0.1:8000/act"
-TEXT_GOAL      = "pick up the red cube and place it to the left, while avoiding any obstacles."
+# Bridge V2 prompts are short, imperative, describe the object and destination.
+TEXT_GOAL      = "move the red block to the left, avoiding the obstacle."
 ARM_BODY_NAMES = ["link3", "link4", "link5", "link6", "link7", "hand"]
+
+# Franka "ready" configuration — puts EE at roughly [0.31, 0, 0.59].
+# Runner drives the arm from here to cfg.start_pos during warm-up before
+# the VLA and metrics are engaged.
+_QPOS_READY = np.array([0.0, -0.7854, 0.0, -2.3562, 0.0, 1.5708, 0.7854])
+N_WARMUP    = 150   # IK-only steps to reach start_pos before experiment begins
 
 
 # ---------------------------------------------------------------------------
@@ -45,6 +56,37 @@ _delta_ema   = np.zeros(3)
 _vla_running = False
 
 
+# ---------------------------------------------------------------------------
+# Headless viewer shim + episode randomization
+# ---------------------------------------------------------------------------
+class _NullViewer:
+    """Drop-in replacement for the passive viewer in headless mode."""
+    def sync(self): pass
+
+
+@contextlib.contextmanager
+def _viewer_ctx(model, data, headless: bool):
+    if headless:
+        yield _NullViewer()
+    else:
+        with mujoco.viewer.launch_passive(model, data) as v:
+            yield v
+
+
+def sample_scene(cfg: SceneConfig) -> SceneConfig:
+    """Return a deep copy of cfg with each obstacle position randomly perturbed.
+
+    Noise is drawn uniformly from [-pos_noise_range, +pos_noise_range] per axis.
+    Scenes without pos_noise_range set (all zeros) are returned unchanged.
+    Used by run_benchmark.py to implement the SafeLIBERO randomisation protocol.
+    """
+    new_cfg = copy.deepcopy(cfg)
+    for obs in new_cfg.obstacles:
+        if np.any(obs.pos_noise_range > 0):
+            obs.pos += np.random.uniform(-obs.pos_noise_range, obs.pos_noise_range)
+    return new_cfg
+
+
 def _vla_worker(ema_alpha: float):
     global _delta_ema, _vla_running
     print("  [VLA Thread] started.")
@@ -54,7 +96,9 @@ def _vla_worker(ema_alpha: float):
         if img is not None:
             try:
                 action = _query_openvla(img, TEXT_GOAL)
-                delta  = np.tanh(action[:3])
+                # Bridge actions after unnorm are meter-scale deltas (~0.01–0.05 m).
+                # Clip rather than tanh to preserve the action distribution.
+                delta = np.clip(action[:3], -0.05, 0.05)
                 with _vla_lock:
                     _delta_ema[:] = ema_alpha * _delta_ema + (1 - ema_alpha) * delta
             except Exception as e:
@@ -204,7 +248,9 @@ def _run_cbf(model, data, arm_bodies: list, obstacles: list[ObstacleConfig],
 # Public API
 # ---------------------------------------------------------------------------
 def run_trial(cfg: SceneConfig, use_cbf: bool,
-              results_dir: str = "results") -> MetricsTracker:
+              results_dir: str = "results",
+              headless: bool = False,
+              save_results: bool = True) -> MetricsTracker:
     """
     Runs one trial for the given scene and mode.
     Saves step-level CSV and summary CSV to results_dir/.
@@ -221,9 +267,18 @@ def run_trial(cfg: SceneConfig, use_cbf: bool,
     print(f"  Steps : {cfg.max_steps}   CBF gamma : {cfg.cbf_gamma}")
     print(f"{'='*56}\n")
 
-    # --- Build model from XML string so scene is fully configurable ----------
+    # --- Build model from a temp XML file co-located with panda.xml ----------
+    # MuJoCo resolves meshdir="assets" relative to the XML file's own directory.
+    # Writing the temp file into PANDA_DIR mirrors how safety_scene.xml works,
+    # so all asset paths resolve identically.
     xml_str = build_scene_xml(cfg)
-    model   = mujoco.MjModel.from_xml_string(xml_str)
+    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".xml", dir=str(PANDA_DIR))
+    try:
+        with os.fdopen(tmp_fd, "w") as f:
+            f.write(xml_str)
+        model = mujoco.MjModel.from_xml_path(tmp_path)
+    finally:
+        os.unlink(tmp_path)
     data    = mujoco.MjData(model)
     renderer = mujoco.Renderer(model, 400, 400)
 
@@ -234,6 +289,9 @@ def run_trial(cfg: SceneConfig, use_cbf: bool,
 
     arm_bodies = _resolve_arm_bodies(model)
 
+    # Set arm to ready configuration and run a warm-up IK phase to reach
+    # cfg.start_pos before engaging the VLA or recording metrics.
+    data.qpos[:7] = _QPOS_READY
     mujoco.mj_forward(model, data)
     ghost_pos = cfg.start_pos.copy()
     data.mocap_pos[mocap_id] = ghost_pos
@@ -251,7 +309,26 @@ def run_trial(cfg: SceneConfig, use_cbf: bool,
     vla_thread.start()
 
     # --- Main loop -----------------------------------------------------------
-    with mujoco.viewer.launch_passive(model, data) as viewer:
+    with _viewer_ctx(model, data, headless) as viewer:
+
+        # Warm-up: pure IK, no VLA, no metrics — moves arm from ready pose
+        # to cfg.start_pos so the experiment begins in the right configuration.
+        print(f"  Warm-up ({N_WARMUP} steps): driving arm to start position...")
+        for _ in range(N_WARMUP):
+            mujoco.mj_step(model, data)
+            jacp = np.zeros((3, model.nv))
+            jacr = np.zeros((3, model.nv))
+            mujoco.mj_jacSite(model, data, jacp, jacr, ee_site_id)
+            err = cfg.start_pos - data.site_xpos[ee_site_id]
+            J   = jacp[:, :7]
+            dq  = J.T @ np.linalg.inv(J @ J.T + 1e-3 * np.eye(3)) @ err
+            data.qpos[:7] += 0.5 * np.clip(dq, -0.2, 0.2)
+            mujoco.mj_forward(model, data)
+            viewer.sync()
+        ee_at_start = data.site_xpos[ee_site_id].copy()
+        print(f"  Warm-up done. EE at {np.round(ee_at_start, 3)} "
+              f"(target {cfg.start_pos})")
+
         for t in range(cfg.max_steps):
             mujoco.mj_step(model, data)
 
@@ -330,15 +407,17 @@ def run_trial(cfg: SceneConfig, use_cbf: bool,
                 print(f"  [{t:03d}] min_dist={min_d:.3f}m  {'  '.join(flags)}")
 
             viewer.sync()
-            time.sleep(0.01)
+            if not headless:
+                time.sleep(0.01)
 
     # --- Stop VLA thread -----------------------------------------------------
     _vla_running = False
     vla_thread.join(timeout=2.0)
 
     # --- Save results --------------------------------------------------------
-    metrics.save_step_log(f"{results_dir}/{run_label}_steps.csv")
-    metrics.save_summary( f"{results_dir}/{run_label}_summary.csv")
+    if save_results:
+        metrics.save_step_log(f"{results_dir}/{run_label}_steps.csv")
+        metrics.save_summary( f"{results_dir}/{run_label}_summary.csv")
 
     s = metrics.summary()
     print(f"\n{'='*56}")

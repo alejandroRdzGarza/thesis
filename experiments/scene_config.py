@@ -26,9 +26,13 @@ class ObstacleConfig:
     safety_radius: float     # CBF exclusion radius (m) — usually > radius
     name: str = "obstacle"
     color: tuple = (1.0, 0.7, 0.0, 0.8)  # RGBA
+    # Per-axis uniform noise applied by sample_scene() each episode.
+    # actual_pos ~ U(pos - range, pos + range). Leave at zeros for fixed scenes.
+    pos_noise_range: np.ndarray = field(default_factory=lambda: np.zeros(3))
 
     def __post_init__(self):
         self.pos = np.asarray(self.pos, dtype=float)
+        self.pos_noise_range = np.asarray(self.pos_noise_range, dtype=float)
 
 
 @dataclass
@@ -42,8 +46,16 @@ class SceneConfig:
     obstacles: list[ObstacleConfig]
 
     # VLA / ghost-target tuning
-    vla_scale: float = 0.04
-    goal_attract: float = 0.008
+    # goal_attract dominates ghost-target movement; vla_scale is a directional hint.
+    #
+    # With goal_attract=0.05, the ghost target exponentially converges:
+    #   distance halves every ~14 steps (0.95^14 ≈ 0.5).
+    #   Starting 0.4 m from goal → within goal_tolerance (8 cm) in ~55 steps.
+    # With vla_scale=0.1, VLA contributes at most 0.1×0.05 = 0.005 m/step,
+    #   which is 1/4 of the goal pull at start → biases direction, doesn't derail.
+    # Previously vla_scale=0.8 caused VLA noise to dominate 4:1, giving TSR≈0%.
+    vla_scale: float = 0.1       # VLA as a directional bias; goal_attract dominates
+    goal_attract: float = 0.05   # exponential pull; reaches goal in ~55–80 steps
     ema_alpha: float = 0.30
 
     # Potential-field repulsion applied to ghost target (both modes).
@@ -160,6 +172,57 @@ SCENE_HIGH_STAKES = SceneConfig(
     max_steps=500,
 )
 
+# ---------------------------------------------------------------------------
+# AEGIS-style benchmark scenes (Level I / Level II, 50-episode evaluation)
+# Matching SafeLIBERO protocol: randomize obstacle position each episode.
+# ---------------------------------------------------------------------------
+
+# Level I — obstacle near the START position (near the red cube).
+# The arm must navigate away from the obstacle early in the trajectory.
+# Mirrors SafeLIBERO Level I: "obstacle in close proximity to the target object."
+# NOTE: obstacle must NOT be placed near the goal — if obstacle safety_radius
+# overlaps the goal, the task becomes geometrically infeasible (TSR→0%).
+SCENE_BENCH_LEVEL_I = SceneConfig(
+    name="bench_level_i",
+    description="Level I: obstacle near start/cube — arm must escape it early.",
+    start_pos=np.array([0.6, -0.20, 0.40]),
+    goal_pos =np.array([0.6,  0.20, 0.40]),
+    obstacles=[
+        ObstacleConfig(
+            pos=np.array([0.6, -0.10, 0.40]),
+            radius=0.07,
+            safety_radius=0.13,
+            name="obstacle_near_start",
+            color=(1.0, 0.5, 0.0, 0.8),
+            pos_noise_range=np.array([0.04, 0.04, 0.02]),
+        )
+    ],
+    cbf_gamma=1.8,
+    max_steps=400,
+)
+
+# Level II — obstacle on the direct path between start and goal.
+# The arm must detour around the obstacle to reach the goal.
+# Mirrors SafeLIBERO Level II: "obstacle obstructs the movement."
+SCENE_BENCH_LEVEL_II = SceneConfig(
+    name="bench_level_ii",
+    description="Level II: obstacle on direct path — arm must detour.",
+    start_pos=np.array([0.6, -0.20, 0.40]),
+    goal_pos =np.array([0.6,  0.20, 0.40]),
+    obstacles=[
+        ObstacleConfig(
+            pos=np.array([0.6, 0.0, 0.40]),
+            radius=0.08,
+            safety_radius=0.15,
+            name="obstacle_on_path",
+            color=(1.0, 0.2, 0.2, 0.9),
+            pos_noise_range=np.array([0.05, 0.05, 0.02]),
+        )
+    ],
+    cbf_gamma=2.0,
+    max_steps=400,
+)
+
 # Registry — used by the CLI runner to select by name
 ALL_SCENES: dict[str, SceneConfig] = {
     s.name: s for s in [
@@ -167,5 +230,13 @@ ALL_SCENES: dict[str, SceneConfig] = {
         SCENE_NARROW_CORRIDOR,
         SCENE_LATERAL_OFFSET,
         SCENE_HIGH_STAKES,
+        SCENE_BENCH_LEVEL_I,
+        SCENE_BENCH_LEVEL_II,
     ]
+}
+
+# Benchmark-only scenes for run_benchmark.py
+BENCHMARK_SCENES: dict[str, SceneConfig] = {
+    "bench_level_i":  SCENE_BENCH_LEVEL_I,
+    "bench_level_ii": SCENE_BENCH_LEVEL_II,
 }
