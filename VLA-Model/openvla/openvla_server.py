@@ -8,7 +8,7 @@ import numpy as np
 from PIL import Image
 from fastapi import FastAPI
 from pydantic import BaseModel
-from transformers import AutoModelForVision2Seq, AutoProcessor, BitsAndBytesConfig
+from transformers import AutoModelForVision2Seq, AutoProcessor
 import uvicorn
 
 import os
@@ -32,17 +32,12 @@ processor = AutoProcessor.from_pretrained(
 )
 
 print("Loading OpenVLA model (8-bit quantized)...")
-bnb_config = BitsAndBytesConfig(
-    load_in_8bit=True,
-    llm_int8_enable_fp32_cpu_offload=True,
-)
 model = AutoModelForVision2Seq.from_pretrained(
     MODEL_PATH,
-    quantization_config=bnb_config,
-    device_map={"": 0},
+    torch_dtype=torch.float16,
     trust_remote_code=True,
     low_cpu_mem_usage=True,
-)
+).cuda()
 model.eval()
 
 print("OpenVLA ready.")
