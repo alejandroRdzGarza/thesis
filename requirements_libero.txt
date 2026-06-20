@@ -1,0 +1,22 @@
+# Install in a dedicated conda env to avoid breaking the vla env.
+#
+# Setup:
+#   conda create -n libero python=3.10
+#   conda activate libero
+#   pip install -r requirements_libero.txt
+#   # Then install LIBERO from source (not yet on PyPI as a stable package):
+#   git clone https://github.com/Lifelong-Robot-Learning/LIBERO.git
+#   cd LIBERO && pip install -e .
+#
+# Run experiments:
+#   conda activate libero
+#   python run_libero_benchmark.py --suite libero_spatial --task 0
+
+robosuite>=1.4.1
+mujoco>=2.3.7,<3.0.0     # robosuite 1.4 targets mujoco 2.x; pin to avoid 3.x API breaks
+numpy>=1.24,<2.0          # numpy 2.0 breaks many robosuite internal calls
+scipy>=1.10
+opencv-python>=4.7
+Pillow>=9.0
+requests>=2.28
+matplotlib>=3.7

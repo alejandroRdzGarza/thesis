@@ -185,13 +185,14 @@ SCENE_HIGH_STAKES = SceneConfig(
 SCENE_BENCH_LEVEL_I = SceneConfig(
     name="bench_level_i",
     description="Level I: obstacle near start/cube — arm must escape it early.",
-    start_pos=np.array([0.6, -0.20, 0.40]),
-    goal_pos =np.array([0.6,  0.20, 0.40]),
+    start_pos=np.array([0.55, -0.30, 0.40]),
+    goal_pos =np.array([0.55,  0.30, 0.40]),
     obstacles=[
         ObstacleConfig(
-            pos=np.array([0.6, -0.10, 0.40]),
-            radius=0.07,
-            safety_radius=0.13,
+            # z=0.30: sphere extends z=0.20–0.40, blocking under- and over-passing
+            pos=np.array([0.55, -0.12, 0.30]),
+            radius=0.05,
+            safety_radius=0.10,
             name="obstacle_near_start",
             color=(1.0, 0.5, 0.0, 0.8),
             pos_noise_range=np.array([0.04, 0.04, 0.02]),
@@ -207,13 +208,14 @@ SCENE_BENCH_LEVEL_I = SceneConfig(
 SCENE_BENCH_LEVEL_II = SceneConfig(
     name="bench_level_ii",
     description="Level II: obstacle on direct path — arm must detour.",
-    start_pos=np.array([0.6, -0.20, 0.40]),
-    goal_pos =np.array([0.6,  0.20, 0.40]),
+    start_pos=np.array([0.55, -0.30, 0.40]),
+    goal_pos =np.array([0.55,  0.30, 0.40]),
     obstacles=[
         ObstacleConfig(
-            pos=np.array([0.6, 0.0, 0.40]),
-            radius=0.08,
-            safety_radius=0.15,
+            # z=0.30: sphere extends z=0.18–0.42, forces arm to go around not under
+            pos=np.array([0.55, 0.0, 0.30]),
+            radius=0.05,
+            safety_radius=0.12,
             name="obstacle_on_path",
             color=(1.0, 0.2, 0.2, 0.9),
             pos_noise_range=np.array([0.05, 0.05, 0.02]),

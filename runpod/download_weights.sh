@@ -11,6 +11,14 @@
 
 set -e
 
+# Fine-tuned LIBERO-Spatial checkpoint (~14 GB).
+# This model achieves ~84.7% task success on LIBERO-Spatial and outputs actions
+# in the Franka/LIBERO action space. The base openvla-7b with bridge_orig is a
+# WidowX policy and produces nonsensical actions on LIBERO scenes.
+#
+# To instead download the base model (not recommended for LIBERO):
+#   HF_MODEL=openvla/openvla-7b bash download_weights.sh
+HF_MODEL="${HF_MODEL:-openvla/openvla-7b-finetuned-libero-spatial}"
 DEST="/workspace/vla_model"
 
 if [[ -d "$DEST" && -f "$DEST/model.safetensors.index.json" ]]; then
@@ -21,11 +29,11 @@ fi
 echo "=== Installing huggingface_hub CLI ==="
 pip install -q "huggingface_hub[cli]"
 
-echo "=== Downloading openvla/openvla-7b to $DEST ==="
+echo "=== Downloading ${HF_MODEL} to $DEST ==="
 echo "    (~14 GB — this will take several minutes)"
 echo ""
 
-huggingface-cli download openvla/openvla-7b \
+huggingface-cli download "${HF_MODEL}" \
     --local-dir "$DEST" \
     --local-dir-use-symlinks False
 

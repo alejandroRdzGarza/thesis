@@ -1,6 +1,16 @@
 # openvla_server.py
-# Stable OpenVLA HTTP server for MuJoCo / IK directional control
+# OpenVLA HTTP server for LIBERO / MuJoCo experiments.
+#
+# Defaults to the LIBERO-Spatial fine-tuned checkpoint which achieves ~84.7%
+# task success. The base openvla-7b with bridge_orig unnorm is a WidowX policy
+# and produces nonsensical actions for Franka Panda / LIBERO scenes.
+#
+# Override via env vars:
+#   OPENVLA_MODEL_PATH  -- local path or HF model ID
+#   OPENVLA_UNNORM_KEY  -- unnorm key matching the checkpoint
+#   OPENVLA_CENTER_CROP -- set "0" to disable 90%-area centre crop
 
+import os
 import torch
 import base64
 import io
@@ -11,110 +21,88 @@ from pydantic import BaseModel
 from transformers import AutoModelForVision2Seq, AutoProcessor
 import uvicorn
 
-import os
-MODEL_PATH = os.environ.get("OPENVLA_MODEL_PATH", "openvla/openvla-7b")
-DEVICE = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
+MODEL_PATH  = os.environ.get("OPENVLA_MODEL_PATH", "openvla/openvla-7b-finetuned-libero-spatial")
+UNNORM_KEY  = os.environ.get("OPENVLA_UNNORM_KEY",  "libero_spatial")
+CENTER_CROP = os.environ.get("OPENVLA_CENTER_CROP", "true").lower() not in ("0", "false", "no")
 
-
-UNNORM_KEY = "bridge_orig"
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 app = FastAPI()
 
+
 class Request(BaseModel):
     image_base64: str
-    instruction: str
+    instruction:  str
 
-# Load OpenVLA
-print("Loading OpenVLA processor...")
-processor = AutoProcessor.from_pretrained(
-    "openvla/openvla-7b",
-    trust_remote_code=True,
-)
 
-print("Loading OpenVLA model (8-bit quantized)...")
+print(f"Loading processor from {MODEL_PATH} ...")
+processor = AutoProcessor.from_pretrained(MODEL_PATH, trust_remote_code=True)
+
+print(f"Loading model ({MODEL_PATH}) ...")
 model = AutoModelForVision2Seq.from_pretrained(
     MODEL_PATH,
     torch_dtype=torch.float16,
     trust_remote_code=True,
     low_cpu_mem_usage=True,
-).cuda()
+).to(DEVICE)
 model.eval()
 
-print("OpenVLA ready.")
+print(f"OpenVLA ready -- unnorm_key={UNNORM_KEY!r}  center_crop={CENTER_CROP}")
 
 
-# utils
-def decode_image(b64: str) -> Image.Image:
-    img_bytes = base64.b64decode(b64)
-    return Image.open(io.BytesIO(img_bytes)).convert("RGB")
+def _center_crop_90(img: Image.Image) -> Image.Image:
+    """Centre-crop to 90% area then resize back to original size.
 
-def to_numpy_action(action):
+    The LIBERO fine-tuned model was trained with random 90%-area crops; at
+    inference we use the deterministic centre crop to match training conditions.
+    sqrt(0.9) ~= 0.9487, so a 224x224 image is cropped to ~212x212 then resized.
     """
-    OpenVLA predict_action may return:
-    - torch.Tensor
-    - numpy.ndarray
+    w, h = img.size
+    crop_side = int(min(w, h) * (0.9 ** 0.5))
+    left = (w - crop_side) // 2
+    top  = (h - crop_side) // 2
+    img  = img.crop((left, top, left + crop_side, top + crop_side))
+    return img.resize((w, h), Image.BILINEAR)
 
-    This function safely converts both to np.ndarray
-    """
+
+def _decode_image(b64: str) -> Image.Image:
+    return Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGB")
+
+
+def _to_numpy(action) -> np.ndarray:
     if isinstance(action, torch.Tensor):
         return action.detach().cpu().numpy()
-    elif isinstance(action, np.ndarray):
-        return action
-    else:
-        raise RuntimeError(f"Unknown action type: {type(action)}")
+    return np.asarray(action)
 
-# API
+
 @app.post("/act")
 def act(req: Request):
     try:
-        # Decode image
-        image = decode_image(req.image_base64)
+        image = _decode_image(req.image_base64)
+        if CENTER_CROP:
+            image = _center_crop_90(image)
 
         prompt = (
             f"In: What action should the robot take to {req.instruction}?\n"
             f"Out:"
         )
 
-        # Preprocess
         inputs = processor(prompt, image, return_tensors="pt")
-
-        inputs["pixel_values"] = inputs["pixel_values"].to(
-            DEVICE, dtype=torch.float16
-        )
-        inputs["input_ids"] = inputs["input_ids"].to(DEVICE)
-
+        inputs["pixel_values"]  = inputs["pixel_values"].to(DEVICE, dtype=torch.float16)
+        inputs["input_ids"]     = inputs["input_ids"].to(DEVICE)
         if "attention_mask" in inputs:
             inputs["attention_mask"] = inputs["attention_mask"].to(DEVICE)
 
-        # Inference
         with torch.no_grad():
-            action = model.predict_action(
-                **inputs,
-                unnorm_key=UNNORM_KEY, 
-                do_sample=False
-            )
+            action = model.predict_action(**inputs, unnorm_key=UNNORM_KEY, do_sample=False)
 
-        action_np = to_numpy_action(action)
-
-        return {
-            "action": action_np.tolist(),
-            "unnorm_key": UNNORM_KEY,
-        }
+        return {"action": _to_numpy(action).tolist(), "unnorm_key": UNNORM_KEY}
 
     except Exception as e:
-        # Error check
-        print(" OpenVLA server error:", e)
-        return {
-            "error": str(e),
-            "action": None,
-        }
+        print("OpenVLA server error:", e)
+        return {"error": str(e), "action": None}
 
-# Run server
+
 if __name__ == "__main__":
     port = int(os.environ.get("OPENVLA_PORT", 8000))
-    uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=port,
-        log_level="info",
-    )
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")

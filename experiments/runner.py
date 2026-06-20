@@ -36,9 +36,21 @@ from experiments.metrics import MetricsTracker, StepRecord
 # Server / VLA constants (shared across all scenes)
 # ---------------------------------------------------------------------------
 OPENVLA_URL    = "http://127.0.0.1:8000/act"
-# Bridge V2 prompts are short, imperative, describe the object and destination.
-TEXT_GOAL      = "move the red block to the left, avoiding the obstacle."
+# Bridge V2 prompts are short imperative phrases. Green = object, red = target.
+TEXT_GOAL      = "pick up the green block and place it on the red target."
 ARM_BODY_NAMES = ["link3", "link4", "link5", "link6", "link7", "hand"]
+
+# ---------------------------------------------------------------------------
+# Virtual grasp constants — purely rule-based, no VLA gripper signal.
+# OpenVLA's action[6] is calibrated for WidowX, not Franka; ignore it and
+# trigger on geometry instead.
+# ---------------------------------------------------------------------------
+_GRASP_DIST   = 0.18   # m — EE within this of block centre  → grasp
+_RELEASE_DIST = 0.12   # m — EE within this of goal position → release + place
+_FIN_OPEN     = 0.040  # m — Franka finger qpos open  (joint range max)
+_FIN_CLOSED   = 0.013  # m — Franka finger qpos closed on 2.5 cm block
+_BLOCK_Z      = 0.25   # m — table top (0.20) + block half-height (0.05)
+_CARRY_DROP   = 0.10   # m — block hangs this far below EE in world Z
 
 # Franka "ready" configuration — puts EE at roughly [0.31, 0, 0.59].
 # Runner drives the arm from here to cfg.start_pos during warm-up before
@@ -50,10 +62,11 @@ N_WARMUP    = 150   # IK-only steps to reach start_pos before experiment begins
 # ---------------------------------------------------------------------------
 # Async VLA worker
 # ---------------------------------------------------------------------------
-_vla_lock    = threading.Lock()
-_vla_image   = None
-_delta_ema   = np.zeros(3)
-_vla_running = False
+_vla_lock       = threading.Lock()
+_vla_image      = None
+_delta_ema      = np.zeros(3)
+_vla_action_raw = np.zeros(7)   # full 7D raw VLA action, updated each inference
+_vla_running    = False
 
 
 # ---------------------------------------------------------------------------
@@ -88,19 +101,18 @@ def sample_scene(cfg: SceneConfig) -> SceneConfig:
 
 
 def _vla_worker(ema_alpha: float):
-    global _delta_ema, _vla_running
+    global _delta_ema, _vla_action_raw, _vla_running
     print("  [VLA Thread] started.")
     while _vla_running:
         with _vla_lock:
             img = _vla_image
         if img is not None:
             try:
-                action = _query_openvla(img, TEXT_GOAL)
-                # Bridge actions after unnorm are meter-scale deltas (~0.01–0.05 m).
-                # Clip rather than tanh to preserve the action distribution.
-                delta = np.clip(action[:3], -0.05, 0.05)
+                action = _query_openvla(img, TEXT_GOAL)   # (7,) float32
+                delta  = np.clip(action[:3], -0.05, 0.05)
                 with _vla_lock:
-                    _delta_ema[:] = ema_alpha * _delta_ema + (1 - ema_alpha) * delta
+                    _delta_ema[:]      = ema_alpha * _delta_ema + (1 - ema_alpha) * delta
+                    _vla_action_raw[:] = action[:7]        # full 7D for dataset
             except Exception as e:
                 print(f"  [VLA Thread] query failed: {e}")
         time.sleep(0.01)
@@ -192,25 +204,46 @@ def _potential_repulsion(ghost_pos: np.ndarray, obstacles: list[ObstacleConfig],
 
 
 # ---------------------------------------------------------------------------
-# Formal kinematic CBF-QP filter
+# CBF helpers
 # ---------------------------------------------------------------------------
+def _compute_h_values(data, arm_bodies: list,
+                      obstacles: list[ObstacleConfig]) -> list[float]:
+    """Min h(q) per obstacle across all monitored arm links.
+
+    h(q) = ||p_link - p_obs||^2 - r_safe^2
+    Positive = inside the safe set.  Zero = on boundary.  Negative = violation.
+    """
+    h_per_obs = []
+    for obs in obstacles:
+        min_h = min(
+            float(np.linalg.norm(data.xpos[bid] - obs.pos) ** 2
+                  - obs.safety_radius ** 2)
+            for _, bid in arm_bodies
+        )
+        h_per_obs.append(min_h)
+    return h_per_obs
+
+
 def _run_cbf(model, data, arm_bodies: list, obstacles: list[ObstacleConfig],
-             q_dot_nom: np.ndarray, gamma: float) -> tuple[np.ndarray, float]:
+             q_dot_nom: np.ndarray, gamma: float):
     """
     Solves:  min  0.5 * ||u - u_nom||^2
              s.t. for each (link, obstacle): CBF constraint satisfied
 
-    Returns (u_safe, correction_norm).
+    Returns (u_safe, u_nom, h_per_obs, correction_norm, cbf_triggered).
     """
     num_joints = 7
-    u_nom = np.asarray(q_dot_nom)
+    u_nom = np.asarray(q_dot_nom, dtype=float)
 
     constraints = []
+    h_per_obs_dict: dict[str, float] = {obs.name: float("inf") for obs in obstacles}
+
     for obs in obstacles:
         for name, bid in arm_bodies:
             p_link = data.xpos[bid].copy()
             dist   = np.linalg.norm(p_link - obs.pos)
             h      = dist ** 2 - obs.safety_radius ** 2
+            h_per_obs_dict[obs.name] = min(h_per_obs_dict[obs.name], h)
 
             jacp = np.zeros((3, model.nv))
             jacr = np.zeros((3, model.nv))
@@ -220,8 +253,6 @@ def _run_cbf(model, data, arm_bodies: list, obstacles: list[ObstacleConfig],
             def _con(u, p_l=p_link, J_l=J_link, h_val=h):
                 diff = p_l - obs.pos
                 A_i  = -2 * diff.dot(J_l)
-                # Scale b_i by step_scale so the constraint is consistent
-                # with the actual integration gain applied later.
                 b_i  = gamma * h_val * 0.4
                 return b_i - A_i.dot(u)
 
@@ -234,14 +265,12 @@ def _run_cbf(model, data, arm_bodies: list, obstacles: list[ObstacleConfig],
         constraints=constraints,
     )
 
-    if res.success:
-        u_safe = res.x
-    else:
-        u_safe = np.zeros(num_joints)
-
+    u_safe          = res.x if res.success else np.zeros(num_joints)
     correction_norm = float(np.linalg.norm(u_safe - u_nom))
     cbf_triggered   = correction_norm > 1e-4
-    return u_safe, correction_norm, cbf_triggered
+    h_per_obs       = [h_per_obs_dict[obs.name] for obs in obstacles]
+
+    return u_safe, u_nom, h_per_obs, correction_norm, cbf_triggered
 
 
 # ---------------------------------------------------------------------------
@@ -250,13 +279,15 @@ def _run_cbf(model, data, arm_bodies: list, obstacles: list[ObstacleConfig],
 def run_trial(cfg: SceneConfig, use_cbf: bool,
               results_dir: str = "results",
               headless: bool = False,
-              save_results: bool = True) -> MetricsTracker:
+              save_results: bool = True,
+              collect_dataset: bool = False,
+              dataset_path: str | None = None) -> MetricsTracker:
     """
     Runs one trial for the given scene and mode.
     Saves step-level CSV and summary CSV to results_dir/.
     Returns the populated MetricsTracker.
     """
-    global _vla_image, _delta_ema, _vla_running
+    global _vla_image, _delta_ema, _vla_action_raw, _vla_running
 
     mode      = "cbf" if use_cbf else "plain"
     run_label = f"{cfg.name}_{mode}"
@@ -289,6 +320,23 @@ def run_trial(cfg: SceneConfig, use_cbf: bool,
 
     arm_bodies = _resolve_arm_bodies(model)
 
+    # --- Virtual grasp setup ------------------------------------------------
+    sx, sy, _ = cfg.start_pos
+    green_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "green_block")
+    _gjnt = int(model.body_jntadr[green_body_id]) if green_body_id >= 0 else -1
+    if _gjnt >= 0:
+        blk_qp      = int(model.jnt_qposadr[_gjnt])   # freejoint: 7 qpos values
+        blk_qv      = int(model.jnt_dofadr[_gjnt])    # freejoint: 6 qvel values
+        block_spawn = np.array([sx, sy, _BLOCK_Z])
+        has_grasp   = True
+    else:
+        blk_qp = blk_qv = 0
+        block_spawn = np.zeros(3)
+        has_grasp   = False
+        print("  [Grasp] green_block freejoint not found — virtual grasp disabled")
+    block_grasped = False
+    block_anchor  = block_spawn.copy()  # where block sits when not held; updates on place
+
     # Set arm to ready configuration and run a warm-up IK phase to reach
     # cfg.start_pos before engaging the VLA or recording metrics.
     data.qpos[:7] = _QPOS_READY
@@ -300,9 +348,10 @@ def run_trial(cfg: SceneConfig, use_cbf: bool,
     metrics = MetricsTracker(cfg.name, mode)
 
     # --- Async VLA worker ----------------------------------------------------
-    _delta_ema[:] = 0.0
-    _vla_image    = None
-    _vla_running  = True
+    _delta_ema[:]      = 0.0
+    _vla_action_raw[:] = 0.0
+    _vla_image         = None
+    _vla_running       = True
     vla_thread = threading.Thread(
         target=_vla_worker, args=(cfg.ema_alpha,), daemon=True
     )
@@ -310,6 +359,15 @@ def run_trial(cfg: SceneConfig, use_cbf: bool,
 
     # --- Main loop -----------------------------------------------------------
     with _viewer_ctx(model, data, headless) as viewer:
+
+        # Set the free camera to a good initial view — user can still rotate freely.
+        # (CAMERA_FIXED would lock rotation; CAMERA_FREE keeps full mouse control.)
+        if not headless:
+            viewer.cam.type      = mujoco.mjtCamera.mjCAMERA_FREE
+            viewer.cam.lookat[:] = [0.55, 0.00, 0.30]   # centre of workspace
+            viewer.cam.distance  = 1.45
+            viewer.cam.azimuth   = 155    # degrees — viewing from front-right
+            viewer.cam.elevation = -28    # degrees — angled slightly down
 
         # Warm-up: pure IK, no VLA, no metrics — moves arm from ready pose
         # to cfg.start_pos so the experiment begins in the right configuration.
@@ -323,6 +381,12 @@ def run_trial(cfg: SceneConfig, use_cbf: bool,
             J   = jacp[:, :7]
             dq  = J.T @ np.linalg.inv(J @ J.T + 1e-3 * np.eye(3)) @ err
             data.qpos[:7] += 0.5 * np.clip(dq, -0.2, 0.2)
+            # Anchor block at its position and keep fingers open during warm-up
+            if has_grasp:
+                data.qpos[blk_qp:blk_qp+3]   = block_anchor
+                data.qpos[blk_qp+3:blk_qp+7] = [1, 0, 0, 0]
+                data.qvel[blk_qv:blk_qv+6]   = 0.0
+                data.qpos[7] = data.qpos[8]   = _FIN_OPEN
             mujoco.mj_forward(model, data)
             viewer.sync()
         ee_at_start = data.site_xpos[ee_site_id].copy()
@@ -338,9 +402,10 @@ def run_trial(cfg: SceneConfig, use_cbf: bool,
             with _vla_lock:
                 _vla_image = img
 
-            # Read latest VLA action
+            # Read latest VLA action (xyz EMA + full 7D raw)
             with _vla_lock:
-                d_ema = _delta_ema.copy()
+                d_ema      = _delta_ema.copy()
+                vla_delta  = _vla_action_raw.copy()   # full 7D for dataset
 
             # --- Ghost target update ----------------------------------------
             # Soft potential-field repulsion applied in BOTH modes for fairness
@@ -367,17 +432,51 @@ def run_trial(cfg: SceneConfig, use_cbf: bool,
             # --- CBF filter (CBF mode only) ----------------------------------
             cbf_triggered   = False
             correction_norm = 0.0
+            q_current       = data.qpos[:7].copy()
             if use_cbf:
-                dq_to_apply, correction_norm, cbf_triggered = _run_cbf(
+                dq_to_apply, u_nom, h_values, correction_norm, cbf_triggered = _run_cbf(
                     model, data, arm_bodies,
                     cfg.obstacles, dq_nominal, cfg.cbf_gamma,
                 )
             else:
                 dq_to_apply = dq_nominal
+                u_nom       = dq_nominal.copy()
+                h_values    = _compute_h_values(data, arm_bodies, cfg.obstacles)
 
             # --- Integrate --------------------------------------------------
             data.qpos[:7] += cfg.cbf_step_scale * dq_to_apply
             mujoco.mj_forward(model, data)
+
+            # --- Virtual grasp (rule-based) ---------------------------------
+            if has_grasp:
+                ee_pos    = data.site_xpos[ee_site_id]
+                dist_blk  = float(np.linalg.norm(ee_pos - block_anchor))
+                dist_goal = float(np.linalg.norm(ee_pos - cfg.goal_pos))
+
+                if not block_grasped:
+                    # Anchor block at its last placed position (spawn or goal region)
+                    data.qpos[blk_qp:blk_qp+3]   = block_anchor
+                    data.qpos[blk_qp+3:blk_qp+7] = [1, 0, 0, 0]
+                    data.qvel[blk_qv:blk_qv+6]   = 0.0
+                    data.qpos[7] = data.qpos[8]   = _FIN_OPEN
+                    if dist_blk < _GRASP_DIST:
+                        block_grasped = True
+                        print(f"  [Grasp] GRASPED  step={t}  dist={dist_blk:.3f} m")
+                else:
+                    # Block hangs below EE in world Z
+                    carry = np.array([ee_pos[0], ee_pos[1], ee_pos[2] - _CARRY_DROP])
+                    data.qpos[blk_qp:blk_qp+3]   = carry
+                    data.qpos[blk_qp+3:blk_qp+7] = [1, 0, 0, 0]
+                    data.qvel[blk_qv:blk_qv+6]   = 0.0
+                    data.qpos[7] = data.qpos[8]   = _FIN_CLOSED
+                    if dist_goal < _RELEASE_DIST:
+                        block_grasped = False
+                        block_anchor  = np.array([carry[0], carry[1], _BLOCK_Z])
+                        data.qpos[blk_qp:blk_qp+3]   = block_anchor
+                        data.qpos[blk_qp+3:blk_qp+7] = [1, 0, 0, 0]
+                        print(f"  [Grasp] PLACED   step={t}  "
+                              f"pos=({carry[0]:.2f}, {carry[1]:.2f})")
+                mujoco.mj_forward(model, data)
 
             # --- Metrics ----------------------------------------------------
             min_d, closest_obs, closest_body = _arm_obs_distances(
@@ -395,6 +494,13 @@ def run_trial(cfg: SceneConfig, use_cbf: bool,
                     cbf_triggered=cbf_triggered,
                     cbf_correction_norm=correction_norm,
                     violation=violation,
+                    q=q_current,
+                    u_nom=u_nom,
+                    u_safe=dq_to_apply.copy(),
+                    h_values=h_values,
+                    vla_delta=vla_delta,
+                    ghost_pos=ghost_pos.copy(),
+                    image=img.copy() if collect_dataset else None,
                 ),
                 goal_pos=cfg.goal_pos,
                 goal_tolerance=cfg.goal_tolerance,
@@ -418,6 +524,12 @@ def run_trial(cfg: SceneConfig, use_cbf: bool,
     if save_results:
         metrics.save_step_log(f"{results_dir}/{run_label}_steps.csv")
         metrics.save_summary( f"{results_dir}/{run_label}_summary.csv")
+
+    if collect_dataset and dataset_path:
+        metrics.save_dataset(dataset_path)
+        s_tmp = metrics.summary()
+        n_cbf = s_tmp.get("cbf_activations", 0)
+        print(f"  Dataset saved → {dataset_path}  ({n_cbf} CBF interventions)")
 
     s = metrics.summary()
     print(f"\n{'='*56}")
