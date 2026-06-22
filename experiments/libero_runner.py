@@ -71,17 +71,37 @@ _CBF_OSC_LAMBDA = 1e-3
 
 
 def _preprocess(img: np.ndarray) -> np.ndarray:
-    """Resize to 224x224 uint8 RGB and flip vertically.
+    """Flip vertically and resize to 224×224 uint8 RGB.
 
-    LIBERO fine-tuning data was loaded with a vertical flip applied (display
-    convention, y=0 at top).  OpenVLA therefore expects flipped images at
-    inference.  The raw agentview_image from robosuite is in OpenGL convention
-    (y=0 at bottom), so we flip here for both VLA input and display.
+    Both agentview and wrist cameras come out of robosuite in OpenGL convention
+    (y=0 at bottom).  OpenVLA-OFT training data was stored with a vertical flip
+    applied, so we flip here before sending to the server.
     """
     img = img[::-1].copy()
     if img.shape[:2] != (224, 224):
         img = cv2.resize(img, (224, 224))
     return img.astype(np.uint8)
+
+
+def _quat2axisangle(quat: np.ndarray) -> np.ndarray:
+    """Convert quaternion [x,y,z,w] to axis-angle (3-D).  Matches AEGIS/robosuite."""
+    import math as _math
+    q = quat.copy()
+    if q[3] > 1.0:  q[3] = 1.0
+    elif q[3] < -1.0: q[3] = -1.0
+    den = np.sqrt(1.0 - q[3] * q[3])
+    if _math.isclose(den, 0.0):
+        return np.zeros(3)
+    return (q[:3] * 2.0 * _math.acos(q[3])) / den
+
+
+def _build_proprio(obs: dict) -> np.ndarray:
+    """Build 8-D proprio state: eef_pos(3) + axis_angle(3) + gripper_qpos(2)."""
+    return np.concatenate([
+        np.array(obs["robot0_eef_pos"],     dtype=np.float64),
+        _quat2axisangle(np.array(obs["robot0_eef_quat"], dtype=np.float64)),
+        np.array(obs["robot0_gripper_qpos"], dtype=np.float64),
+    ])
 
 
 def _to_b64(img_rgb: np.ndarray) -> str:
@@ -90,17 +110,21 @@ def _to_b64(img_rgb: np.ndarray) -> str:
     return base64.b64encode(buf.getvalue()).decode()
 
 
-def _query_openvla_chunk(img_rgb: np.ndarray, instruction: str,
+def _query_openvla_chunk(img_rgb: np.ndarray, wrist_img_rgb: np.ndarray,
+                         state: np.ndarray, instruction: str,
                          num_actions: int = 5) -> list[np.ndarray]:
-    """Query the VLA server and return a chunk of `num_actions` raw 7-D actions.
+    """Query OpenVLA-OFT server; return chunk of `num_actions` raw 7-D actions.
 
-    The server's /act endpoint returns {"action": ..., "actions": [...]}.
-    Falls back to repeating "action" num_actions times if server is old.
+    Server expects: agentview image, wrist image, 8-D proprio state, instruction.
+    Returns list of numpy arrays, each shape (7,), already in action space
+    (the server's action head handles unnormalization).
     """
     r = requests.post(OPENVLA_URL,
-                      json={"image_base64":  _to_b64(img_rgb),
-                            "instruction":   instruction,
-                            "num_actions":   num_actions},
+                      json={"image_base64":       _to_b64(img_rgb),
+                            "wrist_image_base64":  _to_b64(wrist_img_rgb),
+                            "state":               state.tolist(),
+                            "instruction":         instruction,
+                            "num_actions":         num_actions},
                       timeout=120)
     r.raise_for_status()
     d = r.json()
@@ -108,7 +132,6 @@ def _query_openvla_chunk(img_rgb: np.ndarray, instruction: str,
         raise RuntimeError(f"VLA server error: {d}")
     if d.get("actions") and len(d["actions"]) >= 1:
         return [np.array(a, dtype=np.float64) for a in d["actions"]]
-    # Fallback: old server that only returns a single action
     single = np.array(d["action"], dtype=np.float64)
     return [single] * num_actions
 
@@ -310,7 +333,7 @@ def make_libero_env(task_suite: str = "libero_spatial",
         controller="OSC_POSE",          # matches OpenVLA fine-tuning setup
         camera_heights=224,
         camera_widths=224,
-        camera_names=["agentview"],
+        camera_names=["agentview", "robot0_eye_in_hand"],   # wrist cam needed for OFT
         has_renderer=has_renderer,
         has_offscreen_renderer=True,
         use_camera_obs=True,
@@ -571,21 +594,26 @@ def run_libero_trial(
     try:
         for t in range(horizon):
 
-            # ── 1. Get camera observation ─────────────────────────────────
-            img_raw = obs.get("agentview_image") if isinstance(obs, dict) else None
-            if img_raw is not None:
-                img = _preprocess(img_raw)
+            # ── 1. Camera observations ────────────────────────────────────
+            if isinstance(obs, dict):
+                img_raw   = obs.get("agentview_image")
+                wrist_raw = obs.get("robot0_eye_in_hand_image")
             else:
-                img = np.zeros((224, 224, 3), dtype=np.uint8)
+                img_raw = wrist_raw = None
+
+            img       = _preprocess(img_raw)   if img_raw   is not None else np.zeros((224, 224, 3), dtype=np.uint8)
+            wrist_img = _preprocess(wrist_raw) if wrist_raw is not None else np.zeros((224, 224, 3), dtype=np.uint8)
+            state     = _build_proprio(obs) if isinstance(obs, dict) else np.zeros(8)
 
             # ── 2. Synchronous replan: query VLA when queue is empty ──────
             if not action_queue:
                 try:
-                    raw_chunk = _query_openvla_chunk(img, instruction,
+                    raw_chunk = _query_openvla_chunk(img, wrist_img, state,
+                                                     instruction,
                                                      num_actions=replan_steps)
-                    vla_raw   = raw_chunk[0].copy()
+                    vla_raw      = raw_chunk[0].copy()
                     action_queue = [_post_process_vla(a) for a in raw_chunk]
-                    vla_cnt  += 1
+                    vla_cnt     += 1
                     print(f"  [{t:03d}] VLA #{vla_cnt}  gripper={action_queue[0][6]:+.1f}")
                 except Exception as e:
                     print(f"  [{t:03d}] VLA query error (holding last action): {e}")
