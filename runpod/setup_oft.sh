@@ -18,18 +18,12 @@ OFT_REPO="/workspace/openvla_oft_repo"
 MODEL_DEST="/workspace/vla_model"
 HF_MODEL="moojink/openvla-7b-oft-finetuned-libero-spatial"
 
-# ── 1. HuggingFace login ──────────────────────────────────────────────────────
+# ── 1. HuggingFace login (optional — model is public) ────────────────────────
 if [[ -n "${HF_TOKEN}" ]]; then
     echo "=== Logging in to HuggingFace with provided token ==="
     huggingface-cli login --token "${HF_TOKEN}"
 else
-    echo "=== Checking HuggingFace login ==="
-    if ! huggingface-cli whoami &>/dev/null; then
-        echo "Not logged in.  Run:  huggingface-cli login"
-        echo "Or set HF_TOKEN=hf_xxx and re-run this script."
-        exit 1
-    fi
-    echo "  Logged in as: $(huggingface-cli whoami)"
+    echo "=== Skipping HuggingFace login (model is public) ==="
 fi
 
 # ── 2. Clone and install openvla-oft repo ────────────────────────────────────
