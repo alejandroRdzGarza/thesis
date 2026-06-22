@@ -69,7 +69,7 @@ with open(path) as f:
 if "import dlimp as dl" in content:
     patched = content.replace(
         "import dlimp as dl",
-        "try:\n    import dlimp as dl\nexcept Exception:\n    dl = None  # not needed for inference"
+        "try:\n    import dlimp as dl\nexcept Exception:\n    class _DlimpStub:\n        class DLataset: pass\n    dl = _DlimpStub()  # stub for inference-only use"
     )
     with open(path, "w") as f:
         f.write(patched)
