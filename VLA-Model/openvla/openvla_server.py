@@ -53,17 +53,23 @@ class GenerateConfig:
     num_diffusion_steps_train:    int   = 100   # unused (use_diffusion=False)
     num_diffusion_steps_inference: int  = 10    # unused (use_diffusion=False)
 
+# LIBERO-Spatial constants (confirmed from prismatic/vla/constants.py).
+# Hardcoded to avoid importing prismatic.vla.constants which triggers the
+# training dataset import chain (dlimp → tfds → protobuf crash).
+NUM_ACTIONS_CHUNK = 8   # actions generated per inference call
+PROPRIO_DIM       = 8   # eef_pos(3) + axis_angle(3) + gripper_qpos(2)
+
 try:
     from experiments.robot.openvla_utils import (
         get_action_head, get_processor, get_proprio_projector,
         get_vla, get_vla_action,
     )
-    from prismatic.vla.constants import NUM_ACTIONS_CHUNK, PROPRIO_DIM
 except ImportError as e:
     raise RuntimeError(
         f"Cannot import openvla-oft: {e}\n"
         f"Clone and install: git clone https://github.com/moojink/openvla-oft {OFT_REPO} && "
-        f"pip install -e {OFT_REPO}"
+        f"pip install -e {OFT_REPO}\n"
+        f"Then patch: echo '' > {OFT_REPO}/prismatic/__init__.py"
     ) from e
 
 # ── Config ────────────────────────────────────────────────────────────────────
