@@ -38,12 +38,19 @@ fi
 echo "=== Installing openvla-oft package ==="
 pip install -e "${OFT_REPO}" --quiet
 
-# Verify key imports work (avoid run_libero_eval.py which imports libero)
+# Patch prismatic/__init__.py to avoid pulling in training-time dataset deps.
+# The full init chain imports dlimp -> tfds -> protobuf which crashes on
+# inference-only environments.  Inference only needs prismatic.extern.hf.*
+# and prismatic.models.action_heads, which import fine without the init.
+echo "=== Patching prismatic/__init__.py (remove training-time imports) ==="
+echo "# Emptied for inference-only use — training imports removed." \
+    > "${OFT_REPO}/prismatic/__init__.py"
+
+# Verify key imports work
 echo "=== Verifying OFT imports ==="
 python - <<'PYEOF'
 from experiments.robot.openvla_utils import get_action_head, get_processor, get_proprio_projector, get_vla, get_vla_action
-from prismatic.vla.constants import NUM_ACTIONS_CHUNK, PROPRIO_DIM
-print(f"  OK: PROPRIO_DIM={PROPRIO_DIM}  NUM_ACTIONS_CHUNK={NUM_ACTIONS_CHUNK}")
+print("  OK: openvla_utils imports passed")
 PYEOF
 
 # ── 3. Download model weights ────────────────────────────────────────────────
