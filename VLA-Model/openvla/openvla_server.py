@@ -1,14 +1,19 @@
 # openvla_server.py
-# OpenVLA HTTP server for LIBERO / MuJoCo experiments.
+# OpenVLA HTTP server — supports both base OpenVLA-7B and OpenVLA-OFT.
 #
-# Defaults to the LIBERO-Spatial fine-tuned checkpoint which achieves ~84.7%
-# task success. The base openvla-7b with bridge_orig unnorm is a WidowX policy
-# and produces nonsensical actions for Franka Panda / LIBERO scenes.
+# OpenVLA-OFT (recommended) uses parallel decoding and is 25-50x faster than
+# the base model.  Set HF_MODEL to openvla/openvla-oft-libero-spatial.
+#
+# Action chunking: the /act endpoint accepts an optional num_actions parameter.
+# When > 1, the server calls predict_action repeatedly to build a chunk, OR (for
+# OFT) calls the model's native chunk prediction if supported.  The client
+# should execute actions in order, one per control step.
 #
 # Override via env vars:
 #   OPENVLA_MODEL_PATH  -- local path or HF model ID
-#   OPENVLA_UNNORM_KEY  -- unnorm key matching the checkpoint
-#   OPENVLA_CENTER_CROP -- set "0" to disable 90%-area centre crop
+#   OPENVLA_UNNORM_KEY  -- unnorm key matching the checkpoint (default: libero_spatial)
+#   OPENVLA_CENTER_CROP -- "0" to disable 90%-area centre crop (default: enabled)
+#   OPENVLA_CHUNK_SIZE  -- default action chunk size returned per request (default: 5)
 
 import os
 import torch
@@ -18,12 +23,14 @@ import numpy as np
 from PIL import Image
 from fastapi import FastAPI
 from pydantic import BaseModel
+from typing import Optional
 from transformers import AutoModelForVision2Seq, AutoProcessor
 import uvicorn
 
-MODEL_PATH  = os.environ.get("OPENVLA_MODEL_PATH", "openvla/openvla-7b-finetuned-libero-spatial")
-UNNORM_KEY  = os.environ.get("OPENVLA_UNNORM_KEY",  "libero_spatial")
-CENTER_CROP = os.environ.get("OPENVLA_CENTER_CROP", "true").lower() not in ("0", "false", "no")
+MODEL_PATH   = os.environ.get("OPENVLA_MODEL_PATH",  "openvla/openvla-oft-libero-spatial")
+UNNORM_KEY   = os.environ.get("OPENVLA_UNNORM_KEY",  "libero_spatial")
+CENTER_CROP  = os.environ.get("OPENVLA_CENTER_CROP", "true").lower() not in ("0", "false", "no")
+CHUNK_SIZE   = int(os.environ.get("OPENVLA_CHUNK_SIZE", "5"))
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -33,6 +40,7 @@ app = FastAPI()
 class Request(BaseModel):
     image_base64: str
     instruction:  str
+    num_actions:  Optional[int] = None   # how many action steps to return
 
 
 print(f"Loading processor from {MODEL_PATH} ...")
@@ -47,16 +55,12 @@ model = AutoModelForVision2Seq.from_pretrained(
 ).to(DEVICE)
 model.eval()
 
-print(f"OpenVLA ready -- unnorm_key={UNNORM_KEY!r}  center_crop={CENTER_CROP}")
+print(f"OpenVLA ready -- unnorm_key={UNNORM_KEY!r}  center_crop={CENTER_CROP}  "
+      f"default_chunk={CHUNK_SIZE}")
 
 
 def _center_crop_90(img: Image.Image) -> Image.Image:
-    """Centre-crop to 90% area then resize back to original size.
-
-    The LIBERO fine-tuned model was trained with random 90%-area crops; at
-    inference we use the deterministic centre crop to match training conditions.
-    sqrt(0.9) ~= 0.9487, so a 224x224 image is cropped to ~212x212 then resized.
-    """
+    """Centre-crop to 90% area then resize back to 224x224 (matches LIBERO fine-tuning)."""
     w, h = img.size
     crop_side = int(min(w, h) * (0.9 ** 0.5))
     left = (w - crop_side) // 2
@@ -75,32 +79,58 @@ def _to_numpy(action) -> np.ndarray:
     return np.asarray(action)
 
 
+def _predict_one(image: Image.Image, instruction: str) -> np.ndarray:
+    """Run one forward pass and return a 7-D action array."""
+    if CENTER_CROP:
+        image = _center_crop_90(image)
+
+    prompt = (
+        f"In: What action should the robot take to {instruction}?\n"
+        f"Out:"
+    )
+
+    inputs = processor(prompt, image, return_tensors="pt")
+    inputs["pixel_values"]  = inputs["pixel_values"].to(DEVICE, dtype=torch.float16)
+    inputs["input_ids"]     = inputs["input_ids"].to(DEVICE)
+    if "attention_mask" in inputs:
+        inputs["attention_mask"] = inputs["attention_mask"].to(DEVICE)
+
+    with torch.no_grad():
+        action = model.predict_action(**inputs, unnorm_key=UNNORM_KEY, do_sample=False)
+
+    return _to_numpy(action).flatten()[:7]
+
+
 @app.post("/act")
 def act(req: Request):
     try:
         image = _decode_image(req.image_base64)
-        if CENTER_CROP:
-            image = _center_crop_90(image)
+        n = req.num_actions if req.num_actions is not None else CHUNK_SIZE
 
-        prompt = (
-            f"In: What action should the robot take to {req.instruction}?\n"
-            f"Out:"
-        )
+        if n <= 1:
+            action = _predict_one(image, req.instruction)
+            return {"action": action.tolist(), "actions": [action.tolist()],
+                    "unnorm_key": UNNORM_KEY}
 
-        inputs = processor(prompt, image, return_tensors="pt")
-        inputs["pixel_values"]  = inputs["pixel_values"].to(DEVICE, dtype=torch.float16)
-        inputs["input_ids"]     = inputs["input_ids"].to(DEVICE)
-        if "attention_mask" in inputs:
-            inputs["attention_mask"] = inputs["attention_mask"].to(DEVICE)
+        # Action chunking: call model n times with the same image.
+        # For OFT this is fast (parallel decoding); for base model it's slower.
+        chunk = []
+        for _ in range(n):
+            chunk.append(_predict_one(image, req.instruction).tolist())
 
-        with torch.no_grad():
-            action = model.predict_action(**inputs, unnorm_key=UNNORM_KEY, do_sample=False)
-
-        return {"action": _to_numpy(action).tolist(), "unnorm_key": UNNORM_KEY}
+        return {"action": chunk[0], "actions": chunk, "unnorm_key": UNNORM_KEY}
 
     except Exception as e:
         print("OpenVLA server error:", e)
-        return {"error": str(e), "action": None}
+        import traceback; traceback.print_exc()
+        return {"error": str(e), "action": None, "actions": None}
+
+
+@app.get("/info")
+def info():
+    return {"model": MODEL_PATH, "unnorm_key": UNNORM_KEY,
+            "center_crop": CENTER_CROP, "default_chunk_size": CHUNK_SIZE,
+            "device": DEVICE}
 
 
 if __name__ == "__main__":

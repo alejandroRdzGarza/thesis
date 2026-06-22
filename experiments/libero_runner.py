@@ -1,40 +1,27 @@
 """
-LIBERO/robosuite runner — replaces xml_builder + runner for LIBERO scenes.
+LIBERO runner — OpenVLA + CBF safety benchmark.
 
-What stays identical from the original pipeline
-------------------------------------------------
-  _run_cbf()            CBF-QP joint-velocity filter (imported from runner.py)
-  _compute_h_values()   barrier value computation
-  _potential_repulsion  ghost-target repulsion
-  MetricsTracker        per-step logging, save_dataset()
-  VLA HTTP thread       async OpenVLA queries
+Architecture (synchronous replan, matches AEGIS/OpenVLA-OFT eval):
+  Controller : OSC_POSE (Operational Space Control, same as OpenVLA LIBERO eval)
+  VLA        : synchronous HTTP call every `replan_steps` control steps
+  Action flow: VLA → normalize_gripper → invert_gripper → Cartesian CBF → env.step()
+  CBF        : QP in 3-D Cartesian EE-action space; filters action[:3] (xyz delta)
+               to ensure all arm link-obstacle barrier functions stay non-decreasing.
 
-What changes
-------------
-  Physics loop  : env.step(action) instead of mj_step + qpos override
-  Model/data    : env.sim.model / env.sim.data  (robosuite wraps native mujoco)
-  Camera image  : obs["agentview_image"]  (no separate Renderer needed)
-  EE position   : obs["robot0_eef_pos"]   (no site lookup needed)
-  Success check : info["success"]          (LIBERO / robosuite built-in)
-  Obstacles     : ObstacleConfig list, positions in world frame,
-                  used ONLY for CBF — not injected into physics
-
-Controller choice: JOINT_POSITION with control_delta=True mirrors our current
-  data.qpos[:7] += step_scale * dq_safe  approach exactly.
+No ghost target, no custom IK, no rule-based grasping.  The fine-tuned VLA
+provides all of those behaviours via its own internal representation.
 
 Usage
 -----
   from experiments.libero_runner import make_libero_env, run_libero_trial, list_tasks
 
   env, lang = make_libero_env("libero_spatial", task_idx=0)
-  metrics   = run_libero_trial(env, obstacles=[], instruction=lang, ...)
+  metrics   = run_libero_trial(env, obstacles=[], instruction=lang, goal_pos=...)
   env.close()
 """
 
 from __future__ import annotations
 
-import time
-import threading
 import numpy as np
 import cv2
 import requests
@@ -51,7 +38,6 @@ except ImportError:
 
 try:
     import robosuite as suite
-    from robosuite.controllers import load_controller_config
     _HAS_ROBOSUITE = True
 except ImportError:
     _HAS_ROBOSUITE = False
@@ -68,42 +54,31 @@ from experiments.metrics import MetricsTracker, StepRecord
 # ── Constants ──────────────────────────────────────────────────────────────────
 OPENVLA_URL = "http://127.0.0.1:8000/act"
 
-# Franka arm body names in robosuite's Panda model.
-# robosuite prefixes all robot bodies with "robot0_".
-# Fallback search also checks "link3" … "link7" substring.
 _ARM_BODY_NAMES = [
     "robot0_link3", "robot0_link4", "robot0_link5",
     "robot0_link6", "robot0_link7", "robot0_right_hand",
 ]
-
-# Joint names used to extract arm DOF indices from the full system Jacobian.
-# Critical: jacp has shape (3, model.nv). We slice only the 7 arm DOFs,
-# NOT [:, :7], because robosuite's DOF ordering is not guaranteed to start
-# with arm joints (gripper and object DOFs may be interleaved).
 _ARM_JOINT_NAMES = [f"robot0_joint{i}" for i in range(1, 8)]
 
-# JOINT_POSITION controller — max delta per step (rad).
-# action = clip(step_scale * dq / _MAX_DQ, -1, 1) → controller maps ±1 → ±_MAX_DQ
-_MAX_DQ    = 0.20
-_STEP_SCALE = 0.40    # mirrors SceneConfig.cbf_step_scale
+# No-op action for OSC_POSE: zero Cartesian delta, gripper open.
+_DUMMY_ACTION = np.array([0., 0., 0., 0., 0., 0., -1.], dtype=np.float64)
 
-_GRASP_DIST   = 0.18  # m — EE to object to trigger grasp
-_RELEASE_DIST = 0.10  # m — EE to goal to trigger release
+# Number of warm-up steps before querying VLA (lets physics settle after reset).
+_WARMUP_STEPS = 10
 
-
-# ── VLA async worker ───────────────────────────────────────────────────────────
-_vla_lock       = threading.Lock()
-_vla_image      = None
-_delta_ema      = np.zeros(3)
-_vla_action_raw = np.zeros(7)
-_vla_running    = False
-_vla_instruction = "pick up the object and place it at the goal location."
+# Damping for Jacobian pseudoinverse used in the Cartesian CBF.
+_CBF_OSC_LAMBDA = 1e-3
 
 
 def _preprocess(img: np.ndarray) -> np.ndarray:
-    """Resize to 224×224 uint8 RGB. robosuite images are already RGB but
-    returned upside-down (OpenGL convention); flip vertically."""
-    img = img[::-1].copy()            # flip vertically
+    """Resize to 224x224 uint8 RGB and flip vertically.
+
+    LIBERO fine-tuning data was loaded with a vertical flip applied (display
+    convention, y=0 at top).  OpenVLA therefore expects flipped images at
+    inference.  The raw agentview_image from robosuite is in OpenGL convention
+    (y=0 at bottom), so we flip here for both VLA input and display.
+    """
+    img = img[::-1].copy()
     if img.shape[:2] != (224, 224):
         img = cv2.resize(img, (224, 224))
     return img.astype(np.uint8)
@@ -115,118 +90,153 @@ def _to_b64(img_rgb: np.ndarray) -> str:
     return base64.b64encode(buf.getvalue()).decode()
 
 
-def _query_openvla(img_rgb: np.ndarray, instruction: str) -> np.ndarray:
+def _query_openvla_chunk(img_rgb: np.ndarray, instruction: str,
+                         num_actions: int = 5) -> list[np.ndarray]:
+    """Query the VLA server and return a chunk of `num_actions` raw 7-D actions.
+
+    The server's /act endpoint returns {"action": ..., "actions": [...]}.
+    Falls back to repeating "action" num_actions times if server is old.
+    """
     r = requests.post(OPENVLA_URL,
-                      json={"image_base64": _to_b64(img_rgb),
-                            "instruction":  instruction},
-                      timeout=60)
+                      json={"image_base64":  _to_b64(img_rgb),
+                            "instruction":   instruction,
+                            "num_actions":   num_actions},
+                      timeout=120)
     r.raise_for_status()
     d = r.json()
     if not d.get("action"):
         raise RuntimeError(f"VLA server error: {d}")
-    return np.array(d["action"], dtype=np.float32)
+    if d.get("actions") and len(d["actions"]) >= 1:
+        return [np.array(a, dtype=np.float64) for a in d["actions"]]
+    # Fallback: old server that only returns a single action
+    single = np.array(d["action"], dtype=np.float64)
+    return [single] * num_actions
 
 
-def _vla_worker(ema_alpha: float):
-    global _delta_ema, _vla_action_raw, _vla_running
-    while _vla_running:
-        with _vla_lock:
-            img  = _vla_image
-            inst = _vla_instruction
-        if img is not None:
-            try:
-                action = _query_openvla(img, inst)
-                delta  = np.clip(action[:3], -0.05, 0.05)
-                with _vla_lock:
-                    _delta_ema[:]      = ema_alpha * _delta_ema + (1 - ema_alpha) * delta
-                    _vla_action_raw[:] = action[:7]
-            except Exception:
-                pass
-        time.sleep(0.01)
+# ── OpenVLA gripper post-processing (from OpenVLA LIBERO eval script) ──────────
+def _normalize_gripper(action: np.ndarray, binarize: bool = True) -> np.ndarray:
+    """Map gripper from token-bin space [0, 1] to [-1, +1].
+
+    The VLA tokeniser represents the gripper as one of 256 bins.  The
+    unnorm step maps bins back to floats but the gripper dimension still
+    lives in [0, 1].  This rescales it to the robosuite convention.
+    binarize=True snaps to exactly {-1, +1} (cleaner for binary grippers).
+    """
+    a = action.copy()
+    a[6] = 2.0 * a[6] - 1.0
+    if binarize:
+        a[6] = 1.0 if a[6] > 0.0 else -1.0
+    return a
 
 
-# ── CBF helpers ────────────────────────────────────────────────────────────────
-def _compute_h_values(model, data, arm_body_ids: list[int],
-                      obstacles: list[ObstacleConfig]) -> list[float]:
-    if not obstacles:
-        return []
+def _invert_gripper(action: np.ndarray) -> np.ndarray:
+    """Flip gripper sign to match LIBERO's convention.
+
+    OpenVLA was pre-trained on Bridge V2 where the gripper convention is
+    opposite to LIBERO's robosuite setup.  The fine-tuned LIBERO checkpoint
+    still requires this inversion (the OpenVLA eval script applies it).
+    """
+    a = action.copy()
+    a[6] = -a[6]
+    return a
+
+
+def _post_process_vla(action: np.ndarray) -> np.ndarray:
+    """Apply OpenVLA's standard LIBERO post-processing to a raw 7-D action."""
+    return _invert_gripper(_normalize_gripper(action, binarize=True))
+
+
+# ── Cartesian CBF ───────────────────────────────────────────────────────────────
+def _compute_h_values_cartesian(data, arm_body_ids: list[int],
+                                obstacles: list[ObstacleConfig]) -> list[float]:
+    """Min h(q) per obstacle over all arm links (for monitoring/logging)."""
     h_per_obs = []
     for obs in obstacles:
-        min_h = min(
-            float(np.linalg.norm(data.xpos[bid] - obs.pos) ** 2
-                  - obs.safety_radius ** 2)
+        h_min = min(
+            float(np.linalg.norm(data.xpos[bid] - obs.pos) ** 2 - obs.safety_radius ** 2)
             for bid in arm_body_ids
         )
-        h_per_obs.append(min_h)
+        h_per_obs.append(h_min)
     return h_per_obs
 
 
-def _run_cbf(model, data, arm_body_ids: list[int],
-             arm_dof_indices: list[int],
-             obstacles: list[ObstacleConfig],
-             q_dot_nom: np.ndarray, gamma: float):
-    """CBF-QP filter.  Returns (u_safe, u_nom, h_per_obs, correction_norm, triggered)."""
-    num_joints = len(arm_dof_indices)
-    u_nom = np.asarray(q_dot_nom, dtype=float)
+def _run_cartesian_cbf(
+    model, data,
+    arm_body_ids: list[int],
+    arm_dof_idx:  list[int],
+    ee_body_id:   int,
+    obstacles:    list[ObstacleConfig],
+    u_nom_xyz:    np.ndarray,   # shape (3,): nominal EE position delta
+    gamma:        float,
+) -> tuple[np.ndarray, float, bool]:
+    """CBF-QP in 3-D Cartesian EE-action space.
 
-    if not obstacles:
-        return u_nom.copy(), u_nom, [], 0.0, False
+    For each (arm-link, obstacle) pair computes the Lie derivative of the
+    barrier h_{ij}(q) = ||p_i - p_obs_j||^2 - r_j^2 along the EE action
+    direction using the chain rule:
+
+        dh/dt ~= 2*(p_i - p_obs) @ J_link_i @ J_ee^+ @ u_xyz
+
+    CBF constraint: dh/dt + gamma*h >= 0
+      => [2*(p_i-p_obs) @ J_link_i @ J_ee^+] @ u_xyz  >=  -gamma * h
+
+    Solves a small 3-D QP:
+        min  ||u - u_nom||^2
+        s.t. A_k @ u >= b_k   for every (link, obstacle) pair k
+
+    Returns (u_safe_xyz, correction_norm, triggered).
+    """
+    if not obstacles or not arm_body_ids:
+        return u_nom_xyz.copy(), 0.0, False
+
+    # EE positional Jacobian (3 x 7)
+    jacp_ee = np.zeros((3, model.nv))
+    mujoco.mj_jacBody(model, data, jacp_ee, np.zeros((3, model.nv)), ee_body_id)
+    J_ee = jacp_ee[:, arm_dof_idx]                                          # 3x7
+    J_ee_pinv = J_ee.T @ np.linalg.inv(J_ee @ J_ee.T + _CBF_OSC_LAMBDA * np.eye(3))  # 7x3
 
     constraints = []
-    h_dict = {obs.name: float("inf") for obs in obstacles}
-
     for obs in obstacles:
         for bid in arm_body_ids:
             p_link = data.xpos[bid].copy()
-            dist   = np.linalg.norm(p_link - obs.pos)
-            h      = dist ** 2 - obs.safety_radius ** 2
-            h_dict[obs.name] = min(h_dict[obs.name], h)
+            diff   = p_link - obs.pos
+            h      = float(np.dot(diff, diff) - obs.safety_radius ** 2)
 
-            jacp = np.zeros((3, model.nv))
-            jacr = np.zeros((3, model.nv))
-            mujoco.mj_jacBody(model, data, jacp, jacr, bid)
-            J_link = jacp[:, arm_dof_indices]      # only arm DOFs
+            jacp_l = np.zeros((3, model.nv))
+            mujoco.mj_jacBody(model, data, jacp_l, np.zeros((3, model.nv)), bid)
+            J_link = jacp_l[:, arm_dof_idx]   # 3x7
 
-            def _con(u, p_l=p_link, J_l=J_link, h_val=h):
-                diff = p_l - obs.pos
-                A_i  = -2 * diff.dot(J_l)
-                b_i  = gamma * h_val * 0.4
-                return b_i - A_i.dot(u)
+            # Effective Jacobian: link velocity per unit EE action (3x3)
+            M = J_link @ J_ee_pinv
+            # Constraint row: A @ u_xyz >= -gamma*h
+            A = 2.0 * diff @ M    # (3,)
+            b = gamma * h
 
-            constraints.append({"type": "ineq", "fun": _con})
+            constraints.append({
+                "type": "ineq",
+                "fun":  lambda u, A=A, b=b: float(A @ u) + b,
+            })
 
     res = minimize(
-        lambda u: 0.5 * np.sum((u - u_nom) ** 2),
-        x0=u_nom, method="SLSQP", constraints=constraints,
+        lambda u: 0.5 * float(np.dot(u - u_nom_xyz, u - u_nom_xyz)),
+        x0=u_nom_xyz.copy(),
+        method="SLSQP",
+        constraints=constraints,
     )
-    u_safe          = res.x if res.success else np.zeros(num_joints)
-    correction_norm = float(np.linalg.norm(u_safe - u_nom))
-    cbf_triggered   = correction_norm > 1e-4
-    h_per_obs       = [h_dict[obs.name] for obs in obstacles]
-    return u_safe, u_nom, h_per_obs, correction_norm, cbf_triggered
-
-
-def _potential_repulsion(ghost_pos, obstacles, gain, cutoff):
-    force = np.zeros(3)
-    for obs in obstacles:
-        diff = ghost_pos - obs.pos
-        dist = np.linalg.norm(diff)
-        if 0 < dist < cutoff:
-            mag = gain * (1.0 / dist - 1.0 / cutoff) / dist ** 2
-            force += mag * (diff / dist)
-    return force
+    u_safe         = res.x if res.success else u_nom_xyz.copy()
+    corr_norm      = float(np.linalg.norm(u_safe - u_nom_xyz))
+    triggered      = corr_norm > 1e-4
+    return u_safe, corr_norm, triggered
 
 
 # ── Model introspection helpers ────────────────────────────────────────────────
 def _get_arm_body_ids(model) -> list[int]:
-    """Find Panda arm body IDs in robosuite's MjModel."""
     ids = []
     for name in _ARM_BODY_NAMES:
         bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name)
         if bid >= 0:
             ids.append(bid)
     if not ids:
-        # Fallback: substring match
         for i in range(model.nbody):
             bname = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, i) or ""
             if any(k in bname for k in ["link3","link4","link5","link6","link7","hand"]):
@@ -235,120 +245,69 @@ def _get_arm_body_ids(model) -> list[int]:
 
 
 def _get_arm_dof_indices(model) -> list[int]:
-    """Return column indices in the full Jacobian (model.nv wide) for the 7 arm joints."""
     dof_indices = []
     for jname in _ARM_JOINT_NAMES:
         jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, jname)
         if jid >= 0:
             dof_indices.append(int(model.jnt_dofadr[jid]))
     if not dof_indices:
-        # Last resort: assume first 7 DOFs are arm joints
         dof_indices = list(range(7))
     return dof_indices
 
 
 def _unwrap_sim(env):
-    """Return (MjModel, MjData) from a robosuite environment.
-
-    robosuite 1.4.x exposes env.sim.model and env.sim.data as native mujoco objects.
-    Some builds wrap them in a proxy; this unwraps both cases.
-    """
     sim   = env.sim
     model = getattr(sim, "model", None)
     data  = getattr(sim, "data",  None)
-    # Unwrap proxy wrappers (some robosuite versions)
     if model is not None and hasattr(model, "_model"):
         model = model._model
     if data is not None and hasattr(data, "_data"):
         data = data._data
     if model is None or data is None:
-        raise RuntimeError(
-            "Cannot extract MjModel/MjData from env.sim. "
-            "Try env.sim._model / env.sim._data for your robosuite version.")
+        raise RuntimeError("Cannot extract MjModel/MjData from env.sim.")
     return model, data
 
 
 # ── Environment factories ──────────────────────────────────────────────────────
-def _base_controller_cfg() -> dict:
-    """JOINT_POSITION controller with incremental (delta) mode."""
-    cfg = load_controller_config(default_controller="JOINT_POSITION")
-    cfg["control_delta"] = True
-    cfg["input_max"]     = 1.0
-    cfg["input_min"]     = -1.0
-    cfg["output_max"]    = _MAX_DQ    # action=1 → delta_q=0.20 rad
-    cfg["output_min"]    = -_MAX_DQ
-    return cfg
-
-
-def make_robosuite_env(task: str = "Lift",
-                       has_renderer: bool = False,
-                       horizon: int = 400) -> "suite.environments.robot.RobotEnv":
-    """Create a plain robosuite Panda environment (no LIBERO required).
-
-    Good for testing the integration before loading LIBERO tasks.
-    Tasks: "Lift", "PickPlace", "Stack", "NutAssembly", "TwoArmLift", ...
-    """
-    if not _HAS_ROBOSUITE:
-        raise RuntimeError("pip install robosuite")
-    return suite.make(
-        env_name=task,
-        robots="Panda",
-        controller_configs=_base_controller_cfg(),
-        has_renderer=has_renderer,
-        has_offscreen_renderer=True,
-        use_camera_obs=True,
-        camera_names=["agentview"],
-        camera_heights=224,
-        camera_widths=224,
-        control_freq=20,
-        horizon=horizon,
-        reward_shaping=False,
-        ignore_done=False,
-    )
-
-
 def make_libero_env(task_suite: str = "libero_spatial",
                     task_idx: int = 0,
+                    safety_level: str = "I",
                     has_renderer: bool = False,
-                    horizon: int = 400) -> tuple:
-    """Create a LIBERO environment.
+                    horizon: int = 800) -> tuple:
+    """Create a LIBERO or SafeLIBERO environment with OSC_POSE controller.
+
+    For SafeLIBERO suites (task_suite starts with 'safelibero_'), also loads
+    the 50-episode randomised initial states for the given task.
 
     Returns:
-        (env, language_instruction)  — pass the instruction to run_libero_trial().
-
-    Task suites:
-        libero_spatial   10 tasks, same objects different placements  ← start here
-        libero_object    10 tasks, different object types
-        libero_goal      10 tasks, different placement goals
-        libero_long      10 long-horizon multi-step tasks
-        libero_100       100 diverse tasks (takes longer to load)
+        (env, language_instruction, initial_states_or_None)
+        initial_states is a numpy array of shape (50, state_dim) for SafeLIBERO,
+        or None for standard LIBERO suites.
     """
     if not _HAS_LIBERO:
-        raise RuntimeError(
-            "LIBERO not installed.\n"
-            "  conda create -n libero python=3.10\n"
-            "  conda activate libero\n"
-            "  pip install -r requirements_libero.txt\n"
-            "  git clone https://github.com/Lifelong-Robot-Learning/LIBERO\n"
-            "  cd LIBERO && pip install -e .")
+        raise RuntimeError("LIBERO not installed. See requirements_libero.txt.")
 
     import os
     from libero.libero import get_libero_path
 
     benchmark_dict = _libero_benchmark.get_benchmark_dict()
-    task_suite_obj = benchmark_dict[task_suite]()
-    task           = task_suite_obj.get_task(task_idx)
-    language       = task.language
+    is_safe = task_suite.startswith("safelibero_")
 
-    # task.bddl_file is just the filename; env_wrapper needs the full path
+    if is_safe:
+        task_suite_obj = benchmark_dict[task_suite](safety_level=safety_level)
+    else:
+        task_suite_obj = benchmark_dict[task_suite]()
+
+    task     = task_suite_obj.get_task(task_idx)
+    language = task.language
+
     bddl_root = get_libero_path("bddl_files")
     bddl_full = os.path.join(bddl_root, task.problem_folder, task.bddl_file)
 
-    # LIBERO provides OffScreenRenderEnv / RobosuiteEnv wrappers
     from libero.libero.envs import OffScreenRenderEnv
     env = OffScreenRenderEnv(
         bddl_file_name=bddl_full,
-        controller="JOINT_POSITION",   # ControlEnv builds controller_configs internally
+        controller="OSC_POSE",          # matches OpenVLA fine-tuning setup
         camera_heights=224,
         camera_widths=224,
         camera_names=["agentview"],
@@ -357,49 +316,99 @@ def make_libero_env(task_suite: str = "libero_spatial",
         use_camera_obs=True,
         control_freq=20,
         horizon=horizon,
-        ignore_done=True,   # LIBERO overrides done with _check_success(); this prevents
-                            # robosuite from setting self.done=True on horizon exceeded,
-                            # which would crash the next step() call.
+        ignore_done=True,
     )
-    # Patch output scale on the live controller so action=±1 → ±_MAX_DQ rad
-    for robot in env.env.robots:
-        ctrl = robot.controller
-        ctrl.output_max[:] = _MAX_DQ
-        ctrl.output_min[:] = -_MAX_DQ
-    print(f"  LIBERO task [{task_idx}]: \"{language}\"")
-    return env, language
+
+    initial_states = None
+    if is_safe:
+        initial_states = task_suite_obj.get_task_init_states(task_idx)
+        print(f"  SafeLIBERO [{task_suite}] level={safety_level} task[{task_idx}]: \"{language}\"")
+        print(f"    {len(initial_states)} randomised episodes loaded")
+    else:
+        print(f"  LIBERO task [{task_idx}]: \"{language}\"")
+
+    return env, language, initial_states
 
 
-def list_tasks(suite_name: str = "libero_spatial") -> list[tuple[int, str]]:
+def make_robosuite_env(task: str = "Lift",
+                       has_renderer: bool = False,
+                       horizon: int = 400):
+    """Plain robosuite Panda env for quick testing (not used in benchmark)."""
+    if not _HAS_ROBOSUITE:
+        raise RuntimeError("pip install robosuite")
+    from robosuite.controllers import load_controller_config
+    osc_cfg = load_controller_config(default_controller="OSC_POSE")
+    return suite.make(
+        env_name=task, robots="Panda",
+        controller_configs=osc_cfg,
+        has_renderer=has_renderer, has_offscreen_renderer=True,
+        use_camera_obs=True, camera_names=["agentview"],
+        camera_heights=224, camera_widths=224,
+        control_freq=20, horizon=horizon,
+        reward_shaping=False, ignore_done=False,
+    )
+
+
+def list_tasks(suite_name: str = "libero_spatial",
+               safety_level: str = "I") -> list[tuple[int, str]]:
     """Print and return (index, language) for all tasks in a LIBERO suite."""
     if not _HAS_LIBERO:
         print("LIBERO not installed — see requirements_libero.txt")
         return []
     benchmark_dict = _libero_benchmark.get_benchmark_dict()
-    suite          = benchmark_dict[suite_name]()
-    tasks = [(i, suite.get_task(i).language) for i in range(suite.get_num_tasks())]
-    print(f"\n  Tasks in {suite_name}:")
+    if suite_name.startswith("safelibero_"):
+        s = benchmark_dict[suite_name](safety_level=safety_level)
+    else:
+        s = benchmark_dict[suite_name]()
+    tasks  = [(i, s.get_task(i).language) for i in range(s.get_num_tasks())]
+    print(f"\n  Tasks in {suite_name}" + (f" [level {safety_level}]" if suite_name.startswith("safelibero_") else "") + ":")
     for i, lang in tasks:
         print(f"    [{i:2d}] {lang}")
     return tasks
 
 
-# ── Obstacle helpers ───────────────────────────────────────────────────────────
+def detect_safelibero_obstacle(env, obs: dict,
+                                safety_radius: float = 0.10) -> ObstacleConfig | None:
+    """Auto-detect the active SafeLIBERO obstacle from the environment.
+
+    SafeLIBERO BDDL files place multiple obstacle objects in the scene but only
+    one of them lands within the robot workspace per episode (the others are
+    placed far off-table by the .pruned_init file).  This function identifies
+    the active obstacle by scanning joint names for 'obstacle' and checking
+    which object position falls within the workspace bounds.
+
+    Returns an ObstacleConfig for the active obstacle, or None if not found.
+    """
+    try:
+        joint_names = list(env.sim.model.joint_names)
+    except Exception:
+        return None
+
+    obstacle_names = [n.replace("_joint0", "") for n in joint_names if "obstacle" in n]
+    for name in obstacle_names:
+        key = f"{name}_pos"
+        if key not in obs:
+            continue
+        p = np.array(obs[key], dtype=float)
+        if p[2] > 0.5 and -0.5 < p[0] < 0.5 and -0.5 < p[1] < 0.5:
+            return ObstacleConfig(
+                pos=p.copy(),
+                radius=0.06,
+                safety_radius=safety_radius,
+                name=name,
+            )
+    return None
+
+
 def obs_from_libero(env_obs: dict, object_keys: list[str],
                     safety_radius: float = 0.10) -> list[ObstacleConfig]:
-    """Build ObstacleConfig list from LIBERO observation dict.
-
-    Pass the keys of objects you want treated as obstacles.
-    Example: obs_from_libero(obs, ["akita_black_bowl_1_pos", "wooden_tray_1_pos"])
-    """
+    """Build ObstacleConfig list from LIBERO observation keys."""
     obstacles = []
     for key in object_keys:
         if key in env_obs:
             pos = np.array(env_obs[key][:3], dtype=float)
             obstacles.append(ObstacleConfig(
-                pos=pos,
-                radius=0.04,
-                safety_radius=safety_radius,
+                pos=pos, radius=0.04, safety_radius=safety_radius,
                 name=key.replace("_pos", ""),
             ))
         else:
@@ -407,231 +416,255 @@ def obs_from_libero(env_obs: dict, object_keys: list[str],
     return obstacles
 
 
+# ── Visualization helper ───────────────────────────────────────────────────────
+_DISPLAY_SCALE = 2          # upscale factor for live viewer / saved video
+_STATUS_BAR_H  = 64         # height in pixels of the overlay bar (after upscale)
+
+
+def _render_frame(img_rgb: np.ndarray, t: int, horizon: int, mode: str,
+                  min_dist: float, cbf_triggered: bool, collision_flag: bool,
+                  episode_idx: int, vla_cnt: int) -> np.ndarray:
+    """Return a BGR display frame: upscaled camera image + status bar.
+
+    img_rgb has already been flipped by _preprocess (display convention).
+    """
+    s = _DISPLAY_SCALE
+    h, w = img_rgb.shape[:2]
+    frame = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+    frame = cv2.resize(frame, (w * s, h * s), interpolation=cv2.INTER_NEAREST)
+
+    bar = np.zeros((_STATUS_BAR_H, w * s, 3), dtype=np.uint8)
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    WHITE  = (220, 220, 220)
+    GRAY   = (130, 130, 130)
+    GREEN  = (60,  200, 60)
+    YELLOW = (0,   200, 200)
+    RED    = (60,  60,  220)
+
+    cbf_col  = YELLOW if cbf_triggered else GRAY
+    coll_col = RED    if collision_flag else GRAY
+
+    cv2.putText(bar, f"step {t:03d}/{horizon}",          (8,  22), font, 0.52, GRAY,  1)
+    cv2.putText(bar, f"[{mode.upper()}]",                (8,  50), font, 0.58, WHITE, 1)
+    cv2.putText(bar, f"obs {min_dist:.3f}m",             (160, 22), font, 0.52, WHITE, 1)
+    cv2.putText(bar, f"CBF {'ON' if cbf_triggered else 'off'}", (160, 50), font, 0.52, cbf_col, 1)
+    cv2.putText(bar, f"collision {'YES' if collision_flag else 'no'}", (310, 22), font, 0.52, coll_col, 1)
+    cv2.putText(bar, f"ep {episode_idx}  VLA #{vla_cnt}", (310, 50), font, 0.52, GRAY, 1)
+
+    return np.vstack([frame, bar])
+
+
 # ── Main trial loop ────────────────────────────────────────────────────────────
 def run_libero_trial(
     env,
     obstacles: list[ObstacleConfig],
     instruction: str,
-    goal_pos: np.ndarray,
+    goal_pos: np.ndarray | None = None,
     use_cbf: bool = True,
     cbf_gamma: float = 1.8,
-    goal_attract: float = 0.01,
-    vla_scale: float = 1.0,
-    repulsion_gain: float = 0.012,
-    repulsion_cutoff: float = 0.25,
-    ema_alpha: float = 0.30,
     goal_tolerance: float = 0.08,
     scene_name: str = "libero",
     collect_dataset: bool = False,
     save_results: bool = False,
     results_dir: str = "results",
     dataset_path: str | None = None,
-    target_obj_key: str | None = None,
     show_viewer: bool = False,
     save_video: str | None = None,
+    # SafeLIBERO episode parameters
+    episode_idx: int = 0,
+    initial_states=None,
+    auto_detect_obstacle: bool = False,
+    obstacle_safety_radius: float = 0.10,
+    # Synchronous replan parameters (AEGIS approach)
+    replan_steps: int = 5,
 ) -> MetricsTracker:
-    """Run one episode in a robosuite/LIBERO environment with optional CBF filter.
+    """Run one LIBERO episode using OpenVLA + optional Cartesian CBF.
 
-    Args:
-        env:         Environment created by make_libero_env() or make_robosuite_env().
-                     Call env.reset() is done inside this function.
-        obstacles:   CBF obstacle zones (world-frame positions + radii).
-                     These are PURELY for the CBF filter — not physics objects.
-                     Pass [] to run without safety constraints.
-        instruction: Language instruction string passed to OpenVLA.
-        goal_pos:    Goal position in world frame [x, y, z].
-                     Used for the ghost-target attractor AND TSR fallback check.
-        use_cbf:     Apply CBF-QP filter to joint velocities.
-        ...          (tuning params match SceneConfig; see field docstrings there)
-        collect_dataset: Save camera images in StepRecord (for .npz dataset export).
-        save_results: Write CSV step log and summary to results_dir/.
-        dataset_path: If set and collect_dataset=True, saves .npz here.
+    Action pipeline (matches AEGIS synchronous replan approach):
+      1. Every `replan_steps` control steps, synchronously query VLA server
+         for a chunk of `replan_steps` actions.
+      2. Execute each action in the chunk sequentially (one per control step).
+      3. _normalize_gripper()  maps gripper [0,1] -> [-1,+1], then binarises
+      4. _invert_gripper()     flips sign to match LIBERO robosuite convention
+      5. _run_cartesian_cbf()  (when use_cbf=True) filters action[:3] to keep
+                               all arm links outside obstacle safety zones
+      6. env.step(action)      OSC_POSE controller handles Cartesian -> joint
 
-    Returns:
-        Populated MetricsTracker (call .summary() for CAR/TSR/ETS values).
+    SafeLIBERO mode: pass initial_states (from make_libero_env) and
+    auto_detect_obstacle=True to use per-episode randomised scenes and
+    displacement-based collision detection matching the AEGIS paper.
     """
-    global _vla_image, _delta_ema, _vla_action_raw, _vla_running, _vla_instruction
-
     if not _HAS_MUJOCO:
         raise RuntimeError("mujoco not available in this environment")
 
-    mode             = "cbf" if use_cbf else "plain"
-    _vla_instruction = instruction
+    mode = "cbf" if use_cbf else "plain"
 
-    # ── Video writer setup ────────────────────────────────────────────────────
+    # ── Video writer ─────────────────────────────────────────────────────────
     _vwriter = None
+    _frame_w = 224 * _DISPLAY_SCALE
+    _frame_h = 224 * _DISPLAY_SCALE + _STATUS_BAR_H
     if save_video:
         import os
         os.makedirs(os.path.dirname(save_video) or ".", exist_ok=True)
         _vwriter = cv2.VideoWriter(
-            save_video,
-            cv2.VideoWriter_fourcc(*"mp4v"),
-            20,                          # fps ≈ control_freq
-            (224, 224),
-        )
+            save_video, cv2.VideoWriter_fourcc(*"mp4v"), 20, (_frame_w, _frame_h))
 
-    # ── Reset & initial observation ──────────────────────────────────────────
-    reset_result = env.reset()
-    obs = reset_result[0] if isinstance(reset_result, tuple) else reset_result
+    # ── Reset env and load SafeLIBERO episode state ──────────────────────────
+    env.reset()
+    if initial_states is not None:
+        obs = env.set_init_state(initial_states[episode_idx])
+    else:
+        reset_result = env.reset()
+        obs = reset_result[0] if isinstance(reset_result, tuple) else reset_result
 
-    # ── Extract native MuJoCo model/data ─────────────────────────────────────
-    model, data = _unwrap_sim(env)
-    arm_body_ids  = _get_arm_body_ids(model)
-    arm_dof_idx   = _get_arm_dof_indices(model)
+    # ── Extract MuJoCo model/data for CBF Jacobian computation ───────────────
+    model, data  = _unwrap_sim(env)
+    arm_body_ids = _get_arm_body_ids(model)
+    arm_dof_idx  = _get_arm_dof_indices(model)
+    ee_body_id   = arm_body_ids[-1] if arm_body_ids else 0
     print(f"  Arm bodies: {len(arm_body_ids)}  Arm DOFs: {arm_dof_idx}")
-
-    # ── Initialise ghost target at current EE position ───────────────────────
-    ee_pos    = np.array(obs["robot0_eef_pos"], dtype=float)
-    ghost_pos = ee_pos.copy()
-
-    # ── Virtual grasp state ───────────────────────────────────────────────────
-    # Try to read target object position from obs for virtual-grasp tracking.
-    # Prefer the explicitly named key; fall back to first _pos key found.
-    def _get_object_pos(ob: dict) -> np.ndarray | None:
-        if target_obj_key and target_obj_key in ob:
-            return np.array(ob[target_obj_key][:3], dtype=float)
-        for key in ob:
-            if key.endswith("_pos") and key not in ("robot0_eef_pos",):
-                return np.array(ob[key][:3], dtype=float)
-        return None
-
-    object_pos    = _get_object_pos(obs)
-    block_grasped = False
 
     metrics = MetricsTracker(scene_name, mode)
 
-    # ── Start VLA thread ──────────────────────────────────────────────────────
-    _delta_ema[:]      = 0.0
-    _vla_action_raw[:] = 0.0
-    _vla_image         = None
-    _vla_running       = True
-    vla_thread = threading.Thread(
-        target=_vla_worker, args=(ema_alpha,), daemon=True
-    )
-    vla_thread.start()
+    goal_str = np.round(goal_pos, 3) if goal_pos is not None else "auto"
+    print(f"\n  [{scene_name}] ep={episode_idx}  mode={mode.upper()}  "
+          f"obstacles={len(obstacles)}  goal={goal_str}  replan={replan_steps}")
 
-    print(f"\n  [{scene_name}] mode={mode.upper()}  "
-          f"obstacles={len(obstacles)}  goal={np.round(goal_pos, 3)}")
+    # ── Warm-up: let physics settle before querying VLA ───────────────────────
+    for _ in range(_WARMUP_STEPS):
+        step_out = env.step(_DUMMY_ACTION.tolist())
+        if isinstance(step_out, tuple):
+            obs = step_out[0]
+        else:
+            obs = step_out
 
-    horizon = getattr(env, "horizon", 400)
+    # ── SafeLIBERO obstacle auto-detection ────────────────────────────────────
+    # After warm-up, scan env joint names for obstacle objects that have
+    # settled within the workspace bounds, then build the CBF obstacle config.
+    if auto_detect_obstacle:
+        detected = detect_safelibero_obstacle(env, obs, safety_radius=obstacle_safety_radius)
+        if detected is not None:
+            obstacles = [detected]
+            print(f"  Obstacle detected: '{detected.name}' at {np.round(detected.pos, 3)}"
+                  f"  r_safe={obstacle_safety_radius:.2f}m")
+        else:
+            obstacles = []
+            print("  [warn] No obstacle found in workspace — running without CBF obstacles")
+
+    # Record initial obstacle position for displacement-based collision check.
+    _obstacle_name: str | None = None
+    _initial_obstacle_pos: np.ndarray | None = None
+    if obstacles:
+        # Use the first obstacle's name to track position from obs dict.
+        _obstacle_name = obstacles[0].name
+        _obs_key = f"{_obstacle_name}_pos"
+        if _obs_key in obs:
+            _initial_obstacle_pos = np.array(obs[_obs_key], dtype=float).copy()
+    _collision_flag = False
+
+    horizon      = getattr(env, "horizon", 800)
+    action_queue: list[np.ndarray] = []   # pending post-processed actions from last chunk
+    vla_cnt      = 0                       # total VLA calls made (for display)
+    _current_action = _DUMMY_ACTION.copy()
+    vla_raw      = np.zeros(7)
 
     try:
         for t in range(horizon):
 
-            # ── 1. Camera → VLA worker ────────────────────────────────────
-            img_raw = obs.get("agentview_image")
+            # ── 1. Get camera observation ─────────────────────────────────
+            img_raw = obs.get("agentview_image") if isinstance(obs, dict) else None
             if img_raw is not None:
                 img = _preprocess(img_raw)
-                with _vla_lock:
-                    _vla_image = img
             else:
                 img = np.zeros((224, 224, 3), dtype=np.uint8)
 
-            # Live viewer and/or video recording
+            # ── 2. Synchronous replan: query VLA when queue is empty ──────
+            if not action_queue:
+                try:
+                    raw_chunk = _query_openvla_chunk(img, instruction,
+                                                     num_actions=replan_steps)
+                    vla_raw   = raw_chunk[0].copy()
+                    action_queue = [_post_process_vla(a) for a in raw_chunk]
+                    vla_cnt  += 1
+                    print(f"  [{t:03d}] VLA #{vla_cnt}  gripper={action_queue[0][6]:+.1f}")
+                except Exception as e:
+                    print(f"  [{t:03d}] VLA query error (holding last action): {e}")
+                    action_queue = [_current_action.copy()]
+
+            _current_action = action_queue.pop(0)
+
+            # ── 3. CBF filter on xyz component ────────────────────────────
+            ee_pos          = np.array(obs["robot0_eef_pos"], dtype=float)
+            safe_action     = _current_action.copy()
+            cbf_triggered   = False
+            correction_norm = 0.0
+
+            if use_cbf and obstacles and arm_body_ids:
+                u_safe_xyz, correction_norm, cbf_triggered = _run_cartesian_cbf(
+                    model, data, arm_body_ids, arm_dof_idx, ee_body_id,
+                    obstacles, _current_action[:3], cbf_gamma,
+                )
+                safe_action[:3] = u_safe_xyz
+
+            # ── 4. Safety monitoring ──────────────────────────────────────
+            if obstacles and arm_body_ids:
+                dists_to_obs = [
+                    float(np.linalg.norm(data.xpos[bid] - ob.pos))
+                    for ob in obstacles for bid in arm_body_ids
+                ]
+                min_d     = min(dists_to_obs)
+                violation = any(
+                    np.linalg.norm(data.xpos[bid] - ob.pos) < ob.safety_radius
+                    for ob in obstacles for bid in arm_body_ids
+                )
+                h_values = _compute_h_values_cartesian(data, arm_body_ids, obstacles)
+            else:
+                min_d, violation = float("inf"), False
+                h_values = [float("inf")]
+
+            # ── 5. Display ────────────────────────────────────────────────
             if show_viewer or _vwriter is not None:
-                # Annotate frame with step / goal dist / CBF status
-                frame_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-                cv2.putText(frame_bgr, f"t={t}", (4, 16),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255,255,255), 1)
+                frame_disp = _render_frame(
+                    img, t, horizon, mode, min_d, cbf_triggered,
+                    _collision_flag, episode_idx, vla_cnt,
+                )
                 if _vwriter is not None:
-                    _vwriter.write(frame_bgr)
+                    _vwriter.write(frame_disp)
                 if show_viewer:
-                    cv2.imshow(f"LIBERO — {scene_name} [{mode}]", frame_bgr)
+                    cv2.imshow(f"LIBERO — {scene_name} [{mode}]", frame_disp)
                     if cv2.waitKey(1) & 0xFF == ord("q"):
                         break
 
-            # ── 2. Read latest VLA output ─────────────────────────────────
-            with _vla_lock:
-                d_ema     = _delta_ema.copy()
-                vla_delta = _vla_action_raw.copy()
-
-            # ── 3. Ghost target update ────────────────────────────────────
-            ee_pos = np.array(obs["robot0_eef_pos"], dtype=float)
-            repulsion = _potential_repulsion(ee_pos, obstacles,
-                                            repulsion_gain, repulsion_cutoff)
-            # Ghost is anchored to the current EE each step (velocity setpoint
-            # semantics): ghost = EE + VLA_direction + soft_goal_pull + repulsion.
-            # Anchoring prevents the 20Hz accumulation that caused runaway drift
-            # when VLA only fires at ~1Hz.
-            if np.linalg.norm(d_ema) > 1e-6:
-                ghost_pos = ee_pos + vla_scale * d_ema + goal_attract * (goal_pos - ee_pos)
-            else:
-                # VLA not yet running (cold-start): pull ghost toward goal
-                ghost_pos = ee_pos + goal_attract * (goal_pos - ee_pos)
-            ghost_pos = ghost_pos + repulsion
-
-            # ── 4. Nominal IK toward ghost ────────────────────────────────
-            if arm_body_ids and arm_dof_idx:
-                ee_bid = arm_body_ids[-1]    # hand / right_hand = last body
-                jacp   = np.zeros((3, model.nv))
-                jacr   = np.zeros((3, model.nv))
-                mujoco.mj_jacBody(model, data, jacp, jacr, ee_bid)
-                J          = jacp[:, arm_dof_idx]      # (3, 7) arm-only Jacobian
-                err        = ghost_pos - ee_pos
-                dq_nominal = J.T @ np.linalg.inv(J @ J.T + 1e-3 * np.eye(3)) @ err
-                dq_nominal = np.clip(dq_nominal, -0.2, 0.2)
-            else:
-                dq_nominal = np.zeros(7)
-
-            q_current = np.array(obs.get("robot0_joint_pos", np.zeros(7)), dtype=float)
-
-            # ── 5. CBF filter ─────────────────────────────────────────────
-            cbf_triggered   = False
-            correction_norm = 0.0
-            if use_cbf and obstacles:
-                dq_safe, u_nom, h_values, correction_norm, cbf_triggered = _run_cbf(
-                    model, data, arm_body_ids, arm_dof_idx,
-                    obstacles, dq_nominal, cbf_gamma,
-                )
-            else:
-                dq_safe  = dq_nominal.copy()
-                u_nom    = dq_nominal.copy()
-                h_values = _compute_h_values(model, data, arm_body_ids, obstacles)
-
-            # ── 6. Gripper (rule-based virtual grasp) ─────────────────────
-            if object_pos is not None:
-                # Update object pos from obs each step (LIBERO moves real objects)
-                obj_pos_now = _get_object_pos(obs) if _get_object_pos(obs) is not None else object_pos
-                dist_obj  = float(np.linalg.norm(ee_pos - obj_pos_now))
-                dist_goal = float(np.linalg.norm(ee_pos - goal_pos))
-                if not block_grasped and dist_obj < _GRASP_DIST:
-                    block_grasped = True
-                    print(f"  [Grasp] GRASPED  step={t}  dist={dist_obj:.3f} m")
-                elif block_grasped and dist_goal < _RELEASE_DIST:
-                    block_grasped = False
-                    print(f"  [Grasp] PLACED   step={t}")
-            gripper = np.array([1.0 if block_grasped else -1.0])
-
-            # ── 7. Step environment ───────────────────────────────────────
-            # Normalise dq to [-1, 1]; controller maps ±1 → ±_MAX_DQ rad
-            action_arm = np.clip(_STEP_SCALE * dq_safe / _MAX_DQ, -1.0, 1.0)
-            action     = np.concatenate([action_arm, gripper])
-            step_out   = env.step(action)
+            # ── 6. Step environment ───────────────────────────────────────
+            step_out = env.step(safe_action.tolist())
             if len(step_out) == 4:
                 obs, reward, done, info = step_out
             else:
                 obs, reward, terminated, truncated, info = step_out
                 done = terminated or truncated
 
-            # ── 8. Safety monitoring ──────────────────────────────────────
-            if obstacles and arm_body_ids:
-                min_d = min(
-                    float(np.linalg.norm(data.xpos[bid] - ob.pos))
-                    for ob in obstacles for bid in arm_body_ids
-                )
-                violation = any(
-                    np.linalg.norm(data.xpos[bid] - ob.pos) < ob.safety_radius
-                    for ob in obstacles for bid in arm_body_ids
-                )
-            else:
-                min_d, violation = float("inf"), False
+            # ── 7. Displacement-based collision check (SafeLIBERO metric) ─
+            if (not _collision_flag
+                    and _obstacle_name is not None
+                    and _initial_obstacle_pos is not None):
+                _obs_key = f"{_obstacle_name}_pos"
+                if _obs_key in obs:
+                    curr_obs_pos = np.array(obs[_obs_key], dtype=float)
+                    if np.sum(np.abs(curr_obs_pos - _initial_obstacle_pos)) > 0.001:
+                        _collision_flag = True
+                        print(f"  [{t:03d}] COLLISION: obstacle displaced "
+                              f"{np.sum(np.abs(curr_obs_pos - _initial_obstacle_pos)):.4f}m")
 
-            # Success: prefer env's own checker, fall back to distance
+            # ── 8. Success check ──────────────────────────────────────────
             success_flag = bool(info.get("success", False))
-            if not success_flag:
+            if success_flag:
+                metrics.mark_goal_reached(t)
+            elif goal_pos is not None:
                 success_flag = float(np.linalg.norm(ee_pos - goal_pos)) < goal_tolerance
 
             # ── 9. Record ─────────────────────────────────────────────────
+            q_current = np.array(obs.get("robot0_joint_pos", np.zeros(7)), dtype=float)
+            _gp = goal_pos if goal_pos is not None else np.zeros(3)
             metrics.record(
                 StepRecord(
                     step=t,
@@ -642,31 +675,34 @@ def run_libero_trial(
                     cbf_triggered=cbf_triggered,
                     cbf_correction_norm=correction_norm,
                     violation=violation,
+                    collision_flag=_collision_flag,
                     q=q_current,
-                    u_nom=u_nom,
-                    u_safe=dq_safe.copy(),
-                    h_values=h_values if h_values else [float("inf")],
-                    vla_delta=vla_delta,
-                    ghost_pos=ghost_pos.copy(),
+                    u_nom=_current_action.copy(),
+                    u_safe=safe_action.copy(),
+                    h_values=h_values,
+                    vla_delta=vla_raw.copy(),
+                    ghost_pos=None,
                     image=img.copy() if collect_dataset else None,
                 ),
-                goal_pos=goal_pos,
+                goal_pos=_gp,
                 goal_tolerance=goal_tolerance,
             )
 
             if t % 20 == 0:
                 flags = []
-                if violation:     flags.append("VIOLATION")
-                if cbf_triggered: flags.append("[CBF]")
-                print(f"  [{t:03d}] d_goal={np.linalg.norm(ee_pos-goal_pos):.3f}m  "
+                if _collision_flag: flags.append("COLLISION")
+                if violation:       flags.append("VIOLATION")
+                if cbf_triggered:   flags.append("[CBF]")
+                if success_flag:    flags.append("SUCCESS")
+                d_goal = (f"{np.linalg.norm(ee_pos - goal_pos):.3f}m"
+                          if goal_pos is not None else "n/a")
+                print(f"  [{t:03d}] d_goal={d_goal}  "
                       f"min_obs={min_d:.3f}m  {'  '.join(flags)}")
 
-            if done:
+            if done or success_flag:
                 break
 
     finally:
-        _vla_running = False
-        vla_thread.join(timeout=2.0)
         if _vwriter is not None:
             _vwriter.release()
         if show_viewer:
@@ -685,6 +721,7 @@ def run_libero_trial(
 
     s = metrics.summary()
     print(f"  Done — TSR={s['goal_reached']}  "
+          f"collision={s['collision_detected']}  "
           f"CBF={s['cbf_activations']} acts  "
           f"violations={s['violation_steps']}")
     return metrics
