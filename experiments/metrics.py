@@ -31,7 +31,9 @@ class StepRecord:
     h_values:  list             # [float] min h(q) per obstacle (positive = safe)
     vla_delta: np.ndarray       # (7,)  raw VLA action [dx,dy,dz,droll,dpitch,dyaw,grip]
 
-    ghost_pos: np.ndarray = None       # (3,) ghost target xyz (for IK tracking diagnosis)
+    # ── Fields with defaults (must follow all non-default fields) ───────────
+    collision_flag: bool = False  # SafeLIBERO ground-truth: obstacle displaced > 0.001 m
+    ghost_pos: np.ndarray = None
 
     # ── Optional (only when collect_dataset=True) ────────────────────────────
     image: np.ndarray | None = None   # (224, 224, 3) uint8, static_cam frame
@@ -47,6 +49,7 @@ class MetricsTracker:
         self._prev_ee_pos: np.ndarray | None = None
         self._path_length: float = 0.0
         self._goal_reach_step: int | None = None
+        self._collision_step: int | None = None
 
     def record(self, rec: StepRecord, goal_pos: np.ndarray, goal_tolerance: float):
         self._records.append(rec)
@@ -58,6 +61,18 @@ class MetricsTracker:
         if (self._goal_reach_step is None
                 and np.linalg.norm(rec.ee_pos - goal_pos) < goal_tolerance):
             self._goal_reach_step = rec.step
+
+        if self._collision_step is None and rec.collision_flag:
+            self._collision_step = rec.step
+
+    def mark_goal_reached(self, step: int):
+        """Explicitly mark the goal as reached at a given step.
+
+        Used when success is detected via info['success'] rather than EE
+        position distance (e.g. SafeLIBERO where goal_pos is None).
+        """
+        if self._goal_reach_step is None:
+            self._goal_reach_step = step
 
     def summary(self) -> dict:
         if not self._records:
@@ -83,6 +98,8 @@ class MetricsTracker:
             "path_length_m":            round(self._path_length, 4),
             "goal_reached":             self._goal_reach_step is not None,
             "goal_reach_step":          self._goal_reach_step if self._goal_reach_step is not None else -1,
+            "collision_detected":       self._collision_step is not None,
+            "collision_step":           self._collision_step if self._collision_step is not None else -1,
         }
 
     def get_records(self) -> list:
@@ -97,7 +114,7 @@ class MetricsTracker:
                 "step", "ee_x", "ee_y", "ee_z",
                 "min_dist", "h_min",
                 "closest_obstacle", "closest_body",
-                "cbf_triggered", "cbf_correction_norm", "violation",
+                "cbf_triggered", "cbf_correction_norm", "violation", "collision_flag",
             ]
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
@@ -114,6 +131,7 @@ class MetricsTracker:
                     "cbf_triggered":        int(r.cbf_triggered),
                     "cbf_correction_norm":  round(r.cbf_correction_norm, 6),
                     "violation":            int(r.violation),
+                    "collision_flag":       int(r.collision_flag),
                 })
 
     def save_summary(self, path: str | Path):
