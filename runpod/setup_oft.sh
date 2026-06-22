@@ -55,6 +55,29 @@ for _init in \
     echo "  patched: ${_init}"
 done
 
+# Fix protobuf version: tensorflow_metadata needs >= 4.21 but older may be installed.
+echo "=== Upgrading protobuf (needed by tensorflow_metadata) ==="
+pip install -q "protobuf>=4.21.0"
+
+# Patch data_utils.py: dlimp is imported at module level but only used in
+# dataset-loading functions that are never called during inference.
+echo "=== Patching data_utils.py (lazy dlimp import) ==="
+python3 - <<'PYEOF'
+path = "/workspace/openvla_oft_repo/prismatic/vla/datasets/rlds/utils/data_utils.py"
+with open(path) as f:
+    content = f.read()
+if "import dlimp as dl" in content:
+    patched = content.replace(
+        "import dlimp as dl",
+        "try:\n    import dlimp as dl\nexcept Exception:\n    dl = None  # not needed for inference"
+    )
+    with open(path, "w") as f:
+        f.write(patched)
+    print(f"  Patched: {path}")
+else:
+    print(f"  Already patched: {path}")
+PYEOF
+
 # Verify key imports work
 echo "=== Verifying OFT imports ==="
 python - <<'PYEOF'
