@@ -38,13 +38,22 @@ fi
 echo "=== Installing openvla-oft package ==="
 pip install -e "${OFT_REPO}" --quiet
 
-# Patch prismatic/__init__.py to avoid pulling in training-time dataset deps.
-# The full init chain imports dlimp -> tfds -> protobuf which crashes on
-# inference-only environments.  Inference only needs prismatic.extern.hf.*
-# and prismatic.models.action_heads, which import fine without the init.
-echo "=== Patching prismatic/__init__.py (remove training-time imports) ==="
-echo "# Emptied for inference-only use — training imports removed." \
-    > "${OFT_REPO}/prismatic/__init__.py"
+# Patch all prismatic subpackage __init__.py files that pull in training-time
+# dataset dependencies (dlimp -> tfds -> protobuf crash on inference pods).
+# Inference only needs prismatic.extern.hf.* and prismatic.models.action_heads,
+# which are direct .py file imports and work fine without __init__ re-exports.
+echo "=== Patching prismatic __init__.py files (remove training-time imports) ==="
+for _init in \
+    "${OFT_REPO}/prismatic/__init__.py" \
+    "${OFT_REPO}/prismatic/training/__init__.py" \
+    "${OFT_REPO}/prismatic/models/__init__.py" \
+    "${OFT_REPO}/prismatic/models/vlas/__init__.py" \
+    "${OFT_REPO}/prismatic/vla/__init__.py" \
+    "${OFT_REPO}/prismatic/vla/datasets/__init__.py" \
+    "${OFT_REPO}/prismatic/vla/datasets/rlds/__init__.py"; do
+    echo "# Emptied for inference-only use." > "${_init}"
+    echo "  patched: ${_init}"
+done
 
 # Verify key imports work
 echo "=== Verifying OFT imports ==="
