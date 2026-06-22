@@ -32,8 +32,28 @@ OFT_REPO = os.environ.get("OPENVLA_OFT_REPO", "/workspace/openvla_oft_repo")
 if OFT_REPO not in sys.path:
     sys.path.insert(0, OFT_REPO)
 
+from dataclasses import dataclass, field
+
+# Define GenerateConfig here to avoid importing run_libero_eval.py,
+# which imports libero at module level (not needed for inference).
+@dataclass
+class GenerateConfig:
+    pretrained_checkpoint:        str   = "moojink/openvla-7b-oft-finetuned-libero-spatial"
+    use_l1_regression:            bool  = True
+    use_diffusion:                bool  = False
+    use_film:                     bool  = False
+    num_images_in_input:          int   = 2
+    use_proprio:                  bool  = True
+    load_in_8bit:                 bool  = False
+    load_in_4bit:                 bool  = False
+    center_crop:                  bool  = True
+    num_open_loop_steps:          int   = 5
+    unnorm_key:                   str   = "libero_spatial_no_noops"
+    lora_rank:                    int   = 32    # OFT default; not used for HF checkpoints
+    num_diffusion_steps_train:    int   = 100   # unused (use_diffusion=False)
+    num_diffusion_steps_inference: int  = 10    # unused (use_diffusion=False)
+
 try:
-    from experiments.robot.libero.run_libero_eval import GenerateConfig
     from experiments.robot.openvla_utils import (
         get_action_head, get_processor, get_proprio_projector,
         get_vla, get_vla_action,
