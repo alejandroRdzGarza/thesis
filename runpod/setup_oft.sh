@@ -61,21 +61,34 @@ pip install -q "protobuf>=4.21.0"
 
 # Patch data_utils.py: dlimp is imported at module level but only used in
 # dataset-loading functions that are never called during inference.
+# Idempotent: checks for _DlimpStub before patching to handle re-runs.
 echo "=== Patching data_utils.py (lazy dlimp import) ==="
 python3 - <<'PYEOF'
 path = "/workspace/openvla_oft_repo/prismatic/vla/datasets/rlds/utils/data_utils.py"
 with open(path) as f:
     content = f.read()
-if "import dlimp as dl" in content:
-    patched = content.replace(
-        "import dlimp as dl",
-        "try:\n    import dlimp as dl\nexcept Exception:\n    class _DlimpStub:\n        class DLataset: pass\n    dl = _DlimpStub()  # stub for inference-only use"
-    )
-    with open(path, "w") as f:
-        f.write(patched)
-    print(f"  Patched: {path}")
-else:
+if "_DlimpStub" in content:
     print(f"  Already patched: {path}")
+else:
+    lines = content.split("\n")
+    out = []
+    for line in lines:
+        stripped = line.lstrip()
+        if stripped == "import dlimp as dl":
+            ind = line[: len(line) - len(stripped)]
+            out += [
+                f"{ind}try:",
+                f"{ind}    import dlimp as dl",
+                f"{ind}except Exception:",
+                f"{ind}    class _DlimpStub:",
+                f"{ind}        class DLataset: pass",
+                f"{ind}    dl = _DlimpStub()  # stub: dlimp not needed for inference",
+            ]
+        else:
+            out.append(line)
+    with open(path, "w") as f:
+        f.write("\n".join(out))
+    print(f"  Patched: {path}")
 PYEOF
 
 # Verify key imports work
