@@ -91,6 +91,29 @@ else:
     print(f"  Patched: {path}")
 PYEOF
 
+# Patch update_auto_map in openvla_utils.py to skip the config.json backup.
+# The backup uses shutil.copy2 which hits RunPod's per-pod write quota even
+# though the filesystem has space (EDQUOT errno 122).  The backup is optional;
+# the actual auto_map update that follows is what matters for model loading.
+echo "=== Patching update_auto_map (skip backup to avoid EDQUOT) ==="
+python3 - <<'PYEOF'
+path = "/workspace/openvla_oft_repo/experiments/robot/openvla_utils.py"
+with open(path) as f:
+    content = f.read()
+if "# PATCHED: skip backup" in content:
+    print(f"  Already patched: {path}")
+elif "shutil.copy2(config_path, backup_path)" in content:
+    patched = content.replace(
+        "shutil.copy2(config_path, backup_path)",
+        "pass  # PATCHED: skip backup (hits RunPod EDQUOT)"
+    )
+    with open(path, "w") as f:
+        f.write(patched)
+    print(f"  Patched: {path}")
+else:
+    print(f"  WARNING: target line not found in {path}")
+PYEOF
+
 # Verify key imports work
 echo "=== Verifying OFT imports ==="
 python - <<'PYEOF'
