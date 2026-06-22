@@ -38,10 +38,9 @@ fi
 echo "=== Installing openvla-oft package ==="
 pip install -e "${OFT_REPO}" --quiet
 
-# Verify key imports work
+# Verify key imports work (avoid run_libero_eval.py which imports libero)
 echo "=== Verifying OFT imports ==="
 python - <<'PYEOF'
-from experiments.robot.libero.run_libero_eval import GenerateConfig
 from experiments.robot.openvla_utils import get_action_head, get_processor, get_proprio_projector, get_vla, get_vla_action
 from prismatic.vla.constants import NUM_ACTIONS_CHUNK, PROPRIO_DIM
 print(f"  OK: PROPRIO_DIM={PROPRIO_DIM}  NUM_ACTIONS_CHUNK={NUM_ACTIONS_CHUNK}")
