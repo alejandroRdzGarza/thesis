@@ -27,6 +27,7 @@ import cv2
 import requests
 import base64
 import io
+from concurrent.futures import ThreadPoolExecutor, Future
 from PIL import Image
 from scipy.optimize import minimize
 
@@ -71,15 +72,21 @@ _CBF_OSC_LAMBDA = 1e-3
 
 
 def _preprocess(img: np.ndarray) -> np.ndarray:
-    """Flip vertically and resize to 224×224 uint8 RGB.
+    """Rotate 180° then resize to 224×224 for VLA server.
 
-    Both agentview and wrist cameras come out of robosuite in OpenGL convention
-    (y=0 at bottom).  OpenVLA-OFT training data was stored with a vertical flip
-    applied, so we flip here before sending to the server.
+    Matches OFT eval exactly:
+      1. img[::-1, ::-1]  — rotate 180° (OpenGL y=0-at-bottom convention, both axes)
+      2. resize to 224×224 — OFT calls resize_image_for_policy(img, 224) before
+         get_vla_action, so prepare_images_for_vla receives a 224×224 image and
+         only applies the center-crop step.  Sending 256×256 forces the server to
+         do an extra JPEG encode + resize internally, degrading quality slightly.
+
+    See openvla-oft-main/experiments/robot/libero/libero_utils.py::get_libero_image
+    and openvla_utils.py::resize_image_for_policy / prepare_images_for_vla.
     """
-    img = img[::-1].copy()
+    img = img[::-1, ::-1].copy()
     if img.shape[:2] != (224, 224):
-        img = cv2.resize(img, (224, 224))
+        img = cv2.resize(img, (224, 224), interpolation=cv2.INTER_LANCZOS4)
     return img.astype(np.uint8)
 
 
@@ -331,8 +338,8 @@ def make_libero_env(task_suite: str = "libero_spatial",
     env = OffScreenRenderEnv(
         bddl_file_name=bddl_full,
         controller="OSC_POSE",          # matches OpenVLA fine-tuning setup
-        camera_heights=224,
-        camera_widths=224,
+        camera_heights=256,
+        camera_widths=256,
         camera_names=["agentview", "robot0_eye_in_hand"],   # wrist cam needed for OFT
         has_renderer=has_renderer,
         has_offscreen_renderer=True,
@@ -341,6 +348,8 @@ def make_libero_env(task_suite: str = "libero_spatial",
         horizon=horizon,
         ignore_done=True,
     )
+
+    env.seed(0)
 
     initial_states = None
     if is_safe:
@@ -442,6 +451,7 @@ def obs_from_libero(env_obs: dict, object_keys: list[str],
 # ── Visualization helper ───────────────────────────────────────────────────────
 _DISPLAY_SCALE = 2          # upscale factor for live viewer / saved video
 _STATUS_BAR_H  = 64         # height in pixels of the overlay bar (after upscale)
+_CAM_RES       = 224        # preprocessed image size sent to VLA (env renders at 256, resized to 224)
 
 
 def _render_frame(img_rgb: np.ndarray, t: int, horizon: int, mode: str,
@@ -524,8 +534,8 @@ def run_libero_trial(
 
     # ── Video writer ─────────────────────────────────────────────────────────
     _vwriter = None
-    _frame_w = 224 * _DISPLAY_SCALE
-    _frame_h = 224 * _DISPLAY_SCALE + _STATUS_BAR_H
+    _frame_w = _CAM_RES * _DISPLAY_SCALE
+    _frame_h = _CAM_RES * _DISPLAY_SCALE + _STATUS_BAR_H
     if save_video:
         import os
         os.makedirs(os.path.dirname(save_video) or ".", exist_ok=True)
@@ -561,6 +571,25 @@ def run_libero_trial(
         else:
             obs = step_out
 
+    # ── Object tracking setup ─────────────────────────────────────────────────
+    # Collect absolute object position keys only — exclude robot keys and the
+    # relative-vector keys (e.g. "bowl_to_robot0_eef_pos") which are NOT object
+    # positions and would corrupt grasp detection.
+    _obj_pos_keys = sorted([
+        k for k in obs.keys()
+        if k.endswith("_pos")
+        and not k.startswith("robot")
+        and "to_robot" not in k
+    ])
+    _obj_initial_z = {k: float(obs[k][2]) for k in _obj_pos_keys if k in obs}
+    print(f"\n  Objects in scene ({len(_obj_pos_keys)}):")
+    for k in _obj_pos_keys:
+        if k in obs:
+            p = np.array(obs[k])
+            print(f"    {k:<44} z={p[2]:.3f}m  pos=[{p[0]:.3f},{p[1]:.3f},{p[2]:.3f}]")
+    _grasp_flag     = False
+    _grasped_object: str | None = None
+
     # ── SafeLIBERO obstacle auto-detection ────────────────────────────────────
     # After warm-up, scan env joint names for obstacle objects that have
     # settled within the workspace bounds, then build the CBF obstacle config.
@@ -585,11 +614,15 @@ def run_libero_trial(
             _initial_obstacle_pos = np.array(obs[_obs_key], dtype=float).copy()
     _collision_flag = False
 
+    import time as _time
+
     horizon      = getattr(env, "horizon", 800)
-    action_queue: list[np.ndarray] = []   # pending post-processed actions from last chunk
-    vla_cnt      = 0                       # total VLA calls made (for display)
+    action_queue: list[np.ndarray] = []
+    vla_cnt      = 0
     _current_action = _DUMMY_ACTION.copy()
     vla_raw      = np.zeros(7)
+
+    _vla_executor = ThreadPoolExecutor(max_workers=1)
 
     try:
         for t in range(horizon):
@@ -605,16 +638,27 @@ def run_libero_trial(
             wrist_img = _preprocess(wrist_raw) if wrist_raw is not None else np.zeros((224, 224, 3), dtype=np.uint8)
             state     = _build_proprio(obs) if isinstance(obs, dict) else np.zeros(8)
 
-            # ── 2. Synchronous replan: query VLA when queue is empty ──────
+            # ── 2. Synchronous replan with fresh observations ─────────────
             if not action_queue:
                 try:
+                    _t0 = _time.perf_counter()
                     raw_chunk = _query_openvla_chunk(img, wrist_img, state,
-                                                     instruction,
-                                                     num_actions=replan_steps)
+                                                     instruction, num_actions=replan_steps)
+                    vla_ms = (_time.perf_counter() - _t0) * 1000
                     vla_raw      = raw_chunk[0].copy()
                     action_queue = [_post_process_vla(a) for a in raw_chunk]
                     vla_cnt     += 1
-                    print(f"  [{t:03d}] VLA #{vla_cnt}  gripper={action_queue[0][6]:+.1f}")
+                    ee_now = np.array(obs["robot0_eef_pos"])
+                    grip_str = "CLOSE" if action_queue[0][6] > 0 else "open"
+                    obj_dist_str = ""
+                    if _obj_pos_keys:
+                        dists = {k: np.linalg.norm(np.array(obs[k]) - ee_now)
+                                 for k in _obj_pos_keys if k in obs}
+                        near_k = min(dists, key=dists.get)
+                        obj_dist_str = f"  nearest={near_k.replace('_pos','')}({dists[near_k]:.3f}m)"
+                    print(f"  [{t:03d}] VLA #{vla_cnt}  grip={grip_str}"
+                          f"  EE=[{ee_now[0]:.3f},{ee_now[1]:.3f},{ee_now[2]:.3f}]"
+                          f"{obj_dist_str}  ({vla_ms:.0f}ms)")
                 except Exception as e:
                     print(f"  [{t:03d}] VLA query error (holding last action): {e}")
                     action_queue = [_current_action.copy()]
@@ -671,6 +715,25 @@ def run_libero_trial(
                 obs, reward, terminated, truncated, info = step_out
                 done = terminated or truncated
 
+            # ── 6b. Grasp detection: gripper closing + object lifted off table ─
+            gripper_closing = safe_action[6] > 0
+            if gripper_closing:
+                for k in _obj_pos_keys:
+                    if k in obs and k in _obj_initial_z:
+                        lift = float(obs[k][2]) - _obj_initial_z[k]
+                        if lift > 0.02 and not _grasp_flag:
+                            _grasp_flag     = True
+                            _grasped_object = k
+                            ee_g = np.array(obs["robot0_eef_pos"])
+                            print(f"  [{t:03d}] *** GRASPED: {k.replace('_pos','')} "
+                                  f"lifted {lift:.3f}m  "
+                                  f"EE=[{ee_g[0]:.3f},{ee_g[1]:.3f},{ee_g[2]:.3f}]")
+            else:
+                if _grasp_flag:
+                    print(f"  [{t:03d}] *** RELEASED: {_grasped_object}")
+                _grasp_flag     = False
+                _grasped_object = None
+
             # ── 7. Displacement-based collision check (SafeLIBERO metric) ─
             if (not _collision_flag
                     and _obstacle_name is not None
@@ -684,15 +747,18 @@ def run_libero_trial(
                               f"{np.sum(np.abs(curr_obs_pos - _initial_obstacle_pos)):.4f}m")
 
             # ── 8. Success check ──────────────────────────────────────────
+            # For LIBERO/SafeLIBERO, info["success"] is the ground-truth physics
+            # check (object at goal position).  The EE-distance fallback is only
+            # used for non-LIBERO envs that don't populate info["success"].
             success_flag = bool(info.get("success", False))
             if success_flag:
                 metrics.mark_goal_reached(t)
-            elif goal_pos is not None:
-                success_flag = float(np.linalg.norm(ee_pos - goal_pos)) < goal_tolerance
 
             # ── 9. Record ─────────────────────────────────────────────────
             q_current = np.array(obs.get("robot0_joint_pos", np.zeros(7)), dtype=float)
-            _gp = goal_pos if goal_pos is not None else np.zeros(3)
+            # Pass zero goal_pos so MetricsTracker's internal EE-distance check
+            # never fires — success detection goes through mark_goal_reached()
+            # (called above when info["success"] is True).
             metrics.record(
                 StepRecord(
                     step=t,
@@ -712,25 +778,35 @@ def run_libero_trial(
                     ghost_pos=None,
                     image=img.copy() if collect_dataset else None,
                 ),
-                goal_pos=_gp,
-                goal_tolerance=goal_tolerance,
+                goal_pos=np.zeros(3),
+                goal_tolerance=0.0,
             )
 
             if t % 20 == 0:
                 flags = []
+                if _grasp_flag:     flags.append(f"HOLDING:{_grasped_object.replace('_pos','') if _grasped_object else '?'}")
                 if _collision_flag: flags.append("COLLISION")
                 if violation:       flags.append("VIOLATION")
                 if cbf_triggered:   flags.append("[CBF]")
                 if success_flag:    flags.append("SUCCESS")
                 d_goal = (f"{np.linalg.norm(ee_pos - goal_pos):.3f}m"
                           if goal_pos is not None else "n/a")
-                print(f"  [{t:03d}] d_goal={d_goal}  "
-                      f"min_obs={min_d:.3f}m  {'  '.join(flags)}")
+                grip_s = "CLOSE" if safe_action[6] > 0 else "open"
+                # Object positions snapshot
+                obj_snap = "  ".join(
+                    f"{k.replace('_pos','')}_z={obs[k][2]:.3f}"
+                    for k in _obj_pos_keys if k in obs
+                )
+                print(f"  [{t:03d}] EE=[{ee_pos[0]:.3f},{ee_pos[1]:.3f},{ee_pos[2]:.3f}]"
+                      f"  grip={grip_s}  d_goal={d_goal}  min_obs={min_d:.3f}m"
+                      f"  {'  '.join(flags)}"
+                      + (f"\n         objs: {obj_snap}" if obj_snap else ""))
 
             if done or success_flag:
                 break
 
     finally:
+        _vla_executor.shutdown(wait=False)
         if _vwriter is not None:
             _vwriter.release()
         if show_viewer:
