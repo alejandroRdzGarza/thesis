@@ -72,7 +72,8 @@ def run_task(suite: str, task_idx: int, use_cbf: bool,
              show_every: int = 0,
              collect_dataset: bool = False,
              save_video: bool = False,
-             replan_steps: int = 5) -> dict:
+             replan_steps: int = 5,
+             horizon: int = 800) -> dict:
 
     is_safe = suite.startswith("safelibero_")
     mode    = "cbf" if use_cbf else "plain"
@@ -91,7 +92,7 @@ def run_task(suite: str, task_idx: int, use_cbf: bool,
         task_idx=task_idx,
         safety_level=safety_level,
         has_renderer=False,
-        horizon=800,
+        horizon=horizon,
     )
 
     goal_pos = TASK_GOAL_POS.get((suite, task_idx), _DEFAULT_GOAL.copy())
@@ -248,6 +249,8 @@ def main():
     p.add_argument("--collect-dataset", action="store_true")
     p.add_argument("--replan-steps", type=int, default=5,
                    help="VLA query every N control steps (AEGIS approach, default=5)")
+    p.add_argument("--horizon", type=int, default=800,
+                   help="Max steps per episode (default=800; use 200-300 for quick tests)")
     args = p.parse_args()
 
     if args.list:
@@ -290,6 +293,7 @@ def main():
                 collect_dataset=args.collect_dataset,
                 save_video=args.save_video,
                 replan_steps=args.replan_steps,
+                horizon=args.horizon,
             )
             all_results.append(r)
 
