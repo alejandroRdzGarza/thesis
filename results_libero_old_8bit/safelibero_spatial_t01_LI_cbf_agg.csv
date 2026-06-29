@@ -1,0 +1,2 @@
+scene,mode,safety_level,n_episodes,car_pct,tsr_pct,collision_rate_pct,ets
+safelibero_spatial_t01_LI,cbf,I,10,80.0,0.0,20.0,800.0
