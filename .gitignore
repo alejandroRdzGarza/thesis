@@ -26,11 +26,14 @@ env/
 # --- Experiment outputs (generated per run) ---
 results/
 results_libero/
+results_*/
+*.log
 dataset/
 diagnostics/
 
-# --- External dependencies cloned in-tree (should live outside project dir) ---
+# --- External dependencies cloned in-tree ---
 LIBERO/
+openpi/
 
 # --- OS / IDE ---
 .DS_Store

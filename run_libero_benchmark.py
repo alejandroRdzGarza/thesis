@@ -131,6 +131,7 @@ def run_task(suite: str, task_idx: int, use_cbf: bool,
                 auto_detect_obstacle=is_safe,
                 obstacle_safety_radius=obstacle_safety_radius,
                 replan_steps=replan_steps,
+                horizon=horizon,
             )
 
             s = metrics.summary()

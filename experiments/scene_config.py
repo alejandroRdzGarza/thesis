@@ -23,12 +23,15 @@ import numpy as np
 class ObstacleConfig:
     pos: np.ndarray          # [x, y, z] centre in world frame
     radius: float            # physical radius for rendering (m)
-    safety_radius: float     # CBF exclusion radius (m) — usually > radius
+    safety_radius: float     # CBF exclusion radius (m) — fallback if q_diag is None
     name: str = "obstacle"
     color: tuple = (1.0, 0.7, 0.0, 0.8)  # RGBA
     # Per-axis uniform noise applied by sample_scene() each episode.
     # actual_pos ~ U(pos - range, pos + range). Leave at zeros for fixed scenes.
     pos_noise_range: np.ndarray = field(default_factory=lambda: np.zeros(3))
+    # Actual obstacle ellipsoid semi-axes fitted from MuJoCo collision geoms.
+    # When set, the CBF uses these instead of the isotropic safety_radius sphere.
+    q_diag: np.ndarray | None = None
 
     def __post_init__(self):
         self.pos = np.asarray(self.pos, dtype=float)
