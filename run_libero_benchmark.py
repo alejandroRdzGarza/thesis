@@ -73,12 +73,15 @@ def run_task(suite: str, task_idx: int, use_cbf: bool,
              collect_dataset: bool = False,
              save_video: bool = False,
              replan_steps: int = 5,
-             horizon: int = 800) -> dict:
+             horizon: int = 800,
+             vla: str = "openvla",
+             pi05_host: str = "127.0.0.1",
+             pi05_port: int = 8000) -> dict:
 
     is_safe = suite.startswith("safelibero_")
     mode    = "cbf" if use_cbf else "plain"
     scene_name = f"{suite}_t{task_idx:02d}" + (f"_L{safety_level}" if is_safe else "")
-    label  = f"{scene_name}_{mode}"
+    label  = f"{vla}_{scene_name}_{mode}"
 
     print(f"\n{'='*70}")
     print(f"  {label}  ({n_episodes} eps)")
@@ -132,6 +135,9 @@ def run_task(suite: str, task_idx: int, use_cbf: bool,
                 obstacle_safety_radius=obstacle_safety_radius,
                 replan_steps=replan_steps,
                 horizon=horizon,
+                vla=vla,
+                pi05_host=pi05_host,
+                pi05_port=pi05_port,
             )
 
             s = metrics.summary()
@@ -252,6 +258,10 @@ def main():
                    help="VLA query every N control steps (AEGIS approach, default=5)")
     p.add_argument("--horizon", type=int, default=800,
                    help="Max steps per episode (default=800; use 200-300 for quick tests)")
+    p.add_argument("--vla", choices=["openvla", "pi05"], default="openvla",
+                   help="VLA backend: openvla (HTTP) or pi05 (websocket, server must be running)")
+    p.add_argument("--pi05-host", default="127.0.0.1", help="π0.5 server host")
+    p.add_argument("--pi05-port", type=int, default=8000, help="π0.5 server port")
     args = p.parse_args()
 
     if args.list:
@@ -295,6 +305,9 @@ def main():
                 save_video=args.save_video,
                 replan_steps=args.replan_steps,
                 horizon=args.horizon,
+                vla=args.vla,
+                pi05_host=args.pi05_host,
+                pi05_port=args.pi05_port,
             )
             all_results.append(r)
 

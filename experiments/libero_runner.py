@@ -37,6 +37,12 @@ except ImportError:
     _HAS_MUJOCO = False
 
 try:
+    from openpi_client import websocket_client_policy as _wsp
+    _HAS_OPENPI = True
+except ImportError:
+    _HAS_OPENPI = False
+
+try:
     from experiments.cbf_visualizer import (
         fit_obstacle_ellipsoid, install_scene_hook, push_cbf_geoms,
     )
@@ -87,6 +93,41 @@ from experiments.gvr import GVR
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 OPENVLA_URL = "http://127.0.0.1:8000/act"
+
+# π0.5 websocket client (one per process; initialized lazily)
+_pi05_client = None
+
+
+def _init_pi05_client(host: str = "127.0.0.1", port: int = 8000):
+    global _pi05_client
+    if not _HAS_OPENPI:
+        raise RuntimeError("openpi-client not installed — pip install openpi/packages/openpi-client/")
+    _pi05_client = _wsp.WebsocketClientPolicy(host, port)
+
+
+def _query_pi05_chunk(
+    img_rgb: np.ndarray,
+    wrist_img_rgb: np.ndarray,
+    state: np.ndarray,
+    instruction: str,
+    num_actions: int = 5,
+) -> list[np.ndarray]:
+    """Query π0.5 server; return first `num_actions` raw 7-D actions.
+
+    π0.5 already outputs gripper in OSC_POSE convention (+1=close, -1=open),
+    so no normalize/invert post-processing is needed.
+    """
+    global _pi05_client
+    if _pi05_client is None:
+        _init_pi05_client()
+    result = _pi05_client.infer({
+        "observation/image":       img_rgb,
+        "observation/wrist_image": wrist_img_rgb,
+        "observation/state":       state.astype(np.float64),
+        "prompt":                  instruction,
+    })
+    chunk = np.asarray(result["actions"], dtype=np.float64)   # (T, 7)
+    return [chunk[i] for i in range(min(num_actions, len(chunk)))]
 
 _ARM_BODY_NAMES = [
     "robot0_link3", "robot0_link4", "robot0_link5",
@@ -739,6 +780,10 @@ def run_libero_trial(
     initial_states=None,
     auto_detect_obstacle: bool = False,
     obstacle_safety_radius: float = 0.10,
+    # VLA backend: "openvla" or "pi05"
+    vla: str = "openvla",
+    pi05_host: str = "127.0.0.1",
+    pi05_port: int = 8000,
     # Synchronous replan parameters (AEGIS approach)
     replan_steps: int = 5,
     horizon: int = 800,
@@ -764,6 +809,9 @@ def run_libero_trial(
     """
     if not _HAS_MUJOCO:
         raise RuntimeError("mujoco not available in this environment")
+
+    if vla == "pi05":
+        _init_pi05_client(pi05_host, pi05_port)
 
     mode = "cbf" if use_cbf else "plain"
 
@@ -936,11 +984,17 @@ def run_libero_trial(
             if not action_queue:
                 try:
                     _t0 = _time.perf_counter()
-                    raw_chunk = _query_openvla_chunk(img, wrist_img, state,
-                                                     instruction, num_actions=replan_steps)
+                    if vla == "pi05":
+                        raw_chunk = _query_pi05_chunk(img, wrist_img, state,
+                                                      instruction, num_actions=replan_steps)
+                        # π0.5 outputs are already in OSC_POSE convention
+                        action_queue = [a.copy() for a in raw_chunk]
+                    else:
+                        raw_chunk = _query_openvla_chunk(img, wrist_img, state,
+                                                         instruction, num_actions=replan_steps)
+                        action_queue = [_post_process_vla(a) for a in raw_chunk]
                     vla_ms = (_time.perf_counter() - _t0) * 1000
                     vla_raw      = raw_chunk[0].copy()
-                    action_queue = [_post_process_vla(a) for a in raw_chunk]
                     vla_cnt     += 1
                     ee_now = np.array(obs["robot0_eef_pos"])
                     grip_str = "CLOSE" if action_queue[0][6] > 0 else "open"
