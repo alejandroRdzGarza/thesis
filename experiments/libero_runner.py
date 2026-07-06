@@ -96,13 +96,42 @@ OPENVLA_URL = "http://127.0.0.1:8000/act"
 
 # π0.5 websocket client (one per process; initialized lazily)
 _pi05_client = None
+_pi05_host_g: str = "127.0.0.1"
+_pi05_port_g: int = 8000
 
 
 def _init_pi05_client(host: str = "127.0.0.1", port: int = 8000):
-    global _pi05_client
+    """Create π0.5 websocket client with keepalive pings disabled.
+
+    The default websockets ping_interval/ping_timeout is 20 s, which fires
+    during JAX JIT compilation on the first inference call (~30-60 s).
+    Disabling pings prevents the premature disconnect.
+    """
+    global _pi05_client, _pi05_host_g, _pi05_port_g
     if not _HAS_OPENPI:
         raise RuntimeError("openpi-client not installed — pip install openpi/packages/openpi-client/")
-    _pi05_client = _wsp.WebsocketClientPolicy(host, port)
+    _pi05_host_g, _pi05_port_g = host, port
+
+    if _HAS_OPENPI:
+        import time as _t
+        import websockets.sync.client as _wsc
+        from openpi_client import msgpack_numpy as _mpn
+
+        class _NoPingPolicy(_wsp.WebsocketClientPolicy):
+            def _wait_for_server(self):
+                while True:
+                    try:
+                        conn = _wsc.connect(
+                            self._uri, compression=None, max_size=None,
+                            ping_interval=None,   # disable keepalive — JAX JIT takes 30-60 s
+                        )
+                        metadata = _mpn.unpackb(conn.recv())
+                        return conn, metadata
+                    except ConnectionRefusedError:
+                        print("  [π0.5] waiting for server...")
+                        _t.sleep(5)
+
+        _pi05_client = _NoPingPolicy(host, port)
 
 
 def _query_pi05_chunk(
@@ -119,13 +148,20 @@ def _query_pi05_chunk(
     """
     global _pi05_client
     if _pi05_client is None:
-        _init_pi05_client()
-    result = _pi05_client.infer({
+        _init_pi05_client(_pi05_host_g, _pi05_port_g)
+    obs_dict = {
         "observation/image":       img_rgb,
         "observation/wrist_image": wrist_img_rgb,
         "observation/state":       state.astype(np.float64),
         "prompt":                  instruction,
-    })
+    }
+    try:
+        result = _pi05_client.infer(obs_dict)
+    except Exception:
+        # Connection dropped (e.g. server restart). Reconnect once and retry.
+        _pi05_client = None
+        _init_pi05_client(_pi05_host_g, _pi05_port_g)
+        result = _pi05_client.infer(obs_dict)
     chunk = np.asarray(result["actions"], dtype=np.float64)   # (T, 7)
     return [chunk[i] for i in range(min(num_actions, len(chunk)))]
 
