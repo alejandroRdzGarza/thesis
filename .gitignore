@@ -43,3 +43,7 @@ openpi/
 
 # --- VSCode Local History extension ---
 .history/
+papers/
+results_libero_old_8bit/
+results_*/
+*.log
