@@ -227,14 +227,15 @@ def _to_b64(img_rgb: np.ndarray) -> str:
 
 def _query_openvla_chunk(img_rgb: np.ndarray, wrist_img_rgb: np.ndarray,
                          state: np.ndarray, instruction: str,
-                         num_actions: int = 5) -> list[np.ndarray]:
+                         num_actions: int = 5,
+                         url: str = OPENVLA_URL) -> list[np.ndarray]:
     """Query OpenVLA-OFT server; return chunk of `num_actions` raw 7-D actions.
 
     Server expects: agentview image, wrist image, 8-D proprio state, instruction.
     Returns list of numpy arrays, each shape (7,), already in action space
     (the server's action head handles unnormalization).
     """
-    r = requests.post(OPENVLA_URL,
+    r = requests.post(url,
                       json={"image_base64":       _to_b64(img_rgb),
                             "wrist_image_base64":  _to_b64(wrist_img_rgb),
                             "state":               state.tolist(),
@@ -806,9 +807,11 @@ def run_libero_trial(
     goal_tolerance: float = 0.08,
     scene_name: str = "libero",
     collect_dataset: bool = False,
+    collect_cbf_data: bool = False,
     save_results: bool = False,
     results_dir: str = "results",
     dataset_path: str | None = None,
+    cbf_dataset_path: str | None = None,
     show_viewer: bool = False,
     save_video: str | None = None,
     # SafeLIBERO episode parameters
@@ -818,8 +821,14 @@ def run_libero_trial(
     obstacle_safety_radius: float = 0.10,
     # VLA backend: "openvla" or "pi05"
     vla: str = "openvla",
+    openvla_port: int = 8000,
     pi05_host: str = "127.0.0.1",
     pi05_port: int = 8000,
+    # None = auto-select per VLA: openvla→True, pi05→False
+    use_gvr: bool | None = None,
+    use_gripper_hysteresis: bool | None = None,
+    # None = auto: True for pi05 (match AEGIS paper), False for openvla
+    translational_only: bool | None = None,
     # Synchronous replan parameters (AEGIS approach)
     replan_steps: int = 5,
     horizon: int = 800,
@@ -848,6 +857,13 @@ def run_libero_trial(
 
     if vla == "pi05":
         _init_pi05_client(pi05_host, pi05_port)
+
+    # Resolve auto defaults: OpenVLA keeps original True behaviour;
+    # π0.5 defaults to False (closes gripper early, making both features mis-fire).
+    _is_pi05 = (vla == "pi05")
+    _use_gvr               = use_gvr               if use_gvr               is not None else (not _is_pi05)
+    _use_gripper_hysteresis = use_gripper_hysteresis if use_gripper_hysteresis is not None else (not _is_pi05)
+    _use_translational_only = translational_only if translational_only is not None else _is_pi05
 
     mode = "cbf" if use_cbf else "plain"
 
@@ -1023,11 +1039,15 @@ def run_libero_trial(
                     if vla == "pi05":
                         raw_chunk = _query_pi05_chunk(img, wrist_img, state,
                                                       instruction, num_actions=replan_steps)
-                        # π0.5 outputs are already in OSC_POSE convention
                         action_queue = [a.copy() for a in raw_chunk]
+                        if _use_translational_only:
+                            for a in action_queue:
+                                a[3:6] = 0.0  # zero rotational deltas — match AEGIS paper setup
                     else:
+                        _ovla_url = f"http://127.0.0.1:{openvla_port}/act"
                         raw_chunk = _query_openvla_chunk(img, wrist_img, state,
-                                                         instruction, num_actions=replan_steps)
+                                                         instruction, num_actions=replan_steps,
+                                                         url=_ovla_url)
                         action_queue = [_post_process_vla(a) for a in raw_chunk]
                     vla_ms = (_time.perf_counter() - _t0) * 1000
                     vla_raw      = raw_chunk[0].copy()
@@ -1110,18 +1130,21 @@ def run_libero_trial(
             # ── 3b. GVR: Grasp Verification & Recovery ────────────────────
             # Detects phantom grasps (gripper closed, nothing lifted) and
             # hovering oscillation (EE circling object without grasping).
-            safe_action, _gvr_phase = _gvr.update(
-                action        = safe_action,
-                ee_pos        = ee_pos,
-                obs           = obs,
-                obj_pos_keys  = _obj_pos_keys,
-                obj_initial_z = _obj_initial_z,
-                grasp_flag    = _grasp_flag,
-                obstacle_keys = _obstacle_key_set,
-            )
-            if _gvr_phase != "normal" and t % 4 == 0:
-                print(f"  [{t:03d}] GVR: {_gvr_phase} "
-                      f"(phantom={_gvr.phantom_count} hover={_gvr.hover_count})")
+            if _use_gvr:
+                safe_action, _gvr_phase = _gvr.update(
+                    action        = safe_action,
+                    ee_pos        = ee_pos,
+                    obs           = obs,
+                    obj_pos_keys  = _obj_pos_keys,
+                    obj_initial_z = _obj_initial_z,
+                    grasp_flag    = _grasp_flag,
+                    obstacle_keys = _obstacle_key_set,
+                )
+                if _gvr_phase != "normal" and t % 4 == 0:
+                    print(f"  [{t:03d}] GVR: {_gvr_phase} "
+                          f"(phantom={_gvr.phantom_count} hover={_gvr.hover_count})")
+            else:
+                _gvr_phase = "normal"
 
             # ── 3c. Placement heuristic ───────────────────────────────────
             # If the arm has been holding an object AT the goal for several
@@ -1140,28 +1163,29 @@ def run_libero_trial(
             # queries.  Once it says "close" twice in a row, lock the gripper
             # shut so it has time to fully grip the object.  Auto-unlock after
             # 80 steps with no confirmed grasp so the VLA can retry.
-            if _is_new_vla_chunk:
-                if _current_action[6] > 0:
-                    _gripper_close_chunks += 1
-                elif not _grasp_flag:
-                    _gripper_close_chunks = 0
-                    _gripper_locked       = False
-                    _gripper_locked_steps = 0
+            if _use_gripper_hysteresis:
+                if _is_new_vla_chunk:
+                    if _current_action[6] > 0:
+                        _gripper_close_chunks += 1
+                    elif not _grasp_flag:
+                        _gripper_close_chunks = 0
+                        _gripper_locked       = False
+                        _gripper_locked_steps = 0
 
-            if _gripper_close_chunks >= 2:
-                _gripper_locked = True
+                if _gripper_close_chunks >= 2:
+                    _gripper_locked = True
 
-            if _gripper_locked and _gvr_phase not in ("phantom_open", "phantom_wait"):
-                safe_action[6] = 1.0
-                _gripper_locked_steps += 1
-                if _gripper_locked_steps >= 80 and not _grasp_flag:
-                    _gripper_locked       = False
-                    _gripper_close_chunks = 0
-                    _gripper_locked_steps = 0
-                    print(f"  [{t:03d}] GRIPPER: lock timeout — releasing for re-approach")
+                if _gripper_locked and _gvr_phase not in ("phantom_open", "phantom_wait"):
+                    safe_action[6] = 1.0
+                    _gripper_locked_steps += 1
+                    if _gripper_locked_steps >= 80 and not _grasp_flag:
+                        _gripper_locked       = False
+                        _gripper_close_chunks = 0
+                        _gripper_locked_steps = 0
+                        print(f"  [{t:03d}] GRIPPER: lock timeout — releasing for re-approach")
 
-            if _grasp_flag:
-                _gripper_locked_steps = 0  # don't time-out while holding object
+                if _grasp_flag:
+                    _gripper_locked_steps = 0  # don't time-out while holding object
 
             # ── 3e. Near-grasp XY correction ──────────────────────────────
             # When EE is within 12 cm of the closest graspable object but off
@@ -1359,7 +1383,11 @@ def run_libero_trial(
                     h_values=h_values,
                     vla_delta=vla_raw.copy(),
                     ghost_pos=None,
-                    image=img.copy() if collect_dataset else None,
+                    image=img.copy() if (collect_dataset or collect_cbf_data) else None,
+                    wrist_image=wrist_img.copy() if collect_cbf_data else None,
+                    eef_quat=np.array(obs.get("robot0_eef_quat", [0,0,0,1]), dtype=np.float32) if collect_cbf_data else None,
+                    gripper_qpos=np.array(obs.get("robot0_gripper_qpos", [0,0]), dtype=np.float32) if collect_cbf_data else None,
+                    safe_cartesian=safe_action.copy() if collect_cbf_data else None,
                 ),
                 goal_pos=np.zeros(3),
                 goal_tolerance=0.0,
@@ -1414,6 +1442,9 @@ def run_libero_trial(
 
     if collect_dataset and dataset_path:
         metrics.save_dataset(dataset_path)
+
+    if collect_cbf_data and cbf_dataset_path:
+        metrics.save_hdf5(cbf_dataset_path, instruction=instruction)
 
     s = metrics.summary()
     print(f"  Done — TSR={s['goal_reached']}  "

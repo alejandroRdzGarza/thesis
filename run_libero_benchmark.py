@@ -75,8 +75,11 @@ def run_task(suite: str, task_idx: int, use_cbf: bool,
              replan_steps: int = 5,
              horizon: int = 800,
              vla: str = "openvla",
+             openvla_port: int = 8000,
              pi05_host: str = "127.0.0.1",
-             pi05_port: int = 8000) -> dict:
+             pi05_port: int = 8000,
+             translational_only: bool | None = None,
+             collect_cbf_data: bool = False) -> dict:
 
     is_safe = suite.startswith("safelibero_")
     mode    = "cbf" if use_cbf else "plain"
@@ -113,6 +116,8 @@ def run_task(suite: str, task_idx: int, use_cbf: bool,
 
             ds_path = (str(results_dir / "dataset" / scene_name / f"ep_{ep:04d}.npz")
                        if collect_dataset else None)
+            cbf_ds_path = (str(results_dir / "cbf_dataset" / scene_name / f"ep_{ep:04d}.h5")
+                           if collect_cbf_data else None)
             vid_path = (str(results_dir / "videos" / scene_name / f"ep_{ep:04d}.mp4")
                         if save_video else None)
 
@@ -125,7 +130,9 @@ def run_task(suite: str, task_idx: int, use_cbf: bool,
                 cbf_gamma=cbf_gamma,
                 scene_name=scene_name,
                 collect_dataset=collect_dataset,
+                collect_cbf_data=collect_cbf_data,
                 dataset_path=ds_path,
+                cbf_dataset_path=cbf_ds_path,
                 show_viewer=show,
                 save_video=vid_path,
                 # SafeLIBERO params
@@ -136,8 +143,10 @@ def run_task(suite: str, task_idx: int, use_cbf: bool,
                 replan_steps=replan_steps,
                 horizon=horizon,
                 vla=vla,
+                openvla_port=openvla_port,
                 pi05_host=pi05_host,
                 pi05_port=pi05_port,
+                translational_only=translational_only,
             )
 
             s = metrics.summary()
@@ -252,6 +261,9 @@ def main():
     p.add_argument("--show-every", type=int, default=0,
                    help="Show live viewer every N episodes (0=off)")
     p.add_argument("--save-video", action="store_true")
+    p.add_argument("--collect-cbf-data", action="store_true",
+                   help="Save per-step CBF dataset (images, proprio, VLA action, CBF action) "
+                        "as LIBERO-compatible HDF5 for OpenVLA-OFT fine-tuning")
     p.add_argument("--results-dir", default="results_libero")
     p.add_argument("--collect-dataset", action="store_true")
     p.add_argument("--replan-steps", type=int, default=5,
@@ -260,8 +272,14 @@ def main():
                    help="Max steps per episode (default=800; use 200-300 for quick tests)")
     p.add_argument("--vla", choices=["openvla", "pi05"], default="openvla",
                    help="VLA backend: openvla (HTTP) or pi05 (websocket, server must be running)")
+    p.add_argument("--openvla-port", type=int, default=8000,
+                   help="OpenVLA server port (default 8000; use 8001 for second GPU on multi-GPU pod)")
     p.add_argument("--pi05-host", default="127.0.0.1", help="π0.5 server host")
     p.add_argument("--pi05-port", type=int, default=8000, help="π0.5 server port")
+    p.add_argument("--translational-only", action="store_true", default=None,
+                   help="Zero rotational deltas in VLA action (auto: True for pi05, False for openvla)")
+    p.add_argument("--no-translational-only", dest="translational_only", action="store_false",
+                   help="Disable translational-only restriction even for pi05")
     args = p.parse_args()
 
     if args.list:
@@ -306,8 +324,11 @@ def main():
                 replan_steps=args.replan_steps,
                 horizon=args.horizon,
                 vla=args.vla,
+                openvla_port=args.openvla_port,
                 pi05_host=args.pi05_host,
                 pi05_port=args.pi05_port,
+                translational_only=args.translational_only,
+                collect_cbf_data=args.collect_cbf_data,
             )
             all_results.append(r)
 

@@ -1,0 +1,43 @@
+# π0.5 + LIBERO benchmark client environment
+# Install with: pip install -r requirements_pi05_libero.txt
+#
+# System packages needed first (run as root):
+#   apt-get update && apt-get install -y libegl1 libgles2 libosmesa6 libgl1 libglu1-mesa
+#
+# After install, set:
+#   export MUJOCO_GL=egl
+#   export PYOPENGL_PLATFORM=egl
+#   export PYTHONPATH=/workspace/LIBERO:$PYTHONPATH
+
+# ── Simulation ────────────────────────────────────────────────────────────────
+mujoco==3.2.3
+robosuite==1.4.1
+
+# ── LIBERO dependencies ───────────────────────────────────────────────────────
+bddl==1.0.1
+easydict
+cloudpickle
+h5py
+gym==0.25.2
+future
+einops
+
+# ── Numerics / vision ─────────────────────────────────────────────────────────
+numpy==1.26.4
+scipy
+opencv-python
+matplotlib
+Pillow
+imageio
+imageio-ffmpeg
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+PyYAML
+tqdm
+lxml
+psutil
+requests
+
+# ── openpi websocket client ───────────────────────────────────────────────────
+# Install separately after the above:
+#   pip install /workspace/thesis/openpi/packages/openpi-client/

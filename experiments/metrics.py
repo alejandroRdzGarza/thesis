@@ -38,6 +38,12 @@ class StepRecord:
     # ── Optional (only when collect_dataset=True) ────────────────────────────
     image: np.ndarray | None = None   # (224, 224, 3) uint8, static_cam frame
 
+    # ── CBF fine-tuning dataset fields (only when collect_cbf_data=True) ─────
+    wrist_image:    np.ndarray | None = None  # (224, 224, 3) uint8
+    eef_quat:       np.ndarray | None = None  # (4,) xyzw
+    gripper_qpos:   np.ndarray | None = None  # (2,)
+    safe_cartesian: np.ndarray | None = None  # (7,) CBF-corrected Cartesian action
+
 
 class MetricsTracker:
     """Accumulates per-step data and computes summary statistics at the end."""
@@ -177,3 +183,64 @@ class MetricsTracker:
             arrays["images"] = np.stack([r.image for r in self._records]).astype(np.uint8)
 
         np.savez_compressed(path, **arrays)
+
+    def save_hdf5(self, path: str | Path, instruction: str, demo_key: str = "demo_0"):
+        """Save CBF fine-tuning dataset as LIBERO-compatible HDF5.
+
+        Matches the format expected by OpenVLA-OFT's fine-tuning scripts:
+          data/<demo_key>/obs/agentview_image        (T, 224, 224, 3) uint8
+          data/<demo_key>/obs/robot0_eye_in_hand_image (T, 224, 224, 3) uint8
+          data/<demo_key>/obs/robot0_eef_pos         (T, 3)  float32
+          data/<demo_key>/obs/robot0_eef_quat        (T, 4)  float32
+          data/<demo_key>/obs/robot0_gripper_qpos    (T, 2)  float32
+          data/<demo_key>/actions                    (T, 7)  float32  ← CBF-corrected
+          data/<demo_key>/vla_actions                (T, 7)  float32  ← raw VLA
+          data/<demo_key>/cbf_triggered              (T,)    bool
+          data/<demo_key>/h_values                   (T,)    float32
+          data.attrs["num_demos"]  = 1
+          data.attrs["env_name"]   = scene_name
+        """
+        import h5py
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        recs = [r for r in self._records if r.safe_cartesian is not None]
+        if not recs:
+            return
+
+        with h5py.File(path, "w") as f:
+            grp = f.require_group(f"data/{demo_key}")
+
+            obs = grp.require_group("obs")
+            if recs[0].image is not None:
+                obs.create_dataset("agentview_image",
+                    data=np.stack([r.image for r in recs]).astype(np.uint8),
+                    compression="lzf")
+            if recs[0].wrist_image is not None:
+                obs.create_dataset("robot0_eye_in_hand_image",
+                    data=np.stack([r.wrist_image for r in recs]).astype(np.uint8),
+                    compression="lzf")
+            obs.create_dataset("robot0_eef_pos",
+                data=np.stack([r.ee_pos for r in recs]).astype(np.float32))
+            if recs[0].eef_quat is not None:
+                obs.create_dataset("robot0_eef_quat",
+                    data=np.stack([r.eef_quat for r in recs]).astype(np.float32))
+            if recs[0].gripper_qpos is not None:
+                obs.create_dataset("robot0_gripper_qpos",
+                    data=np.stack([r.gripper_qpos for r in recs]).astype(np.float32))
+
+            grp.create_dataset("actions",
+                data=np.stack([r.safe_cartesian for r in recs]).astype(np.float32))
+            grp.create_dataset("vla_actions",
+                data=np.stack([r.vla_delta for r in recs]).astype(np.float32))
+            grp.create_dataset("cbf_triggered",
+                data=np.array([r.cbf_triggered for r in recs]))
+            grp.create_dataset("h_values",
+                data=np.array([r.h_values[0] if r.h_values else float("inf")
+                               for r in recs], dtype=np.float32))
+
+            grp.attrs["language_instruction"] = instruction
+            grp.attrs["num_steps"] = len(recs)
+
+            f["data"].attrs["num_demos"] = 1
+            f["data"].attrs["env_name"]  = self.scene_name
