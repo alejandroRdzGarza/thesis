@@ -28,7 +28,7 @@ results/
 results_libero/
 results_*/
 *.log
-dataset/
+dataset_*/
 diagnostics/
 
 # --- External dependencies cloned in-tree ---

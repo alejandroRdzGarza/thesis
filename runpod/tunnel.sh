@@ -1,6 +1,10 @@
 
 #!/bin/bash
-POD_HOST=${POD_HOST:-213.173.110.160}
-POD_PORT=${POD_PORT:-10298}
-echo "Tunnelling localhost:8000 -> RunPod:8000"
-ssh -N -L 8000:localhost:8000 root@$POD_HOST -p $POD_PORT -i ~/.ssh/id_ed25519
+POD_HOST=${POD_HOST:-213.173.109.159}
+POD_PORT=${POD_PORT:-13760}
+echo "Tunnelling localhost:8000 -> RunPod:8000  (GPU 0)"
+echo "Tunnelling localhost:8002 -> RunPod:8002  (GPU 1)"
+ssh -N \
+  -L 8000:localhost:8000 \
+  -L 8002:localhost:8002 \
+  root@$POD_HOST -p $POD_PORT -i ~/.ssh/id_ed25519
