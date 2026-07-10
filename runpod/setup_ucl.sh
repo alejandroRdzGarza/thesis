@@ -12,7 +12,7 @@
 
 set -e
 
-HOME_DIR="/cs/student/msc/rai/2025/jesusr01"
+HOME_DIR="/cs/student/project_msc/2025/rai/jesusr01"
 VENV="$HOME_DIR/venv_vla"
 OFT_REPO="$HOME_DIR/openvla_oft_repo"
 PYTHON310="/opt/Python/Python-3.10.14/bin/python3.10"
