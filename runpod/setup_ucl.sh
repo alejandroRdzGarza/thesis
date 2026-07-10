@@ -86,6 +86,9 @@ else
     git clone https://github.com/moojink/openvla-oft.git "$OFT_REPO"
 fi
 
+echo "=== Upgrading numpy for opencv compatibility ==="
+pip install -q "numpy>=2.0"
+
 echo "=== Installing openvla-oft package ==="
 pip install -e "$OFT_REPO" --quiet
 
@@ -106,9 +109,9 @@ done
 pip install -q "protobuf>=4.21.0"
 
 echo "=== Patching data_utils.py ==="
-python - <<'PYEOF'
-import os; home = os.environ.get("HOME", "/cs/student/msc/rai/2025/jesusr01")
-path = home + "/openvla_oft_repo/prismatic/vla/datasets/rlds/utils/data_utils.py"
+OFT_REPO_FOR_PY="$OFT_REPO" python - <<'PYEOF'
+import os
+path = os.environ["OFT_REPO_FOR_PY"] + "/prismatic/vla/datasets/rlds/utils/data_utils.py"
 with open(path) as f:
     content = f.read()
 if "_DlimpStub" in content:
@@ -131,9 +134,9 @@ else:
 PYEOF
 
 echo "=== Patching update_auto_map ==="
-python - <<'PYEOF'
-import os; home = os.environ.get("HOME", "/cs/student/msc/rai/2025/jesusr01")
-path = home + "/openvla_oft_repo/experiments/robot/openvla_utils.py"
+OFT_REPO_FOR_PY="$OFT_REPO" python - <<'PYEOF'
+import os
+path = os.environ["OFT_REPO_FOR_PY"] + "/experiments/robot/openvla_utils.py"
 with open(path) as f:
     content = f.read()
 if "# PATCHED: skip backup" in content:
