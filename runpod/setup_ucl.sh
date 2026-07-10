@@ -19,6 +19,11 @@ PYTHON310="/opt/Python/Python-3.10.14/bin/python3.10"
 THESIS="$HOME_DIR/thesis"
 CHECKPOINT="$THESIS/checkpoint_step006500"
 
+# Redirect pip cache off the tiny home quota onto the 100GB project space
+export PIP_CACHE_DIR="$HOME_DIR/.cache/pip"
+export XDG_CACHE_HOME="$HOME_DIR/.cache"
+mkdir -p "$PIP_CACHE_DIR"
+
 echo "========================================================"
 echo "  UCL VLA Setup"
 echo "  home     : $HOME_DIR"
