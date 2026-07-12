@@ -95,7 +95,8 @@ def _apf_correction(
 ) -> tuple[np.ndarray, float, float]:
     """Return (safe_xyz, dist, corr_mag) using APF smooth repulsion.
 
-    Force magnitude: k_rep * (1 - d/d_influence)²  — quadratic decay, zero at d_influence.
+    k_rep is DIMENSIONLESS: correction = k_rep * alpha * ||nom_xyz|| * n_hat.
+    This matches the VLA action scale regardless of OSC controller units.
     """
     delta = ee_pos - near_ob.pos
     d     = float(np.linalg.norm(delta)) + 1e-8
@@ -103,8 +104,9 @@ def _apf_correction(
     safe_xyz = nom_xyz.copy()
     corr_mag = 0.0
     if d < d_influence:
-        alpha    = (1.0 - d / d_influence) ** 2   # quadratic, smooth at boundary
-        corr_mag = k_rep * alpha
+        alpha    = (1.0 - d / d_influence) ** 2
+        nom_mag  = float(np.linalg.norm(nom_xyz)) + 1e-8
+        corr_mag = k_rep * alpha * nom_mag
         safe_xyz = nom_xyz + corr_mag * n_hat
     return safe_xyz, d, corr_mag
 
@@ -337,7 +339,8 @@ def main():
     parser.add_argument("--correction", choices=["cbf", "apf"], default="apf",
                         help="cbf: reactive CBF filter; apf: smooth APF repulsion (default)")
     # APF params
-    parser.add_argument("--k-rep",       type=float, default=0.15,
+    parser.add_argument("--k-rep",       type=float, default=2.0,
+                        help="APF gain (dimensionless; default 2.0 = 73%% of nom action at closest approach)")
                         help="APF repulsion gain (m/step at obstacle surface, default 0.025)")
     parser.add_argument("--d-influence", type=float, default=0.28,
                         help="APF influence radius in metres (default 0.28)")

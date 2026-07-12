@@ -449,17 +449,21 @@ def _apf_xyz_correction(
     ee_pos: np.ndarray,
     obstacles: list["ObstacleConfig"],
     nom_xyz: np.ndarray,
-    k_rep: float = 0.025,
+    k_rep: float = 2.0,
     d_influence: float = 0.28,
 ) -> tuple[np.ndarray, float, bool]:
     """Smooth APF repulsion on the xyz action component.
 
-    Force: k_rep * (1 - d/d_influence)^2 * n_hat, applied when d < d_influence.
+    k_rep is DIMENSIONLESS: correction = k_rep * alpha * ||nom_xyz|| * n_hat.
+    Scales with VLA action magnitude so correction is always meaningful regardless
+    of OSC controller internal units. At k_rep=2.0, max correction ≈ 74% of
+    nominal action magnitude at closest approach.
     Returns (safe_xyz, min_dist, triggered).
     """
     safe_xyz = nom_xyz.copy()
     min_dist = float("inf")
     triggered = False
+    nom_mag = float(np.linalg.norm(nom_xyz)) + 1e-8
     for ob in obstacles:
         delta = ee_pos - ob.pos
         d = float(np.linalg.norm(delta)) + 1e-8
@@ -468,7 +472,7 @@ def _apf_xyz_correction(
         if d < d_influence:
             n_hat = delta / d
             alpha = (1.0 - d / d_influence) ** 2
-            safe_xyz = safe_xyz + k_rep * alpha * n_hat
+            safe_xyz = safe_xyz + k_rep * alpha * nom_mag * n_hat
             triggered = True
     return safe_xyz, min_dist, triggered
 
@@ -889,7 +893,7 @@ def run_libero_trial(
     use_obs_cond: bool = False,
     # APF mode: smooth potential-field repulsion instead of CBF QP
     use_apf: bool = False,
-    apf_k_rep: float = 0.15,
+    apf_k_rep: float = 2.0,
     apf_d_influence: float = 0.28,
 ) -> MetricsTracker:
     """Run one LIBERO episode using OpenVLA + optional Cartesian CBF.
@@ -1203,7 +1207,7 @@ def run_libero_trial(
                 )
                 correction_norm = float(np.linalg.norm(apf_xyz - _current_action[:3]))
                 safe_action[:3] = apf_xyz
-                h_val = _apf_dist   # report distance as "h" for logging
+                h_val = _apf_dist
 
             # ── 3b. GVR: Grasp Verification & Recovery ────────────────────
             # Detects phantom grasps (gripper closed, nothing lifted) and
