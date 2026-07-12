@@ -225,23 +225,44 @@ def _to_b64(img_rgb: np.ndarray) -> str:
     return base64.b64encode(buf.getvalue()).decode()
 
 
+_OBS_MAX_RANGE = 1.0  # metres; obs_dist is clipped to [0, 1] within this range
+
+
+def _compute_obs_features(ee_pos: np.ndarray, obs_pos: np.ndarray) -> np.ndarray:
+    """Compute 4-D obstacle features: [obs_dir(3), obs_dist(1)].
+
+    obs_dir  — unit vector from obstacle to EE (in [-1, 1]^3).
+    obs_dist — Euclidean distance normalised by _OBS_MAX_RANGE, clipped [0, 1].
+    Both are already in [-1, 1] / [0, 1] so the server needs no extra normalisation.
+    """
+    delta = ee_pos - obs_pos
+    dist  = float(np.linalg.norm(delta))
+    obs_dir  = delta / (dist + 1e-8)
+    obs_dist = np.clip(dist / _OBS_MAX_RANGE, 0.0, 1.0)
+    return np.array([obs_dir[0], obs_dir[1], obs_dir[2], obs_dist], dtype=np.float64)
+
+
 def _query_openvla_chunk(img_rgb: np.ndarray, wrist_img_rgb: np.ndarray,
                          state: np.ndarray, instruction: str,
                          num_actions: int = 5,
-                         url: str = OPENVLA_URL) -> list[np.ndarray]:
+                         url: str = OPENVLA_URL,
+                         obstacle_feat: np.ndarray | None = None) -> list[np.ndarray]:
     """Query OpenVLA-OFT server; return chunk of `num_actions` raw 7-D actions.
 
     Server expects: agentview image, wrist image, 8-D proprio state, instruction.
+    obstacle_feat: optional 4-D array [obs_dir(3), obs_dist(1)] for obstacle-
+        conditioned projector; sent only when the server has OBS_COND=1.
     Returns list of numpy arrays, each shape (7,), already in action space
     (the server's action head handles unnormalization).
     """
-    r = requests.post(url,
-                      json={"image_base64":       _to_b64(img_rgb),
-                            "wrist_image_base64":  _to_b64(wrist_img_rgb),
-                            "state":               state.tolist(),
-                            "instruction":         instruction,
-                            "num_actions":         num_actions},
-                      timeout=120)
+    payload = {"image_base64":       _to_b64(img_rgb),
+               "wrist_image_base64":  _to_b64(wrist_img_rgb),
+               "state":               state.tolist(),
+               "instruction":         instruction,
+               "num_actions":         num_actions}
+    if obstacle_feat is not None:
+        payload["obstacle"] = obstacle_feat.tolist()
+    r = requests.post(url, json=payload, timeout=120)
     r.raise_for_status()
     d = r.json()
     if not d.get("action"):
@@ -835,6 +856,8 @@ def run_libero_trial(
     # Obstacle geometry: sphere decomposition vs single ellipsoid
     use_sphere_decomp: bool = True,
     sphere_decomp_n: int = 48,
+    # Obstacle-conditioned projector: send obs features to server when True
+    use_obs_cond: bool = False,
 ) -> MetricsTracker:
     """Run one LIBERO episode using OpenVLA + optional Cartesian CBF.
 
@@ -892,7 +915,7 @@ def run_libero_trial(
     ee_body_id   = arm_body_ids[-1] if arm_body_ids else 0
     print(f"  Arm bodies: {len(arm_body_ids)}  Arm DOFs: {arm_dof_idx}")
 
-    metrics = MetricsTracker(scene_name, mode)
+    metrics = MetricsTracker(scene_name, mode, model_name=vla)
 
     goal_str = np.round(goal_pos, 3) if goal_pos is not None else "auto"
     print(f"\n  [{scene_name}] ep={episode_idx}  mode={mode.upper()}  "
@@ -1045,9 +1068,17 @@ def run_libero_trial(
                                 a[3:6] = 0.0  # zero rotational deltas — match AEGIS paper setup
                     else:
                         _ovla_url = f"http://127.0.0.1:{openvla_port}/act"
+                        # Obstacle features for obstacle-conditioned projector
+                        _obs_feat = None
+                        if use_obs_cond and obstacles:
+                            _ee_now = np.array(obs["robot0_eef_pos"], dtype=float)
+                            _dists  = [np.linalg.norm(_ee_now - ob.pos) for ob in obstacles]
+                            _near   = obstacles[int(np.argmin(_dists))]
+                            _obs_feat = _compute_obs_features(_ee_now, _near.pos)
                         raw_chunk = _query_openvla_chunk(img, wrist_img, state,
                                                          instruction, num_actions=replan_steps,
-                                                         url=_ovla_url)
+                                                         url=_ovla_url,
+                                                         obstacle_feat=_obs_feat)
                         action_queue = [_post_process_vla(a) for a in raw_chunk]
                     vla_ms = (_time.perf_counter() - _t0) * 1000
                     vla_raw      = raw_chunk[0].copy()
@@ -1091,7 +1122,7 @@ def run_libero_trial(
                 # Build arm-link sphere constraints (links 3-7, body frame).
                 arm_rows = _compute_arm_link_constraints(
                     model, data, arm_body_ids, arm_dof_idx, ee_body_id,
-                    _R1, obstacles, scale=0.2, k_cbf=K_CBF,
+                    _R1, obstacles, scale=1.0, k_cbf=K_CBF,
                 )
 
                 if _sphere_decomp is not None:
@@ -1220,6 +1251,8 @@ def run_libero_trial(
                 dists_to_obs = [float(np.linalg.norm(ee_c - ob.pos))
                                 for ob in obstacles]
                 min_d = min(dists_to_obs)
+                _closest_obs_idx = int(np.argmin(dists_to_obs))
+                _closest_obs_pos = obstacles[_closest_obs_idx].pos.copy()
                 violation = any(d < ob.safety_radius
                                 for d, ob in zip(dists_to_obs, obstacles))
                 if _sphere_decomp is not None:
@@ -1230,6 +1263,7 @@ def run_libero_trial(
             else:
                 min_d, violation = float("inf"), False
                 h_values = [float("inf")]
+                _closest_obs_pos = None
 
             # ── 5. Display ────────────────────────────────────────────────
             if show_viewer or _vwriter is not None:
@@ -1366,6 +1400,20 @@ def run_libero_trial(
             # Pass zero goal_pos so MetricsTracker's internal EE-distance check
             # never fires — success detection goes through mark_goal_reached()
             # (called above when info["success"] is True).
+            _goal_dist = (float(np.linalg.norm(ee_pos - goal_pos))
+                          if goal_pos is not None else float("inf"))
+
+            # Distance to closest target object (non-obstacle, not yet at goal)
+            _obj_dist = float("inf")
+            for _k in _obj_pos_keys:
+                if _k in _obstacle_key_set or _k not in obs:
+                    continue
+                _op = np.array(obs[_k], dtype=float)
+                if goal_pos is not None and np.linalg.norm(_op[:2] - goal_pos[:2]) < 0.06:
+                    continue
+                _d = float(np.linalg.norm(ee_pos - _op))
+                if _d < _obj_dist:
+                    _obj_dist = _d
             metrics.record(
                 StepRecord(
                     step=t,
@@ -1388,6 +1436,16 @@ def run_libero_trial(
                     eef_quat=np.array(obs.get("robot0_eef_quat", [0,0,0,1]), dtype=np.float32) if collect_cbf_data else None,
                     gripper_qpos=np.array(obs.get("robot0_gripper_qpos", [0,0]), dtype=np.float32) if collect_cbf_data else None,
                     safe_cartesian=safe_action.copy() if collect_cbf_data else None,
+                    # Rich research logging
+                    goal_dist=_goal_dist,
+                    gripper_open=bool(safe_action[6] <= 0),
+                    vla_query=_is_new_vla_chunk,
+                    action_nom_xyz_mag=float(np.linalg.norm(_current_action[:3])),
+                    action_safe_xyz_mag=float(np.linalg.norm(safe_action[:3])),
+                    obstacle_pos=_closest_obs_pos,
+                    # Failure-mode analysis
+                    grasp_detected=_grasp_flag,
+                    obj_dist=_obj_dist,
                 ),
                 goal_pos=np.zeros(3),
                 goal_tolerance=0.0,
@@ -1437,8 +1495,9 @@ def run_libero_trial(
         import os
         os.makedirs(results_dir, exist_ok=True)
         label = f"{scene_name}_{mode}"
-        metrics.save_step_log(f"{results_dir}/{label}_steps.csv")
-        metrics.save_summary( f"{results_dir}/{label}_summary.csv")
+        metrics.save_step_log(     f"{results_dir}/{label}_steps.csv")
+        metrics.save_summary(      f"{results_dir}/{label}_summary.csv")
+        metrics.save_analysis_npz( f"{results_dir}/{label}_trajectory.npz")
 
     if collect_dataset and dataset_path:
         metrics.save_dataset(dataset_path)
