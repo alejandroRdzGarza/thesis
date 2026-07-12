@@ -444,6 +444,35 @@ def _compute_arm_link_constraints(
     return rows
 
 
+# ── Artificial Potential Field (APF) correction ───────────────────────────────
+def _apf_xyz_correction(
+    ee_pos: np.ndarray,
+    obstacles: list["ObstacleConfig"],
+    nom_xyz: np.ndarray,
+    k_rep: float = 0.025,
+    d_influence: float = 0.28,
+) -> tuple[np.ndarray, float, bool]:
+    """Smooth APF repulsion on the xyz action component.
+
+    Force: k_rep * (1 - d/d_influence)^2 * n_hat, applied when d < d_influence.
+    Returns (safe_xyz, min_dist, triggered).
+    """
+    safe_xyz = nom_xyz.copy()
+    min_dist = float("inf")
+    triggered = False
+    for ob in obstacles:
+        delta = ee_pos - ob.pos
+        d = float(np.linalg.norm(delta)) + 1e-8
+        if d < min_dist:
+            min_dist = d
+        if d < d_influence:
+            n_hat = delta / d
+            alpha = (1.0 - d / d_influence) ** 2
+            safe_xyz = safe_xyz + k_rep * alpha * n_hat
+            triggered = True
+    return safe_xyz, min_dist, triggered
+
+
 # ── Ellipsoid CBF helpers (monitoring) ─────────────────────────────────────────
 def _compute_h_values_ellipsoid(ee_pos: np.ndarray, R1: np.ndarray,
                                 obstacles: list[ObstacleConfig],
@@ -858,6 +887,10 @@ def run_libero_trial(
     sphere_decomp_n: int = 48,
     # Obstacle-conditioned projector: send obs features to server when True
     use_obs_cond: bool = False,
+    # APF mode: smooth potential-field repulsion instead of CBF QP
+    use_apf: bool = False,
+    apf_k_rep: float = 0.025,
+    apf_d_influence: float = 0.28,
 ) -> MetricsTracker:
     """Run one LIBERO episode using OpenVLA + optional Cartesian CBF.
 
@@ -1157,6 +1190,15 @@ def run_libero_trial(
 
                 correction_norm = float(np.linalg.norm(u_safe_world - _current_action[:3]))
                 safe_action[:3] = u_safe_world
+
+            elif use_apf and obstacles and not _near_goal:
+                apf_xyz, _apf_dist, cbf_triggered = _apf_xyz_correction(
+                    ee_pos, obstacles, _current_action[:3],
+                    k_rep=apf_k_rep, d_influence=apf_d_influence,
+                )
+                correction_norm = float(np.linalg.norm(apf_xyz - _current_action[:3]))
+                safe_action[:3] = apf_xyz
+                h_val = _apf_dist   # report distance as "h" for logging
 
             # ── 3b. GVR: Grasp Verification & Recovery ────────────────────
             # Detects phantom grasps (gripper closed, nothing lifted) and

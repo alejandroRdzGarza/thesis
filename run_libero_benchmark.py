@@ -72,17 +72,25 @@ def run_task(suite: str, task_idx: int, use_cbf: bool,
              show_every: int = 0,
              collect_dataset: bool = False,
              save_video: bool = False,
-             replan_steps: int = 5,
-             horizon: int = 800,
+             replan_steps: int = 8,
+             horizon: int = 400,
              vla: str = "openvla",
              openvla_port: int = 8000,
              pi05_host: str = "127.0.0.1",
              pi05_port: int = 8000,
              translational_only: bool | None = None,
-             collect_cbf_data: bool = False) -> dict:
+             collect_cbf_data: bool = False,
+             use_apf: bool = False,
+             apf_k_rep: float = 0.025,
+             apf_d_influence: float = 0.28) -> dict:
 
     is_safe = suite.startswith("safelibero_")
-    mode    = "cbf" if use_cbf else "plain"
+    if use_apf:
+        mode = "apf"
+    elif use_cbf:
+        mode = "cbf"
+    else:
+        mode = "plain"
     scene_name = f"{suite}_t{task_idx:02d}" + (f"_L{safety_level}" if is_safe else "")
     label  = f"{vla}_{scene_name}_{mode}"
 
@@ -121,6 +129,7 @@ def run_task(suite: str, task_idx: int, use_cbf: bool,
             vid_path = (str(results_dir / "videos" / scene_name / f"ep_{ep:04d}.mp4")
                         if save_video else None)
 
+            ep_log_dir = str(results_dir / "step_logs" / f"{label}_ep{ep:04d}")
             metrics = run_libero_trial(
                 env=env,
                 obstacles=manual_obstacles,
@@ -135,6 +144,8 @@ def run_task(suite: str, task_idx: int, use_cbf: bool,
                 cbf_dataset_path=cbf_ds_path,
                 show_viewer=show,
                 save_video=vid_path,
+                save_results=True,
+                results_dir=ep_log_dir,
                 # SafeLIBERO params
                 episode_idx=ep,
                 initial_states=initial_states,
@@ -147,6 +158,9 @@ def run_task(suite: str, task_idx: int, use_cbf: bool,
                 pi05_host=pi05_host,
                 pi05_port=pi05_port,
                 translational_only=translational_only,
+                use_apf=use_apf,
+                apf_k_rep=apf_k_rep,
+                apf_d_influence=apf_d_influence,
             )
 
             s = metrics.summary()
@@ -160,14 +174,35 @@ def run_task(suite: str, task_idx: int, use_cbf: bool,
             ets = s["goal_reach_step"] if s["goal_reached"] else s["total_steps"]
 
             records.append({
-                "episode":    ep,
-                "car":        car,
-                "tsr":        tsr,
-                "ets":        ets,
-                "collision":  int(s["collision_detected"]),
-                "cbf_acts":   s["cbf_activations"],
-                "min_dist":   s["min_dist_overall"],
-                "violations": s["violation_steps"],
+                "episode":              ep,
+                "car":                  car,
+                "tsr":                  tsr,
+                "ets":                  ets,
+                "collision":            int(s["collision_detected"]),
+                "cbf_acts":             s["cbf_activations"],
+                "min_dist":             s["min_dist_overall"],
+                "violations":           s["violation_steps"],
+                # Rich per-episode metrics
+                "path_length_m":        s["path_length_m"],
+                "path_efficiency":      s["path_efficiency"],
+                "mean_jerk":            s["mean_jerk"],
+                "total_jerk":           s["total_jerk"],
+                "deadlock_steps":       s["deadlock_steps"],
+                "vla_queries":          s["vla_queries"],
+                "gripper_close_trans":  s["gripper_close_transitions"],
+                "first_close_step":     s["first_close_step"],
+                "goal_dist_min":        s["goal_dist_min"],
+                "goal_dist_final":      s["goal_dist_final"],
+                "cbf_mean_h_active":    s["cbf_mean_h_when_active"],
+                "cbf_interv_mean_dur":  s["cbf_intervention_mean_dur"],
+                "cbf_interv_max_dur":   s["cbf_intervention_max_dur"],
+                "cbf_activation_rate":  s["cbf_activation_rate"],
+                # Failure-mode analysis
+                "grasp_achieved":       int(s["grasp_achieved"]),
+                "first_grasp_step":     s["first_grasp_step"],
+                "obj_dist_at_grasp":    s["obj_dist_at_grasp"],
+                "obj_dist_min":         s["obj_dist_min"],
+                "obj_dist_final":       s["obj_dist_final"],
             })
             print(f" CAR={car}  TSR={tsr}  ETS={ets:3d}  "
                   f"collision={s['collision_detected']}  "
@@ -192,20 +227,53 @@ def run_task(suite: str, task_idx: int, use_cbf: bool,
     with open(ep_path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(records[0].keys()))
         w.writeheader(); w.writerows(records)
+    def _mean(key):
+        vals = [r[key] for r in records if r.get(key) is not None]
+        return round(float(np.mean(vals)), 4) if vals else None
+
     with open(agg_path, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=["scene", "mode", "safety_level",
-                                          "n_episodes", "car_pct", "tsr_pct",
-                                          "collision_rate_pct", "ets"])
+        w = csv.DictWriter(f, fieldnames=[
+            "scene", "mode", "model_name", "safety_level", "n_episodes",
+            "car_pct", "tsr_pct", "collision_rate_pct", "ets",
+            "mean_path_length_m", "mean_path_efficiency",
+            "mean_jerk", "mean_deadlock_steps",
+            "mean_vla_queries", "mean_gripper_close_trans", "mean_first_close_step",
+            "mean_goal_dist_min", "mean_goal_dist_final",
+            "mean_cbf_activation_rate", "mean_cbf_mean_h_active",
+            "mean_cbf_interv_mean_dur", "mean_cbf_interv_max_dur",
+            "grasp_rate_pct",
+            "mean_first_grasp_step", "mean_obj_dist_at_grasp",
+            "mean_obj_dist_min", "mean_obj_dist_final",
+        ])
         w.writeheader()
         w.writerow({
-            "scene":                scene_name,
-            "mode":                 mode,
-            "safety_level":         safety_level if is_safe else "n/a",
-            "n_episodes":           n_episodes,
-            "car_pct":              round(car_pct, 2),
-            "tsr_pct":              round(tsr_pct, 2),
-            "collision_rate_pct":   round(coll_rate, 2),
-            "ets":                  round(ets_mean, 1),
+            "scene":                   scene_name,
+            "mode":                    mode,
+            "model_name":              vla,
+            "safety_level":            safety_level if is_safe else "n/a",
+            "n_episodes":              n_episodes,
+            "car_pct":                 round(car_pct, 2),
+            "tsr_pct":                 round(tsr_pct, 2),
+            "collision_rate_pct":      round(coll_rate, 2),
+            "ets":                     round(ets_mean, 1),
+            "mean_path_length_m":      _mean("path_length_m"),
+            "mean_path_efficiency":    _mean("path_efficiency"),
+            "mean_jerk":               _mean("mean_jerk"),
+            "mean_deadlock_steps":     _mean("deadlock_steps"),
+            "mean_vla_queries":        _mean("vla_queries"),
+            "mean_gripper_close_trans":_mean("gripper_close_trans"),
+            "mean_first_close_step":   _mean("first_close_step"),
+            "mean_goal_dist_min":      _mean("goal_dist_min"),
+            "mean_goal_dist_final":    _mean("goal_dist_final"),
+            "mean_cbf_activation_rate":_mean("cbf_activation_rate"),
+            "mean_cbf_mean_h_active":  _mean("cbf_mean_h_active"),
+            "mean_cbf_interv_mean_dur":_mean("cbf_interv_mean_dur"),
+            "mean_cbf_interv_max_dur": _mean("cbf_interv_max_dur"),
+            "grasp_rate_pct":          round(np.mean([r["grasp_achieved"] for r in records]) * 100, 2),
+            "mean_first_grasp_step":   _mean("first_grasp_step"),
+            "mean_obj_dist_at_grasp":  _mean("obj_dist_at_grasp"),
+            "mean_obj_dist_min":       _mean("obj_dist_min"),
+            "mean_obj_dist_final":     _mean("obj_dist_final"),
         })
 
     return {
@@ -223,7 +291,7 @@ def print_table(results: list[dict]):
           f"{'Coll ↓':>8}  {'ETS ↓':>8}")
     print("=" * w)
     for scene in scenes:
-        for mode in ("plain", "cbf"):
+        for mode in ("plain", "apf", "cbf"):
             match = [r for r in results if r["scene"] == scene and r["mode"] == mode]
             if not match:
                 continue
@@ -252,10 +320,14 @@ def main():
     p.add_argument("--all",        action="store_true",  help="Run all tasks in the suite")
     p.add_argument("--list",       action="store_true",  help="List tasks and exit")
     p.add_argument("--list-obs",   action="store_true",  help="Print observation keys after reset")
-    p.add_argument("--mode",       choices=["plain", "cbf", "both"], default="both")
+    p.add_argument("--mode",       choices=["plain", "cbf", "apf", "both"], default="both")
     p.add_argument("--episodes",   type=int, default=DEFAULT_EPISODES)
     p.add_argument("--cbf-gamma",  type=float, default=1.8,
                    help="CBF class-K coefficient (higher = more conservative)")
+    p.add_argument("--apf-k-rep", type=float, default=0.025,
+                   help="APF repulsion gain — correction magnitude at obstacle surface (m/step, default 0.025)")
+    p.add_argument("--apf-d-influence", type=float, default=0.28,
+                   help="APF influence radius in metres (default 0.28)")
     p.add_argument("--safety-radius", type=float, default=0.10,
                    help="Safety exclusion radius around auto-detected obstacle (m)")
     p.add_argument("--show-every", type=int, default=0,
@@ -313,6 +385,9 @@ def main():
                 suite=args.suite,
                 task_idx=task_idx,
                 use_cbf=(mode == "cbf"),
+                use_apf=(mode == "apf"),
+                apf_k_rep=args.apf_k_rep,
+                apf_d_influence=args.apf_d_influence,
                 n_episodes=args.episodes,
                 results_dir=results_dir,
                 safety_level=args.safety_level,
