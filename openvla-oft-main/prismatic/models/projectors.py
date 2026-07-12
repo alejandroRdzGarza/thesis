@@ -24,6 +24,38 @@ class ProprioProjector(nn.Module):
         return projected_features
 
 
+class ObstacleConditionedProjector(nn.Module):
+    """
+    Extends ProprioProjector with obstacle geometric conditioning.
+
+    Input: [proprio(8), obs_dir(3), obs_dist(1)] = 12-dim by default.
+    obs_dir is a unit vector from obstacle to EE; obs_dist is distance
+    normalized to [0,1] by a 1-m range. Both are pre-normalized by the
+    client so no separate norm_stats entry is needed.
+
+    Warm-start from a 8-dim ProprioProjector checkpoint by copying the
+    first `proprio_dim` columns of fc1.weight and zero-initialising the
+    remaining `obs_dim` columns (see get_obstacle_conditioned_projector).
+    """
+    def __init__(self, llm_dim: int, proprio_dim: int = 8, obs_dim: int = 4) -> None:
+        super().__init__()
+        self.llm_dim = llm_dim
+        self.proprio_dim = proprio_dim
+        self.obs_dim = obs_dim
+        self.input_dim = proprio_dim + obs_dim
+
+        self.fc1 = nn.Linear(self.input_dim, self.llm_dim, bias=True)
+        self.fc2 = nn.Linear(self.llm_dim, self.llm_dim, bias=True)
+        self.act_fn1 = nn.GELU()
+
+    def forward(self, proprio: torch.Tensor = None) -> torch.Tensor:
+        # proprio: (bsz, input_dim) — already includes obs features concatenated
+        projected_features = self.fc1(proprio)
+        projected_features = self.act_fn1(projected_features)
+        projected_features = self.fc2(projected_features)
+        return projected_features
+
+
 class NoisyActionProjector(nn.Module):
     """
     [Diffusion] Projects noisy action inputs into the LLM's embedding space.

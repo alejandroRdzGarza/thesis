@@ -62,7 +62,7 @@ PROPRIO_DIM       = 8   # eef_pos(3) + axis_angle(3) + gripper_qpos(2)
 try:
     from experiments.robot.openvla_utils import (
         get_action_head, get_processor, get_proprio_projector,
-        get_vla, get_vla_action,
+        get_obstacle_conditioned_projector, get_vla, get_vla_action,
     )
 except ImportError as e:
     raise RuntimeError(
@@ -81,12 +81,17 @@ _default_path  = _LOCAL_DEFAULT if os.path.isdir(_LOCAL_DEFAULT) else _HF_DEFAUL
 MODEL_PATH  = os.environ.get("OPENVLA_MODEL_PATH", _default_path)
 UNNORM_KEY  = os.environ.get("OPENVLA_UNNORM_KEY",  "libero_spatial_no_noops")
 CHUNK_SIZE  = int(os.environ.get("OPENVLA_CHUNK_SIZE", "5"))
+# Set OPENVLA_OBS_COND=1 to load the obstacle-conditioned projector instead of the standard one.
+# When enabled, clients may send an extra `obstacle` field: [obs_dir(3), obs_dist(1)].
+OBS_COND    = os.environ.get("OPENVLA_OBS_COND", "0") == "1"
+OBS_DIM     = 4  # obs_dir(3) + obs_dist(1)
 
 print(f"OpenVLA-OFT server config:")
 print(f"  model       = {MODEL_PATH}")
 print(f"  unnorm_key  = {UNNORM_KEY}")
 print(f"  chunk_size  = {CHUNK_SIZE}")
 print(f"  PROPRIO_DIM = {PROPRIO_DIM}")
+print(f"  OBS_COND    = {OBS_COND}")
 print(f"  NUM_ACTIONS_CHUNK (model default) = {NUM_ACTIONS_CHUNK}")
 
 # ── Load model ────────────────────────────────────────────────────────────────
@@ -113,21 +118,29 @@ processor = get_processor(cfg)
 print("Loading action head ...")
 action_head = get_action_head(cfg, llm_dim=vla.llm_dim)
 
-print("Loading proprio projector ...")
-proprio_projector = get_proprio_projector(cfg, llm_dim=vla.llm_dim, proprio_dim=PROPRIO_DIM)
+if OBS_COND:
+    print("Loading obstacle-conditioned projector ...")
+    proprio_projector = get_obstacle_conditioned_projector(
+        cfg, llm_dim=vla.llm_dim, proprio_dim=PROPRIO_DIM, obs_dim=OBS_DIM,
+        warm_start_from_proprio=True,
+    )
+else:
+    print("Loading proprio projector ...")
+    proprio_projector = get_proprio_projector(cfg, llm_dim=vla.llm_dim, proprio_dim=PROPRIO_DIM)
 
-print(f"OpenVLA-OFT ready — chunk={CHUNK_SIZE}  unnorm={UNNORM_KEY}")
+print(f"OpenVLA-OFT ready — chunk={CHUNK_SIZE}  unnorm={UNNORM_KEY}  obs_cond={OBS_COND}")
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 app = FastAPI()
 
 
 class Request(BaseModel):
-    image_base64:       str            # agentview image (flipped, 224×224 uint8 RGB, JPEG b64)
-    wrist_image_base64: str            # wrist camera image (same preprocessing)
-    state:              List[float]    # 8-D proprio: eef_pos(3) + axis_angle(3) + gripper(2)
+    image_base64:       str                    # agentview image (flipped, 224×224 uint8 RGB, JPEG b64)
+    wrist_image_base64: str                    # wrist camera image (same preprocessing)
+    state:              List[float]            # 8-D proprio: eef_pos(3) + axis_angle(3) + gripper(2)
     instruction:        str
     num_actions:        Optional[int] = None   # if set, overrides CHUNK_SIZE (best-effort)
+    obstacle:           Optional[List[float]] = None  # 4-D obs features: obs_dir(3) + obs_dist(1), pre-normalised
 
 
 def _decode(b64: str) -> np.ndarray:
@@ -150,10 +163,14 @@ def act(req: Request):
             "task_description": req.instruction,
         }
 
+        # Optional obstacle features: [obs_dir(3), obs_dist(1)], pre-normalised by client.
+        extra_proprio = np.array(req.obstacle, dtype=np.float64) if req.obstacle is not None else None
+
         # get_vla_action returns a list of 7-D numpy arrays (the action chunk).
         actions = get_vla_action(
             cfg, vla, processor, observation,
             req.instruction, action_head, proprio_projector,
+            extra_proprio=extra_proprio,
         )
 
         # Trim or pad to requested length (OFT always returns NUM_ACTIONS_CHUNK)
@@ -180,6 +197,8 @@ def info():
         "chunk_size":         CHUNK_SIZE,
         "proprio_dim":        PROPRIO_DIM,
         "num_actions_chunk":  NUM_ACTIONS_CHUNK,
+        "obs_cond":           OBS_COND,
+        "obs_dim":            OBS_DIM if OBS_COND else 0,
     }
 
 

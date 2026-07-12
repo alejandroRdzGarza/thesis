@@ -26,7 +26,7 @@ from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
 from prismatic.extern.hf.processing_prismatic import PrismaticImageProcessor, PrismaticProcessor
 from prismatic.models.action_heads import DiffusionActionHead, L1RegressionActionHead
 from prismatic.models.film_vit_wrapper import FiLMedPrismaticVisionBackbone
-from prismatic.models.projectors import NoisyActionProjector, ProprioProjector
+from prismatic.models.projectors import NoisyActionProjector, ObstacleConditionedProjector, ProprioProjector
 from prismatic.vla.constants import (
     ACTION_DIM,
     ACTION_PROPRIO_NORMALIZATION_TYPE,
@@ -435,6 +435,80 @@ def get_proprio_projector(cfg: Any, llm_dim: int, proprio_dim: int) -> ProprioPr
     return proprio_projector
 
 
+def get_obstacle_conditioned_projector(
+    cfg: Any,
+    llm_dim: int,
+    proprio_dim: int = 8,
+    obs_dim: int = 4,
+    warm_start_from_proprio: bool = True,
+) -> ObstacleConditionedProjector:
+    """
+    Get obstacle-conditioned projector, optionally warm-started from an existing
+    ProprioProjector checkpoint.
+
+    Args:
+        cfg: Configuration object with pretrained_checkpoint path
+        llm_dim: LLM embedding dimension
+        proprio_dim: Original proprio dimension (default 8 for LIBERO)
+        obs_dim: Obstacle feature dimension (default 4: obs_dir(3) + obs_dist(1))
+        warm_start_from_proprio: If True, copy weights from the existing
+            proprio_projector checkpoint into the first proprio_dim columns of
+            fc1.weight and zero-init the remaining obs_dim columns.
+
+    Returns:
+        ObstacleConditionedProjector ready for fine-tuning or inference
+    """
+    projector = ObstacleConditionedProjector(
+        llm_dim=llm_dim,
+        proprio_dim=proprio_dim,
+        obs_dim=obs_dim,
+    ).to(DEVICE)
+    projector = projector.to(torch.bfloat16)
+
+    if warm_start_from_proprio:
+        # Load the existing 8-dim proprio projector checkpoint
+        if model_is_on_hf_hub(cfg.pretrained_checkpoint):
+            model_path_to_proprio_projector_name = {
+                "moojink/openvla-7b-oft-finetuned-libero-spatial": "proprio_projector--150000_checkpoint.pt",
+                "moojink/openvla-7b-oft-finetuned-libero-object": "proprio_projector--150000_checkpoint.pt",
+                "moojink/openvla-7b-oft-finetuned-libero-goal": "proprio_projector--50000_checkpoint.pt",
+                "moojink/openvla-7b-oft-finetuned-libero-10": "proprio_projector--150000_checkpoint.pt",
+                "moojink/openvla-7b-oft-finetuned-libero-spatial-object-goal-10": "proprio_projector--300000_checkpoint.pt",
+            }
+            if cfg.pretrained_checkpoint not in model_path_to_proprio_projector_name:
+                raise ValueError(f"No HF Hub proprio projector mapping for {cfg.pretrained_checkpoint}")
+            ckpt_path = hf_hub_download(
+                repo_id=cfg.pretrained_checkpoint,
+                filename=model_path_to_proprio_projector_name[cfg.pretrained_checkpoint],
+            )
+        else:
+            ckpt_path = find_checkpoint_file(cfg.pretrained_checkpoint, "proprio_projector")
+
+        src = load_component_state_dict(ckpt_path)
+
+        # Copy fc1 weights: [llm_dim × proprio_dim] into first columns of [llm_dim × input_dim]
+        with torch.no_grad():
+            projector.fc1.weight[:, :proprio_dim].copy_(src["fc1.weight"].to(projector.fc1.weight.dtype))
+            projector.fc1.weight[:, proprio_dim:].zero_()  # obs dims start at zero → no initial obs bias
+            projector.fc1.bias.copy_(src["fc1.bias"].to(projector.fc1.bias.dtype))
+            projector.fc2.weight.copy_(src["fc2.weight"].to(projector.fc2.weight.dtype))
+            projector.fc2.bias.copy_(src["fc2.bias"].to(projector.fc2.bias.dtype))
+
+        print(f"ObstacleConditionedProjector warm-started from {ckpt_path}")
+    else:
+        # Try loading a dedicated OCP checkpoint (for inference after training)
+        try:
+            checkpoint_path = find_checkpoint_file(cfg.pretrained_checkpoint, "obstacle_projector")
+            state_dict = load_component_state_dict(checkpoint_path)
+            projector.load_state_dict(state_dict)
+            print(f"ObstacleConditionedProjector loaded from {checkpoint_path}")
+        except FileNotFoundError:
+            print("No obstacle_projector checkpoint found; using random initialisation.")
+
+    projector.eval()
+    return projector
+
+
 def get_noisy_action_projector(cfg: Any, llm_dim: int) -> NoisyActionProjector:
     """
     Get noisy action projector for diffusion-based action prediction.
@@ -722,6 +796,7 @@ def get_vla_action(
     proprio_projector: Optional[torch.nn.Module] = None,
     noisy_action_projector: Optional[torch.nn.Module] = None,
     use_film: bool = False,
+    extra_proprio: Optional[np.ndarray] = None,
 ) -> List[np.ndarray]:
     """
     Generate action predictions with the VLA policy.
@@ -776,6 +851,9 @@ def get_vla_action(
             proprio_norm_stats = vla.norm_stats[cfg.unnorm_key]["proprio"]
             obs["state"] = normalize_proprio(proprio, proprio_norm_stats)
             proprio = obs["state"]
+            # Append extra features (e.g. obstacle conditioning) after normalization
+            if extra_proprio is not None:
+                proprio = np.concatenate([proprio, np.asarray(extra_proprio, dtype=proprio.dtype)])
 
         # Generate action
         if action_head is None:
