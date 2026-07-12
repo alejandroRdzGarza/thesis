@@ -455,10 +455,10 @@ def _apf_xyz_correction(
     """Smooth APF repulsion on the xyz action component.
 
     k_rep is DIMENSIONLESS: correction = k_rep * alpha * ||nom_xyz|| * n_hat.
-    Scales with VLA action magnitude so correction is always meaningful regardless
-    of OSC controller internal units. At k_rep=2.0, max correction ≈ 74% of
-    nominal action magnitude at closest approach.
-    Returns (safe_xyz, min_dist, triggered).
+    d_influence is measured from the obstacle SURFACE (not center), so the APF
+    correctly accounts for obstacle geometry: alpha = (1 - d_surface/d_influence)^2
+    where d_surface = max(0, d_center - ob.safety_radius).
+    Returns (safe_xyz, min_dist_surface, triggered).
     """
     safe_xyz = nom_xyz.copy()
     min_dist = float("inf")
@@ -467,11 +467,12 @@ def _apf_xyz_correction(
     for ob in obstacles:
         delta = ee_pos - ob.pos
         d = float(np.linalg.norm(delta)) + 1e-8
-        if d < min_dist:
-            min_dist = d
-        if d < d_influence:
+        d_surface = max(0.0, d - ob.safety_radius)
+        if d_surface < min_dist:
+            min_dist = d_surface
+        if d_surface < d_influence:
             n_hat = delta / d
-            alpha = (1.0 - d / d_influence) ** 2
+            alpha = (1.0 - d_surface / d_influence) ** 2
             safe_xyz = safe_xyz + k_rep * alpha * nom_mag * n_hat
             triggered = True
     return safe_xyz, min_dist, triggered
@@ -894,7 +895,7 @@ def run_libero_trial(
     # APF mode: smooth potential-field repulsion instead of CBF QP
     use_apf: bool = False,
     apf_k_rep: float = 2.0,
-    apf_d_influence: float = 0.28,
+    apf_d_influence: float = 0.20,
 ) -> MetricsTracker:
     """Run one LIBERO episode using OpenVLA + optional Cartesian CBF.
 

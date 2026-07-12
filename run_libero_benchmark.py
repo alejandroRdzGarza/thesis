@@ -326,8 +326,8 @@ def main():
                    help="CBF class-K coefficient (higher = more conservative)")
     p.add_argument("--apf-k-rep", type=float, default=2.0,
                    help="APF repulsion gain (dimensionless; correction = k_rep*alpha*||nom||, default 2.0)")
-    p.add_argument("--apf-d-influence", type=float, default=0.28,
-                   help="APF influence radius in metres (default 0.28)")
+    p.add_argument("--apf-d-influence", type=float, default=0.20,
+                   help="APF influence radius from obstacle SURFACE in metres (default 0.20)")
     p.add_argument("--safety-radius", type=float, default=0.10,
                    help="Safety exclusion radius around auto-detected obstacle (m)")
     p.add_argument("--show-every", type=int, default=0,
