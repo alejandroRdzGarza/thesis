@@ -324,7 +324,7 @@ def main():
     p.add_argument("--episodes",   type=int, default=DEFAULT_EPISODES)
     p.add_argument("--cbf-gamma",  type=float, default=1.8,
                    help="CBF class-K coefficient (higher = more conservative)")
-    p.add_argument("--apf-k-rep", type=float, default=0.025,
+    p.add_argument("--apf-k-rep", type=float, default=0.15,
                    help="APF repulsion gain — correction magnitude at obstacle surface (m/step, default 0.025)")
     p.add_argument("--apf-d-influence", type=float, default=0.28,
                    help="APF influence radius in metres (default 0.28)")

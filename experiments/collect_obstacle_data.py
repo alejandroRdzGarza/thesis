@@ -337,7 +337,7 @@ def main():
     parser.add_argument("--correction", choices=["cbf", "apf"], default="apf",
                         help="cbf: reactive CBF filter; apf: smooth APF repulsion (default)")
     # APF params
-    parser.add_argument("--k-rep",       type=float, default=0.025,
+    parser.add_argument("--k-rep",       type=float, default=0.15,
                         help="APF repulsion gain (m/step at obstacle surface, default 0.025)")
     parser.add_argument("--d-influence", type=float, default=0.28,
                         help="APF influence radius in metres (default 0.28)")

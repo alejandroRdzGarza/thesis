@@ -889,7 +889,7 @@ def run_libero_trial(
     use_obs_cond: bool = False,
     # APF mode: smooth potential-field repulsion instead of CBF QP
     use_apf: bool = False,
-    apf_k_rep: float = 0.025,
+    apf_k_rep: float = 0.15,
     apf_d_influence: float = 0.28,
 ) -> MetricsTracker:
     """Run one LIBERO episode using OpenVLA + optional Cartesian CBF.
@@ -921,7 +921,12 @@ def run_libero_trial(
     _use_gripper_hysteresis = use_gripper_hysteresis if use_gripper_hysteresis is not None else (not _is_pi05)
     _use_translational_only = translational_only if translational_only is not None else _is_pi05
 
-    mode = "cbf" if use_cbf else "plain"
+    if use_apf:
+        mode = "apf"
+    elif use_cbf:
+        mode = "cbf"
+    else:
+        mode = "plain"
 
     # ── Video writer ─────────────────────────────────────────────────────────
     _vwriter = None
