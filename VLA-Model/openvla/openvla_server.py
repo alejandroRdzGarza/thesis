@@ -164,15 +164,21 @@ def act(req: Request):
             "task_description": req.instruction,
         }
 
-        # Optional obstacle features: [obs_dir(3), obs_dist(1)], pre-normalised by client.
-        extra_proprio = np.array(req.obstacle, dtype=np.float64) if req.obstacle is not None else None
-
         # get_vla_action returns a list of 7-D numpy arrays (the action chunk).
-        actions = get_vla_action(
-            cfg, vla, processor, observation,
-            req.instruction, action_head, proprio_projector,
-            extra_proprio=extra_proprio,
-        )
+        # extra_proprio is only passed when OBS_COND is active (OCP projector);
+        # the standard openvla-oft get_vla_action does not accept this kwarg.
+        if OBS_COND and req.obstacle is not None:
+            extra_proprio = np.array(req.obstacle, dtype=np.float64)
+            actions = get_vla_action(
+                cfg, vla, processor, observation,
+                req.instruction, action_head, proprio_projector,
+                extra_proprio=extra_proprio,
+            )
+        else:
+            actions = get_vla_action(
+                cfg, vla, processor, observation,
+                req.instruction, action_head, proprio_projector,
+            )
 
         # Trim or pad to requested length (OFT always returns NUM_ACTIONS_CHUNK)
         n = req.num_actions if req.num_actions is not None else CHUNK_SIZE
