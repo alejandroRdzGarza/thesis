@@ -32,12 +32,12 @@ _ELLIPSOID = mujoco.mjtGeom.mjGEOM_ELLIPSOID
 _SPHERE    = mujoco.mjtGeom.mjGEOM_SPHERE
 
 # RGBA palettes (BGR in OpenCV but RGBA here for MuJoCo)
-_RGBA_EE_SAFE     = np.array([0.10, 0.85, 0.20, 0.30], np.float32)   # green
-_RGBA_EE_ACTIVE   = np.array([0.95, 0.85, 0.05, 0.40], np.float32)   # yellow
-_RGBA_OBS_SAFE    = np.array([0.30, 0.55, 1.00, 0.28], np.float32)   # blue
-_RGBA_OBS_CLOSE   = np.array([1.00, 0.50, 0.10, 0.38], np.float32)   # orange
-_RGBA_OBS_HOT     = np.array([1.00, 0.12, 0.12, 0.50], np.float32)   # red
-_RGBA_LINK        = np.array([0.20, 0.90, 0.90, 0.18], np.float32)   # cyan
+_RGBA_EE_SAFE     = np.array([0.10, 0.85, 0.20, 0.12], np.float32)   # green
+_RGBA_EE_ACTIVE   = np.array([0.95, 0.85, 0.05, 0.18], np.float32)   # yellow
+_RGBA_OBS_SAFE    = np.array([0.30, 0.55, 1.00, 0.10], np.float32)   # blue
+_RGBA_OBS_CLOSE   = np.array([1.00, 0.50, 0.10, 0.15], np.float32)   # orange
+_RGBA_OBS_HOT     = np.array([1.00, 0.12, 0.12, 0.22], np.float32)   # red
+_RGBA_LINK        = np.array([0.20, 0.90, 0.90, 0.08], np.float32)   # cyan
 
 
 # Per-obstacle-class ellipsoid semi-axes (x, y, z) measured from MuJoCo geoms.
@@ -45,7 +45,7 @@ _RGBA_LINK        = np.array([0.20, 0.90, 0.90, 0.18], np.float32)   # cyan
 # thin appendages like handles that don't meaningfully obstruct the arm path).
 # Safety margin is added on top in detect_safelibero_obstacle().
 _KNOWN_OBSTACLE_Q: dict[str, np.ndarray] = {
-    "moka_pot_obstacle":          np.array([0.065, 0.065, 0.120]),  # pot body (handle excluded — far from path)
+    "moka_pot_obstacle":          np.array([0.115, 0.085, 0.130]),  # conservative bound: spout extends ~5cm laterally
     "white_storage_box_obstacle": np.array([0.070, 0.070, 0.066]),  # measured from 4 wall geoms (outer faces ±0.070 xy, ±0.066 z)
     "wine_bottle_obstacle":       np.array([0.038, 0.038, 0.170]),  # tall thin cylinder
     "milk_obstacle":              np.array([0.048, 0.038, 0.110]),  # carton
@@ -96,15 +96,15 @@ def decompose_obstacle_to_spheres(
         if model.geom_bodyid[gid] != body_id:
             continue
         gtype = int(model.geom_type[gid])
-        if gtype == _MESH:
-            continue
-
         gpos = data.geom_xpos[gid].copy()
         gmat = data.geom_xmat[gid].reshape(3, 3).copy()
         gs   = model.geom_size[gid].copy()
 
         def _w(lp, _p=gpos, _m=gmat):
             return _p + _m @ np.asarray(lp, float)
+
+        if gtype == _MESH:
+            continue  # mesh geom_xpos is at object base; geom_rbound from base spreads spheres on the floor
 
         if gtype == _BOX:
             hx, hy, hz = gs[0], gs[1], gs[2]

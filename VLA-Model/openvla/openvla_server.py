@@ -62,7 +62,7 @@ PROPRIO_DIM       = 8   # eef_pos(3) + axis_angle(3) + gripper_qpos(2)
 try:
     from experiments.robot.openvla_utils import (
         get_action_head, get_processor, get_proprio_projector,
-        get_obstacle_conditioned_projector, get_vla, get_vla_action,
+        get_vla, get_vla_action,
     )
 except ImportError as e:
     raise RuntimeError(
@@ -120,6 +120,7 @@ action_head = get_action_head(cfg, llm_dim=vla.llm_dim)
 
 if OBS_COND:
     print("Loading obstacle-conditioned projector ...")
+    from experiments.robot.openvla_utils import get_obstacle_conditioned_projector
     proprio_projector = get_obstacle_conditioned_projector(
         cfg, llm_dim=vla.llm_dim, proprio_dim=PROPRIO_DIM, obs_dim=OBS_DIM,
         warm_start_from_proprio=True,
