@@ -80,7 +80,7 @@ _default_path  = _LOCAL_DEFAULT if os.path.isdir(_LOCAL_DEFAULT) else _HF_DEFAUL
 
 MODEL_PATH  = os.environ.get("OPENVLA_MODEL_PATH", _default_path)
 UNNORM_KEY  = os.environ.get("OPENVLA_UNNORM_KEY",  "libero_spatial_no_noops")
-CHUNK_SIZE  = int(os.environ.get("OPENVLA_CHUNK_SIZE", "5"))
+CHUNK_SIZE  = int(os.environ.get("OPENVLA_CHUNK_SIZE", "8"))
 # Set OPENVLA_OBS_COND=1 to load the obstacle-conditioned projector instead of the standard one.
 # When enabled, clients may send an extra `obstacle` field: [obs_dir(3), obs_dist(1)].
 OBS_COND    = os.environ.get("OPENVLA_OBS_COND", "0") == "1"

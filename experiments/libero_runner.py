@@ -1002,12 +1002,9 @@ def run_libero_trial(
     _gvr = GVR()
     _gvr.reset()
 
-    # ── Gripper hysteresis state ──────────────────────────────────────────────
-    # Counts consecutive VLA queries requesting close; locks gripper shut once
-    # it crosses the threshold so it can't toggle open mid-approach.
-    _gripper_close_chunks = 0   # consecutive VLA queries with close command
+    _gripper_close_chunks = 0
     _gripper_locked       = False
-    _gripper_locked_steps = 0   # steps held locked (for timeout reset)
+    _gripper_locked_steps = 0
 
     # ── SafeLIBERO obstacle auto-detection ────────────────────────────────────
     # After warm-up, scan env joint names for obstacle objects that have
@@ -1219,24 +1216,7 @@ def run_libero_trial(
                 safe_action[:3] = apf_xyz
                 h_val = _apf_dist
 
-            # ── 3b. GVR: Grasp Verification & Recovery ────────────────────
-            # Detects phantom grasps (gripper closed, nothing lifted) and
-            # hovering oscillation (EE circling object without grasping).
-            if _use_gvr:
-                safe_action, _gvr_phase = _gvr.update(
-                    action        = safe_action,
-                    ee_pos        = ee_pos,
-                    obs           = obs,
-                    obj_pos_keys  = _obj_pos_keys,
-                    obj_initial_z = _obj_initial_z,
-                    grasp_flag    = _grasp_flag,
-                    obstacle_keys = _obstacle_key_set,
-                )
-                if _gvr_phase != "normal" and t % 4 == 0:
-                    print(f"  [{t:03d}] GVR: {_gvr_phase} "
-                          f"(phantom={_gvr.phantom_count} hover={_gvr.hover_count})")
-            else:
-                _gvr_phase = "normal"
+            _gvr_phase = "normal"
 
             # ── 3c. Placement heuristic ───────────────────────────────────
             # If the arm has been holding an object AT the goal for several
@@ -1249,62 +1229,6 @@ def run_libero_trial(
                     safe_action[6] = -1.0  # force release
             else:
                 _goal_hold_steps = 0
-
-            # ── 3d. Gripper hysteresis ────────────────────────────────────
-            # VLA binarized gripper flips between open/close across replan
-            # queries.  Once it says "close" twice in a row, lock the gripper
-            # shut so it has time to fully grip the object.  Auto-unlock after
-            # 80 steps with no confirmed grasp so the VLA can retry.
-            if _use_gripper_hysteresis:
-                if _is_new_vla_chunk:
-                    if _current_action[6] > 0:
-                        _gripper_close_chunks += 1
-                    elif not _grasp_flag:
-                        _gripper_close_chunks = 0
-                        _gripper_locked       = False
-                        _gripper_locked_steps = 0
-
-                if _gripper_close_chunks >= 2:
-                    _gripper_locked = True
-
-                if _gripper_locked and _gvr_phase not in ("phantom_open", "phantom_wait"):
-                    safe_action[6] = 1.0
-                    _gripper_locked_steps += 1
-                    if _gripper_locked_steps >= 80 and not _grasp_flag:
-                        _gripper_locked       = False
-                        _gripper_close_chunks = 0
-                        _gripper_locked_steps = 0
-                        print(f"  [{t:03d}] GRIPPER: lock timeout — releasing for re-approach")
-
-                if _grasp_flag:
-                    _gripper_locked_steps = 0  # don't time-out while holding object
-
-            # ── 3e. Near-grasp XY correction ──────────────────────────────
-            # When EE is within 12 cm of the closest graspable object but off
-            # by more than 2 cm, blend a proportional pull toward the actual
-            # MuJoCo position to compensate for VLA spatial error after CBF
-            # trajectory deflection.  Only active when not already grasping.
-            if not _grasp_flag and not _near_goal:
-                _ng_best_pos  = None
-                _ng_best_dist = float("inf")
-                for _k in _obj_pos_keys:
-                    if _k in _obstacle_key_set or _k not in obs:
-                        continue
-                    _op = np.array(obs[_k], dtype=float)
-                    # Exclude the goal/plate area (objects already at target)
-                    if (goal_pos is not None
-                            and np.linalg.norm(_op[:2] - goal_pos[:2]) < 0.06):
-                        continue
-                    _d = float(np.linalg.norm(ee_pos[:2] - _op[:2]))
-                    if _d < _ng_best_dist:
-                        _ng_best_dist = _d
-                        _ng_best_pos  = _op
-
-                if _ng_best_pos is not None and 0.02 < _ng_best_dist < 0.12:
-                    _xy_err  = _ng_best_pos[:2] - ee_pos[:2]
-                    _xy_pull = np.clip(0.25 * _xy_err, -0.005, 0.005)
-                    safe_action[0] += _xy_pull[0]
-                    safe_action[1] += _xy_pull[1]
 
             # ── 4. Safety monitoring ──────────────────────────────────────
             ee_c = ee_ellipsoid_center(ee_pos, _R1)

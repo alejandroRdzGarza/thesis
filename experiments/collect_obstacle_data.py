@@ -271,12 +271,17 @@ def _collect_episode_body(
     _obs_key_coll = f"{obstacles[0].name}_pos" if obstacles else None
 
     # ── Object tracking ───────────────────────────────────────────────────────
+    # Filter to objects actually in the workspace (exclude off-table stored objects
+    # which LIBERO places at x/y = ±10 or ±20 to keep them out of the scene).
+    def _in_workspace(p):
+        return abs(p[0]) < 2.0 and abs(p[1]) < 2.0 and p[2] > 0.3
     _obj_pos_keys = sorted([
         k for k in obs.keys()
         if k.endswith("_pos") and not k.startswith("robot") and "to_robot" not in k
+        and _in_workspace(np.array(obs[k], dtype=float))
     ])
     _obstacle_key_set = {f"{ob.name}_pos" for ob in obstacles}
-    _obj_initial_z    = {k: float(obs[k][2]) for k in _obj_pos_keys if k in obs}
+    _obj_initial_z: dict[str, float] = {}   # populated at step 5 after physics settle
     _target_keys      = [k for k in _obj_pos_keys if k not in _obstacle_key_set]
 
     # ── Episode-level debug state ─────────────────────────────────────────────
@@ -287,10 +292,6 @@ def _collect_episode_body(
 
     print(f"\n  [ep {ep_idx:03d}] obstacle={obstacles[0].name if obstacles else 'none'}"
           f"  correction={correction.upper()}  lang=\"{lang}\"")
-    print(f"  Objects: " + "  ".join(
-        f"{k.replace('_pos','')}@z={_obj_initial_z[k]:.3f}"
-        for k in _obj_pos_keys if k in _obj_initial_z
-    ))
 
     vla_cnt = 0
 
@@ -338,6 +339,14 @@ def _collect_episode_body(
         ee_quat   = np.array(obs.get("robot0_eef_quat", [0,0,0,1]), dtype=float)
         ee_euler  = _quat_to_euler(ee_quat)
         gq        = np.array(obs.get("robot0_gripper_qpos", [0.04, 0.04]), dtype=float)
+
+        # ── Deferred initial-z capture (after physics settle at step 5) ────────
+        if t == 5 and not _obj_initial_z:
+            _obj_initial_z = {k: float(obs[k][2]) for k in _obj_pos_keys if k in obs}
+            print(f"  [settled] Objects: " + "  ".join(
+                f"{k.replace('_pos','')}@z={_obj_initial_z[k]:.3f}"
+                for k in _obj_pos_keys if k in _obj_initial_z
+            ))
 
         # ── Per-step full state log ───────────────────────────────────────────
         _rel_strs = []
@@ -480,9 +489,9 @@ def _collect_episode_body(
 
         # ── Lift / grasp detection ────────────────────────────────────────────
         for _k in _target_keys:
-            if _k not in obs:
+            if _k not in obs or _k not in _obj_initial_z:
                 continue
-            _lift = float(obs[_k][2]) - _obj_initial_z.get(_k, 0.0)
+            _lift = float(obs[_k][2]) - _obj_initial_z[_k]
             if _lift > _max_lift:
                 _max_lift = _lift
             if _lift > 0.020 and _grasp_step is None:
