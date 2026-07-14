@@ -267,6 +267,14 @@ def _collect_episode(
 
     url = f"http://127.0.0.1:{openvla_port}/act"
 
+    def _quat_to_euler(q):
+        """quaternion [x,y,z,w] → roll,pitch,yaw in degrees."""
+        x, y, z, w = q
+        roll  = np.degrees(np.arctan2(2*(w*x+y*z), 1-2*(x*x+y*y)))
+        pitch = np.degrees(np.arcsin(np.clip(2*(w*y-z*x), -1, 1)))
+        yaw   = np.degrees(np.arctan2(2*(w*z+x*y), 1-2*(y*y+z*z)))
+        return roll, pitch, yaw
+
     for t in range(horizon):
         img_raw   = obs.get("agentview_image")
         wrist_raw = obs.get("robot0_eye_in_hand_image")
@@ -280,6 +288,33 @@ def _collect_episode(
         wrist_img = _preprocess(wrist_raw) if wrist_raw is not None else np.zeros((224, 224, 3), dtype=np.uint8)
         state     = _build_proprio(obs)
         ee_pos    = np.array(obs["robot0_eef_pos"], dtype=float)
+        ee_quat   = np.array(obs.get("robot0_eef_quat", [0,0,0,1]), dtype=float)
+        ee_euler  = _quat_to_euler(ee_quat)
+        gq        = np.array(obs.get("robot0_gripper_qpos", [0.04, 0.04]), dtype=float)
+
+        # ── Per-step full state log ───────────────────────────────────────────
+        _rel_strs = []
+        for _k in _obj_pos_keys:
+            if _k not in obs:
+                continue
+            _op  = np.array(obs[_k], dtype=float)
+            _rel = _op - ee_pos
+            _d   = float(np.linalg.norm(_rel))
+            _tag = "OBS" if _k in _obstacle_key_set else "tgt"
+            _rel_strs.append(
+                f"    {_tag} {_k.replace('_pos',''):30s}"
+                f" pos=[{_op[0]:+.3f},{_op[1]:+.3f},{_op[2]:+.3f}]"
+                f" rel=[{_rel[0]:+.3f},{_rel[1]:+.3f},{_rel[2]:+.3f}]"
+                f" d={_d:.3f}m"
+            )
+        print(
+            f"[t={t:03d}]"
+            f" EE=[{ee_pos[0]:+.3f},{ee_pos[1]:+.3f},{ee_pos[2]:+.3f}]"
+            f" rpy=[{ee_euler[0]:+.1f},{ee_euler[1]:+.1f},{ee_euler[2]:+.1f}]deg"
+            f" grip=[{gq[0]:.4f},{gq[1]:.4f}]"
+        )
+        for _s in _rel_strs:
+            print(_s)
 
         dists   = [np.linalg.norm(ee_pos - ob.pos) for ob in obstacles]
         near_ob = obstacles[int(np.argmin(dists))]
@@ -384,6 +419,14 @@ def _collect_episode(
         buf_label.append(int(label))
 
         exec_action = safe_action if label == 1 else nom_action
+        _cbf_on = (label == 1)
+        print(
+            f"  act nom=[{nom_action[0]:+.4f},{nom_action[1]:+.4f},{nom_action[2]:+.4f}"
+            f" r={nom_action[3]:+.3f},{nom_action[4]:+.3f},{nom_action[5]:+.3f}"
+            f" g={nom_action[6]:+.0f}]"
+            + (f"  CBF→[{safe_action[0]:+.4f},{safe_action[1]:+.4f},{safe_action[2]:+.4f}]"
+               if _cbf_on else "")
+        )
         step_out = env.step(exec_action)
         obs = step_out[0] if isinstance(step_out[0], dict) else step_out[0]
         done = step_out[2] if len(step_out) == 4 else (step_out[2] or step_out[3])
