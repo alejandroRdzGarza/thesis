@@ -36,12 +36,30 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 import time
 from pathlib import Path
 
 import numpy as np
 
 import cv2
+
+
+class _Tee:
+    """Write to both stdout and a log file simultaneously."""
+    def __init__(self, stream, path: Path):
+        self._stream = stream
+        self._file   = open(path, "w", buffering=1)
+    def write(self, s):
+        self._stream.write(s)
+        self._file.write(s)
+    def flush(self):
+        self._stream.flush()
+        self._file.flush()
+    def fileno(self):
+        return self._stream.fileno()
+    def close(self):
+        self._file.close()
 
 from experiments.libero_runner import (
     _build_proprio,
@@ -184,6 +202,34 @@ def _collect_episode(
 ) -> dict:
     """Run one episode, save DAgger-labelled steps to out_dir/ep_{ep_idx:04d}.npz."""
 
+    out_dir.mkdir(parents=True, exist_ok=True)
+    _log_path   = out_dir / f"ep_{ep_idx:04d}.log"
+    _tee        = _Tee(sys.stdout, _log_path)
+    _real_stdout = sys.stdout
+    sys.stdout   = _tee
+
+    try:
+        return _collect_episode_body(
+            env=env, lang=lang, initial_states=initial_states, ep_idx=ep_idx,
+            openvla_port=openvla_port, replan_steps=replan_steps, horizon=horizon,
+            correction=correction, cbf_gamma=cbf_gamma,
+            obstacle_safety_radius=obstacle_safety_radius,
+            k_rep=k_rep, d_influence=d_influence, out_dir=out_dir,
+            randomize_obstacle=randomize_obstacle, cbf_near_goal_off=cbf_near_goal_off,
+            show=show,
+        )
+    finally:
+        sys.stdout = _real_stdout
+        _tee.close()
+        _real_stdout.write(f"  Log → {_log_path}\n")
+
+
+def _collect_episode_body(
+    env, lang: str, initial_states, ep_idx: int, *,
+    openvla_port, replan_steps, horizon, correction, cbf_gamma,
+    obstacle_safety_radius, k_rep, d_influence, out_dir, randomize_obstacle,
+    cbf_near_goal_off, show,
+) -> dict:
     env.reset()
     if initial_states is not None:
         obs = env.set_init_state(initial_states[ep_idx % len(initial_states)])
@@ -196,7 +242,8 @@ def _collect_episode(
     obstacles  = [_detected] if _detected is not None else []
     if not obstacles:
         print(f"  ep {ep_idx}: no obstacle detected, skipping")
-        return {"steps": 0, "discarded": 0, "nom": 0, "safe": 0, "corr_mags": []}
+        return {"steps": 0, "discarded": 0, "nom": 0, "safe": 0, "corr_mags": [],
+                "success": False, "collision": False, "max_lift": 0.0, "grasp_step": None}
 
     if randomize_obstacle:
         obs = _teleport_obstacle(env, obs, obstacles[0].name)
