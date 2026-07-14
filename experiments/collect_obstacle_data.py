@@ -57,7 +57,6 @@ from experiments.libero_runner import (
     detect_safelibero_obstacle,
     make_libero_env,
 )
-from experiments.gvr import GVR
 from experiments.cbf_ellipsoid import ee_ellipsoid_center, EE_Q_DIAG_DEFAULT
 
 try:
@@ -229,13 +228,7 @@ def _collect_episode(
         k for k in obs.keys()
         if k.endswith("_pos") and not k.startswith("robot") and "to_robot" not in k
     ])
-    _obj_initial_z   = {k: float(obs[k][2]) for k in _obj_pos_keys if k in obs}
     _obstacle_key_set = {f"{ob.name}_pos" for ob in obstacles}
-    _grasp_flag = False
-
-    # ── Grasp Verification & Recovery ────────────────────────────────────────
-    _gvr = GVR()
-    _gvr.reset()
 
     print(f"\n  [ep {ep_idx:03d}] obstacle={obstacles[0].name if obstacles else 'none'}"
           f"  correction={correction.upper()}  lang=\"{lang}\"")
@@ -373,49 +366,9 @@ def _collect_episode(
         buf_label.append(int(label))
 
         exec_action = safe_action if label == 1 else nom_action
-
-        # ── Near-grasp XY correction ──────────────────────────────────────────
-        # When EE is close to the target but slightly off-axis, pull it toward
-        # the object XY position so the VLA can close cleanly.
-        if not _grasp_flag:
-            for _k in _obj_pos_keys:
-                if _k in _obstacle_key_set or _k not in obs:
-                    continue
-                _op = np.array(obs[_k], dtype=float)
-                _d_xy = float(np.linalg.norm(ee_pos[:2] - _op[:2]))
-                if 0.02 < _d_xy < 0.12:
-                    _xy_err = _op[:2] - ee_pos[:2]
-                    exec_action[0] += float(np.clip(0.25 * _xy_err[0], -0.005, 0.005))
-                    exec_action[1] += float(np.clip(0.25 * _xy_err[1], -0.005, 0.005))
-                    break
-
-        # ── GVR: detect phantom grasp / hover orbit and recover ───────────────
-        exec_action, _gvr_phase = _gvr.update(
-            action        = exec_action.copy(),
-            ee_pos        = ee_pos,
-            obs           = obs,
-            obj_pos_keys  = _obj_pos_keys,
-            obj_initial_z = _obj_initial_z,
-            grasp_flag    = _grasp_flag,
-            obstacle_keys = _obstacle_key_set,
-        )
-        if _gvr_phase != "normal" and t % 4 == 0:
-            print(f"  [{t:03d}] GVR: {_gvr_phase}")
-
         step_out = env.step(exec_action)
         obs = step_out[0] if isinstance(step_out[0], dict) else step_out[0]
         done = step_out[2] if len(step_out) == 4 else (step_out[2] or step_out[3])
-
-        # ── Update grasp flag ─────────────────────────────────────────────────
-        if exec_action[6] > 0:
-            for _k in _obj_pos_keys:
-                if _k in _obstacle_key_set or _k not in obs:
-                    continue
-                if float(obs[_k][2]) - _obj_initial_z.get(_k, 0.0) > 0.020:
-                    _grasp_flag = True
-                    break
-        else:
-            _grasp_flag = False
 
         # ── Collision detection (displacement-based) ──────────────────────────
         if _obs_key_coll and _obs_key_coll in obs:
