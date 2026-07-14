@@ -223,15 +223,27 @@ def _collect_episode(
     _collision_flag = False
     _obs_key_coll = f"{obstacles[0].name}_pos" if obstacles else None
 
-    # ── Object tracking for nearest-object console logging ────────────────────
+    # ── Object tracking ───────────────────────────────────────────────────────
     _obj_pos_keys = sorted([
         k for k in obs.keys()
         if k.endswith("_pos") and not k.startswith("robot") and "to_robot" not in k
     ])
     _obstacle_key_set = {f"{ob.name}_pos" for ob in obstacles}
+    _obj_initial_z    = {k: float(obs[k][2]) for k in _obj_pos_keys if k in obs}
+    _target_keys      = [k for k in _obj_pos_keys if k not in _obstacle_key_set]
+
+    # ── Episode-level debug state ─────────────────────────────────────────────
+    _success      = False
+    _max_lift     = 0.0          # max z-rise of any target object
+    _grasp_step   = None         # first step where lift > 2 cm
+    _grasp_obj    = None
 
     print(f"\n  [ep {ep_idx:03d}] obstacle={obstacles[0].name if obstacles else 'none'}"
           f"  correction={correction.upper()}  lang=\"{lang}\"")
+    print(f"  Objects: " + "  ".join(
+        f"{k.replace('_pos','')}@z={_obj_initial_z[k]:.3f}"
+        for k in _obj_pos_keys if k in _obj_initial_z
+    ))
 
     vla_cnt = 0
 
@@ -283,15 +295,21 @@ def _collect_episode(
                 nom_queue    = [_post_process_vla(a) for a in raw_chunk]
                 vla_cnt += 1
                 grip_str = "CLOSE" if action_queue[0][6] > 0 else "open"
+                _gq = obs.get("robot0_gripper_qpos", [0.04, 0.04])
                 obj_str = ""
                 if _obj_pos_keys:
                     _dists = {k: float(np.linalg.norm(np.array(obs[k]) - ee_pos))
                               for k in _obj_pos_keys if k in obs}
                     _nk = min(_dists, key=_dists.get)
                     obj_str = f"  nearest={_nk.replace('_pos','')}({_dists[_nk]:.3f}m)"
-                print(f"  [{t:03d}] VLA #{vla_cnt}  grip={grip_str}"
+                _obj_z_str = "  ".join(
+                    f"{k.replace('_pos','')}z={obs[k][2]:.3f}"
+                    for k in _target_keys if k in obs
+                )
+                print(f"  [{t:03d}] VLA #{vla_cnt}  grip={grip_str}(q={_gq[0]:.3f},{_gq[1]:.3f})"
                       f"  EE=[{ee_pos[0]:.3f},{ee_pos[1]:.3f},{ee_pos[2]:.3f}]"
-                      f"{obj_str}  ({vla_ms:.0f}ms)")
+                      f"{obj_str}  ({vla_ms:.0f}ms)"
+                      + (f"\n         objs: {_obj_z_str}" if _obj_z_str else ""))
             except Exception as e:
                 print(f"  [{t:03d}] VLA error: {e}")
                 break
@@ -370,6 +388,29 @@ def _collect_episode(
         obs = step_out[0] if isinstance(step_out[0], dict) else step_out[0]
         done = step_out[2] if len(step_out) == 4 else (step_out[2] or step_out[3])
 
+        # ── Lift / grasp detection ────────────────────────────────────────────
+        for _k in _target_keys:
+            if _k not in obs:
+                continue
+            _lift = float(obs[_k][2]) - _obj_initial_z.get(_k, 0.0)
+            if _lift > _max_lift:
+                _max_lift = _lift
+            if _lift > 0.020 and _grasp_step is None:
+                _grasp_step = t
+                _grasp_obj  = _k
+                print(f"  [{t:03d}] *** LIFT: {_k.replace('_pos','')} z={obs[_k][2]:.3f}m"
+                      f" (rise={_lift:.3f}m)  EE=[{ee_pos[0]:.3f},{ee_pos[1]:.3f},{ee_pos[2]:.3f}]"
+                      f"  grip=q[{obs.get('robot0_gripper_qpos',[0,0])[0]:.3f}]")
+
+        # ── Task success check ────────────────────────────────────────────────
+        if not _success:
+            try:
+                _success = bool(env.check_success())
+                if _success:
+                    print(f"  [{t:03d}] *** TASK SUCCESS ***")
+            except Exception:
+                pass
+
         # ── Collision detection (displacement-based) ──────────────────────────
         if _obs_key_coll and _obs_key_coll in obs:
             _curr_obs_pos = np.array(obs[_obs_key_coll], dtype=float)
@@ -440,11 +481,21 @@ def _collect_episode(
         )
 
     mean_mag = float(kept_mags[kept_mags > 0].mean()) if (kept_mags > 0).any() else 0.0
-    print(f"  ep {ep_idx:03d}: {n_total} steps kept  "
-          f"(nom={n_nom}  safe={n_safe}  disc={n_disc})  "
-          f"mean_corr={mean_mag:.4f}m")
+
+    # ── Episode outcome summary ───────────────────────────────────────────────
+    _outcome = "SUCCESS" if _success else ("COLLISION" if _collision_flag else "FAIL")
+    print(f"  ep {ep_idx:03d} [{_outcome}]  steps={t+1}  vla={vla_cnt}"
+          f"  max_lift={_max_lift:.3f}m"
+          + (f"  grasped={_grasp_obj.replace('_pos','') if _grasp_obj else 'NONE'}@step={_grasp_step}"
+             if _grasp_step else "  NEVER_GRASPED")
+          + f"  collision={_collision_flag}"
+          + f"\n         data: {n_total} steps kept (nom={n_nom} safe={n_safe} disc={n_disc})"
+          + f"  mean_corr={mean_mag:.4f}m")
+
     return {"steps": n_total, "discarded": n_disc, "nom": n_nom, "safe": n_safe,
-            "corr_mags": kept_mags[kept_mags > 0].tolist()}
+            "corr_mags": kept_mags[kept_mags > 0].tolist(),
+            "success": _success, "collision": _collision_flag,
+            "max_lift": _max_lift, "grasp_step": _grasp_step}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -550,6 +601,9 @@ def main():
 
     totals    = {"steps": 0, "discarded": 0, "nom": 0, "safe": 0}
     all_mags: list[float] = []
+    n_success = 0
+    n_grasped = 0
+    n_collision = 0
 
     for ep in range(args.episodes):
         stats = _collect_episode(
@@ -570,7 +624,17 @@ def main():
         for k in ("steps", "discarded", "nom", "safe"):
             totals[k] += stats[k]
         all_mags.extend(stats["corr_mags"])
+        if stats.get("success"):    n_success   += 1
+        if stats.get("grasp_step") is not None: n_grasped += 1
+        if stats.get("collision"):  n_collision += 1
 
+    n = args.episodes
+    print(f"\n{'='*55}")
+    print(f"EPISODE OUTCOMES ({n} episodes)")
+    print(f"  TSR        : {n_success}/{n} ({100*n_success/n:.0f}%)")
+    print(f"  Grasped    : {n_grasped}/{n} ({100*n_grasped/n:.0f}%)")
+    print(f"  Collisions : {n_collision}/{n} ({100*n_collision/n:.0f}%)")
+    print(f"{'='*55}")
     _quality_report(totals, all_mags, args.correction)
     print(f"Dataset saved to {out_dir}/")
 
