@@ -47,6 +47,11 @@ if ! command -v uv &>/dev/null; then
     source "$HOME/.local/bin/env"
 fi
 
+# Point uv cache to the network volume — container root filesystem is small
+export UV_CACHE_DIR=/workspace/uv-cache
+grep -q "UV_CACHE_DIR" "$HOME/.bashrc" 2>/dev/null || \
+    echo 'export UV_CACHE_DIR=/workspace/uv-cache' >> "$HOME/.bashrc"
+
 echo "=== openpi repo ==="
 if [ ! -d "$OPENPI_DIR" ]; then
     GIT_LFS_SKIP_SMUDGE=1 git clone https://github.com/Physical-Intelligence/openpi.git "$OPENPI_DIR"
@@ -57,35 +62,24 @@ cd "$OPENPI_DIR"
 GIT_LFS_SKIP_SMUDGE=1 uv sync
 GIT_LFS_SKIP_SMUDGE=1 uv pip install -e .
 
-echo "=== openpi-client (for LIBERO runner) ==="
-pip install -q -e "$OPENPI_DIR/packages/openpi-client/"
-
-echo "=== LIBERO from source ==="
+echo "=== LIBERO + extras into openpi .venv (no separate pi_env needed) ==="
 if [ ! -d "$LIBERO_DIR" ]; then
     git clone https://github.com/Lifelong-Robot-Learning/LIBERO.git "$LIBERO_DIR"
 fi
-pip install -q -e "$LIBERO_DIR"
-
-echo "=== Environment variables ==="
-grep -q "MUJOCO_GL=egl" "$VENV/bin/activate" 2>/dev/null || cat >> "$VENV/bin/activate" << 'EOF'
-
-# π0.5 + LIBERO rendering and path setup
-export MUJOCO_GL=egl
-export PYOPENGL_PLATFORM=egl
-export PYTHONPATH=/workspace/LIBERO:$PYTHONPATH
-EOF
+cd "$OPENPI_DIR"
+uv pip install -e "$LIBERO_DIR"
+uv pip install bddl easydict cloudpickle lxml h5py imageio imageio-ffmpeg PyYAML
 
 echo ""
-echo "=== Done! Activate with: ==="
-echo "  source $VENV/bin/activate"
+echo "=== Done! No separate venv needed — use openpi's .venv for everything ==="
 echo ""
-echo "=== Then start the π0.5 server (terminal 1, checkpoint auto-downloads ~10GB): ==="
-echo "  source \$HOME/.local/bin/env   # activate uv"
+echo "=== Terminal 1 — start the π0.5 server (checkpoint auto-downloads ~10GB): ==="
+echo "  export UV_CACHE_DIR=/workspace/uv-cache"
 echo "  cd $OPENPI_DIR"
 echo "  export OPENPI_DATA_HOME=/workspace/openpi-cache"
 echo "  uv run scripts/serve_policy.py --env libero"
 echo ""
-echo "=== And run the benchmark (terminal 2): ==="
-echo "  source $VENV/bin/activate"
+echo "=== Terminal 2 — run the benchmark: ==="
 echo "  cd $THESIS"
-echo "  python run_libero_benchmark.py --vla pi05 --suite libero_spatial --task 0 --episodes 5"
+echo "  export MUJOCO_GL=egl PYOPENGL_PLATFORM=egl PYTHONPATH=/workspace/LIBERO"
+echo "  $OPENPI_DIR/.venv/bin/python run_libero_benchmark.py --vla pi05 --suite libero_spatial --task 0 --episodes 5"
