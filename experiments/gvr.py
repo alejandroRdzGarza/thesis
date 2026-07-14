@@ -57,10 +57,10 @@ class GVR:
     """Grasp Verification & Recovery state machine."""
 
     # ── Detection thresholds ────────────────────────────────────────────
-    phantom_threshold:   int   = 35     # consecutive closing steps before phantom fires
-    hover_threshold:     int   = 50     # consecutive hover steps before rescue fires
-    hover_radius:        float = 0.07   # 7 cm EE-to-object XY to count as hovering
-    phantom_prox_radius: float = 0.12   # phantom only fires when EE within 12 cm of object
+    phantom_threshold:   int   = 25     # consecutive closing steps before phantom fires
+    hover_threshold:     int   = 40     # consecutive hover steps before rescue fires
+    hover_radius:        float = 0.12   # 12 cm EE-to-object XY to count as hovering
+    phantom_prox_radius: float = 0.15   # phantom only fires when EE within 15 cm of object
     lift_threshold:      float = 0.015  # 1.5 cm object rise to confirm grasp
 
     # ── Recovery durations (steps) ───────────────────────────────────────

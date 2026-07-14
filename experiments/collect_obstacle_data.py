@@ -41,6 +41,8 @@ from pathlib import Path
 
 import numpy as np
 
+import cv2
+
 from experiments.libero_runner import (
     _build_proprio,
     _compute_obs_features,
@@ -48,11 +50,23 @@ from experiments.libero_runner import (
     _post_process_vla,
     _preprocess,
     _query_openvla_chunk,
+    _render_frame,
+    _unwrap_sim,
     OPENVLA_URL,
     ObstacleConfig,
     detect_safelibero_obstacle,
     make_libero_env,
 )
+from experiments.gvr import GVR
+from experiments.cbf_ellipsoid import ee_ellipsoid_center, EE_Q_DIAG_DEFAULT
+
+try:
+    from experiments.cbf_visualizer import install_scene_hook, push_cbf_geoms
+    _HAS_VIZ = True
+except ImportError:
+    _HAS_VIZ = False
+
+_CV2_WINDOW = "collect_obstacle_data"
 
 # ── CBF thresholds (used when --correction cbf) ───────────────────────────────
 H_SAFE    = 0.15   # h above this → nom; below → CBF action
@@ -112,6 +126,40 @@ def _apf_correction(
     return safe_xyz, d_surface, corr_mag
 
 
+def _teleport_obstacle(env, obs: dict, obstacle_name: str,
+                        x_range: tuple = (0.30, 0.65),
+                        y_range: tuple = (-0.35, 0.35),
+                        min_robot_dist: float = 0.25) -> dict:
+    """Move obstacle to a random (x, y) within workspace; keep z and orientation.
+
+    Samples uniformly within x_range × y_range with rejection on robot-base
+    proximity.  Returns fresh obs after env.sim.forward().
+    """
+    joint_name = f"{obstacle_name}_joint0"
+    try:
+        jid = env.sim.model.joint_name2id(joint_name)
+    except Exception:
+        return obs                              # joint not found, skip
+    qpos_addr = env.sim.model.jnt_qposadr[jid]
+    for _ in range(50):                         # rejection sampling
+        nx = np.random.uniform(*x_range)
+        ny = np.random.uniform(*y_range)
+        if np.sqrt(nx ** 2 + ny ** 2) >= min_robot_dist:
+            break
+    env.sim.data.qpos[qpos_addr]     = nx
+    env.sim.data.qpos[qpos_addr + 1] = ny
+    # z (qpos_addr+2) and quaternion (qpos_addr+3:7) stay unchanged
+    env.sim.forward()
+    # Different LIBERO env wrappers expose observations differently
+    for _getter in ("_get_observations", "_get_obs", "get_observation"):
+        fn = getattr(env, _getter, None)
+        if fn is not None:
+            return fn()
+    # Final fallback: zero-action step (advances physics one tick, updates obs)
+    new_obs, _, _, _ = env.step(np.zeros(7))
+    return new_obs
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Episode collector
 # ─────────────────────────────────────────────────────────────────────────────
@@ -131,18 +179,68 @@ def _collect_episode(
     k_rep: float,
     d_influence: float,
     out_dir: Path,
+    randomize_obstacle: bool = False,
+    cbf_near_goal_off: bool = False,
+    show: bool = False,
 ) -> dict:
     """Run one episode, save DAgger-labelled steps to out_dir/ep_{ep_idx:04d}.npz."""
 
     env.reset()
     if initial_states is not None:
-        env.set_init_state(initial_states[ep_idx % len(initial_states)])
-    obs = env.get_obs()
+        obs = env.set_init_state(initial_states[ep_idx % len(initial_states)])
+    else:
+        result = env.reset()
+        obs = result[0] if isinstance(result, tuple) else result
 
-    obstacles: list[ObstacleConfig] = detect_safelibero_obstacle(env, obs)
+    # detect_safelibero_obstacle returns ObstacleConfig | None — wrap in list
+    _detected = detect_safelibero_obstacle(env, obs)
+    obstacles  = [_detected] if _detected is not None else []
     if not obstacles:
         print(f"  ep {ep_idx}: no obstacle detected, skipping")
         return {"steps": 0, "discarded": 0, "nom": 0, "safe": 0, "corr_mags": []}
+
+    if randomize_obstacle:
+        obs = _teleport_obstacle(env, obs, obstacles[0].name)
+        _det2 = detect_safelibero_obstacle(env, obs)
+        if _det2 is not None:
+            obstacles = [_det2]
+
+    # ── Visualization setup ───────────────────────────────────────────────────
+    _viz_hook_ok = False
+    model, data = None, None
+    if show and _HAS_VIZ:
+        try:
+            model, data = _unwrap_sim(env)
+            _viz_hook_ok = install_scene_hook(env.sim)
+            cv2.namedWindow(_CV2_WINDOW, cv2.WINDOW_AUTOSIZE)
+        except Exception as _e:
+            print(f"  [warn] viz init failed: {_e}")
+
+    # ── Collision tracking (displacement-based, matches SafeLIBERO metric) ────
+    # Baseline is captured AFTER the first physics step so teleport-settling
+    # micro-displacements (physics resolving the new contact state) don't
+    # flag as collisions before the robot has moved.
+    _initial_obstacle_pos = None   # set lazily after step 0
+    _collision_flag = False
+    _obs_key_coll = f"{obstacles[0].name}_pos" if obstacles else None
+
+    # ── Object tracking for nearest-object console logging ────────────────────
+    _obj_pos_keys = sorted([
+        k for k in obs.keys()
+        if k.endswith("_pos") and not k.startswith("robot") and "to_robot" not in k
+    ])
+    _obj_initial_z   = {k: float(obs[k][2]) for k in _obj_pos_keys if k in obs}
+    _obstacle_key_set = {f"{ob.name}_pos" for ob in obstacles}
+    _grasp_flag = False
+
+    # ── Grasp Verification & Recovery ────────────────────────────────────────
+    _gvr = GVR()
+    _gvr.reset()
+
+    print(f"\n  [ep {ep_idx:03d}] obstacle={obstacles[0].name if obstacles else 'none'}"
+          f"  correction={correction.upper()}  lang=\"{lang}\"")
+
+    vla_cnt = 0
 
     buf_img      = []
     buf_wrist    = []
@@ -156,6 +254,11 @@ def _collect_episode(
 
     action_queue: list[np.ndarray] = []
     nom_queue:    list[np.ndarray] = []
+
+    # CBF near-goal deactivation: once gripper has been closing for 2+ steps, stop CBF.
+    # This lets the VLA complete the grasp unimpeded once it's committed to the target.
+    _cbf_active          = True
+    _gripper_close_steps = 0
 
     url = f"http://127.0.0.1:{openvla_port}/act"
 
@@ -179,10 +282,23 @@ def _collect_episode(
 
         if not action_queue:
             try:
+                _t0 = time.perf_counter()
                 raw_chunk  = _query_openvla_chunk(img, wrist_img, state, lang,
                                                   num_actions=replan_steps, url=url)
+                vla_ms = (time.perf_counter() - _t0) * 1000
                 action_queue = [_post_process_vla(a) for a in raw_chunk]
                 nom_queue    = [_post_process_vla(a) for a in raw_chunk]
+                vla_cnt += 1
+                grip_str = "CLOSE" if action_queue[0][6] > 0 else "open"
+                obj_str = ""
+                if _obj_pos_keys:
+                    _dists = {k: float(np.linalg.norm(np.array(obs[k]) - ee_pos))
+                              for k in _obj_pos_keys if k in obs}
+                    _nk = min(_dists, key=_dists.get)
+                    obj_str = f"  nearest={_nk.replace('_pos','')}({_dists[_nk]:.3f}m)"
+                print(f"  [{t:03d}] VLA #{vla_cnt}  grip={grip_str}"
+                      f"  EE=[{ee_pos[0]:.3f},{ee_pos[1]:.3f},{ee_pos[2]:.3f}]"
+                      f"{obj_str}  ({vla_ms:.0f}ms)")
             except Exception as e:
                 print(f"  [{t:03d}] VLA error: {e}")
                 break
@@ -190,6 +306,17 @@ def _collect_episode(
         nom_action = nom_queue.pop(0)
         _          = action_queue.pop(0)   # unused — we recompute correction each step
         nom_xyz    = nom_action[:3].copy()
+
+        # Track gripper state — deactivate CBF once the gripper starts closing,
+        # so the VLA can grasp the target without interference.
+        if cbf_near_goal_off:
+            g_qpos = obs.get("robot0_gripper_qpos", np.array([0.04, 0.04]))
+            if float(np.sum(np.abs(g_qpos))) < 0.015:   # both fingers nearly closed
+                _gripper_close_steps += 1
+                if _gripper_close_steps >= 2:
+                    _cbf_active = False
+            else:
+                _gripper_close_steps = 0
 
         if correction == "apf":
             safe_xyz, dist, corr_mag = _apf_correction(
@@ -209,21 +336,28 @@ def _collect_episode(
                 if h < h_min:
                     h_min = h
             dist = float(np.linalg.norm(ee_pos - near_ob.pos))
-            if h_min < H_SAFE + 0.05:
-                try:
-                    safe_xyz, _ = _cbf_correction(
-                        ee_pos, near_ob, nom_xyz, cbf_gamma, obstacle_safety_radius)
-                except Exception:
-                    safe_xyz = nom_xyz.copy()
-            else:
+
+            if not _cbf_active:
+                # CBF deactivated near goal — execute nominal, label as nom
                 safe_xyz = nom_xyz.copy()
-            corr_mag = float(np.linalg.norm(safe_xyz - nom_xyz))
-            if h_min < H_DISCARD:
-                label = -1
-            elif h_min <= H_SAFE:
-                label = 1
+                corr_mag = 0.0
+                label    = 0
             else:
-                label = 0
+                if h_min < H_SAFE + 0.05:
+                    try:
+                        safe_xyz, _ = _cbf_correction(
+                            ee_pos, near_ob, nom_xyz, cbf_gamma, obstacle_safety_radius)
+                    except Exception:
+                        safe_xyz = nom_xyz.copy()
+                else:
+                    safe_xyz = nom_xyz.copy()
+                corr_mag = float(np.linalg.norm(safe_xyz - nom_xyz))
+                if h_min < H_DISCARD:
+                    label = -1
+                elif h_min <= H_SAFE:
+                    label = 1
+                else:
+                    label = 0
 
         safe_action = nom_action.copy()
         safe_action[:3] = safe_xyz
@@ -239,7 +373,93 @@ def _collect_episode(
         buf_label.append(int(label))
 
         exec_action = safe_action if label == 1 else nom_action
-        obs, _, done, _ = env.step(exec_action)
+
+        # ── Near-grasp XY correction ──────────────────────────────────────────
+        # When EE is close to the target but slightly off-axis, pull it toward
+        # the object XY position so the VLA can close cleanly.
+        if not _grasp_flag:
+            for _k in _obj_pos_keys:
+                if _k in _obstacle_key_set or _k not in obs:
+                    continue
+                _op = np.array(obs[_k], dtype=float)
+                _d_xy = float(np.linalg.norm(ee_pos[:2] - _op[:2]))
+                if 0.02 < _d_xy < 0.12:
+                    _xy_err = _op[:2] - ee_pos[:2]
+                    exec_action[0] += float(np.clip(0.25 * _xy_err[0], -0.005, 0.005))
+                    exec_action[1] += float(np.clip(0.25 * _xy_err[1], -0.005, 0.005))
+                    break
+
+        # ── GVR: detect phantom grasp / hover orbit and recover ───────────────
+        exec_action, _gvr_phase = _gvr.update(
+            action        = exec_action.copy(),
+            ee_pos        = ee_pos,
+            obs           = obs,
+            obj_pos_keys  = _obj_pos_keys,
+            obj_initial_z = _obj_initial_z,
+            grasp_flag    = _grasp_flag,
+            obstacle_keys = _obstacle_key_set,
+        )
+        if _gvr_phase != "normal" and t % 4 == 0:
+            print(f"  [{t:03d}] GVR: {_gvr_phase}")
+
+        step_out = env.step(exec_action)
+        obs = step_out[0] if isinstance(step_out[0], dict) else step_out[0]
+        done = step_out[2] if len(step_out) == 4 else (step_out[2] or step_out[3])
+
+        # ── Update grasp flag ─────────────────────────────────────────────────
+        if exec_action[6] > 0:
+            for _k in _obj_pos_keys:
+                if _k in _obstacle_key_set or _k not in obs:
+                    continue
+                if float(obs[_k][2]) - _obj_initial_z.get(_k, 0.0) > 0.020:
+                    _grasp_flag = True
+                    break
+        else:
+            _grasp_flag = False
+
+        # ── Collision detection (displacement-based) ──────────────────────────
+        if _obs_key_coll and _obs_key_coll in obs:
+            _curr_obs_pos = np.array(obs[_obs_key_coll], dtype=float)
+            if _initial_obstacle_pos is None:
+                _initial_obstacle_pos = _curr_obs_pos.copy()  # step-0 baseline
+            elif not _collision_flag:
+                _disp = float(np.sum(np.abs(_curr_obs_pos - _initial_obstacle_pos)))
+                if _disp > 0.002:  # 2mm: matches SafeLIBERO intent, filters physics-settle noise
+                    _collision_flag = True
+                    print(f"  [{t:03d}] COLLISION: obstacle displaced {_disp:.4f}m")
+
+        # ── Console status every CBF step ─────────────────────────────────────
+        if label == 1:
+            print(f"  [{t:03d}] CBF  h={h_min:.3f}  corr={corr_mag:.4f}m")
+
+        # ── cv2 display ───────────────────────────────────────────────────────
+        if show and img is not None:
+            if _viz_hook_ok and obstacles and model is not None:
+                try:
+                    from scipy.spatial.transform import Rotation as _SR
+                    _eef_q = np.array(obs.get("robot0_eef_quat", [0, 0, 0, 1]), float)
+                    _R1    = _SR.from_quat(_eef_q).as_matrix()
+                    _ee_c  = ee_ellipsoid_center(ee_pos, _R1)
+                    push_cbf_geoms(
+                        env.sim,
+                        ee_center=_ee_c, ee_q=EE_Q_DIAG_DEFAULT, R1=_R1,
+                        obstacles=obstacles,
+                        h_values=[h_min if correction == "cbf" else dist],
+                        arm_body_ids=[], arm_radii={},
+                        model=model, data=data,
+                        cbf_triggered=(label == 1),
+                        obstacle_spheres=None, arm_sample_positions=None,
+                    )
+                except Exception:
+                    pass
+            _h_disp = h_min if correction == "cbf" else float("inf")
+            frame = _render_frame(img, t, horizon, correction, dist,
+                                  label == 1, _collision_flag, ep_idx, vla_cnt,
+                                  h_val=_h_disp)
+            cv2.imshow(_CV2_WINDOW, frame)
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                break
+
         if done:
             break
 
@@ -332,30 +552,37 @@ def main():
     parser = argparse.ArgumentParser(description="Collect obstacle-conditioned DAgger data")
     parser.add_argument("--suite",       default="safelibero_spatial")
     parser.add_argument("--task",        type=int, default=0)
-    parser.add_argument("--safety-level", type=int, default=1)
+    parser.add_argument("--safety-level", default="I")
     parser.add_argument("--episodes",   type=int, default=60)
-    parser.add_argument("--horizon",    type=int, default=600)
+    parser.add_argument("--horizon",    type=int, default=400)
     parser.add_argument("--replan-steps", type=int, default=8)
     # Correction mode
     parser.add_argument("--correction", choices=["cbf", "apf"], default="apf",
                         help="cbf: reactive CBF filter; apf: smooth APF repulsion (default)")
     # APF params
     parser.add_argument("--k-rep",       type=float, default=2.0,
-                        help="APF gain (dimensionless; default 2.0 = 73%% of nom action at closest approach)")
-                        help="APF repulsion gain (m/step at obstacle surface, default 0.025)")
+                        help="APF gain (dimensionless; default 2.0)")
     parser.add_argument("--d-influence", type=float, default=0.20,
                         help="APF influence radius from obstacle SURFACE in metres (default 0.20)")
     # CBF params
     parser.add_argument("--cbf-gamma",  type=float, default=1.8)
     parser.add_argument("--safety-radius", type=float, default=0.10)
-    # IO
+    # Data augmentation
+    parser.add_argument("--randomize-obstacle", action="store_true",
+                        help="Teleport obstacle to a random workspace position each episode")
+    parser.add_argument("--cbf-near-goal-off", action="store_true",
+                        help="Deactivate CBF once gripper starts closing (near grasp target)")
+    # IO / display
+    parser.add_argument("--show", action="store_true",
+                        help="Open MuJoCo viewer window (slower; useful for debugging)")
     parser.add_argument("--openvla-port", type=int, default=8000)
     parser.add_argument("--out", default="data/obs_cond_dataset")
     args = parser.parse_args()
 
-    out_dir = Path(args.out) / f"{args.suite}_t{args.task:02d}_LI"
+    scene_mode = "rand" if args.randomize_obstacle else "orig"
+    out_dir = Path(args.out) / f"{args.suite}_t{args.task:02d}_L{args.safety_level}_{scene_mode}"
     print(f"Collecting {args.episodes} episodes → {out_dir}")
-    print(f"  correction={args.correction}  "
+    print(f"  correction={args.correction}  scene={scene_mode}  level={args.safety_level}  "
           + (f"k_rep={args.k_rep}  d_influence={args.d_influence}"
              if args.correction == "apf"
              else f"cbf_gamma={args.cbf_gamma}  safety_radius={args.safety_radius}"))
@@ -364,7 +591,7 @@ def main():
         task_suite=args.suite,
         task_idx=args.task,
         safety_level=args.safety_level,
-        has_renderer=False,
+        has_renderer=False,   # cv2 handles display; MuJoCo windowed renderer hangs
         horizon=args.horizon,
     )
 
@@ -383,6 +610,9 @@ def main():
             k_rep=args.k_rep,
             d_influence=args.d_influence,
             out_dir=out_dir,
+            randomize_obstacle=args.randomize_obstacle,
+            cbf_near_goal_off=args.cbf_near_goal_off,
+            show=args.show,
         )
         for k in ("steps", "discarded", "nom", "safe"):
             totals[k] += stats[k]

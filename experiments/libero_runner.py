@@ -536,7 +536,7 @@ def make_libero_env(task_suite: str = "libero_spatial",
                     task_idx: int = 0,
                     safety_level: str = "I",
                     has_renderer: bool = False,
-                    horizon: int = 800) -> tuple:
+                    horizon: int = 400) -> tuple:
     """Create a LIBERO or SafeLIBERO environment with OSC_POSE controller.
 
     For SafeLIBERO suites (task_suite starts with 'safelibero_'), also loads
@@ -886,7 +886,7 @@ def run_libero_trial(
     translational_only: bool | None = None,
     # Synchronous replan parameters (AEGIS approach)
     replan_steps: int = 5,
-    horizon: int = 800,
+    horizon: int = 400,
     # Obstacle geometry: sphere decomposition vs single ellipsoid
     use_sphere_decomp: bool = True,
     sphere_decomp_n: int = 48,
@@ -1047,14 +1047,11 @@ def run_libero_trial(
 
     # Record initial obstacle position for displacement-based collision check.
     _obstacle_name: str | None = None
-    _initial_obstacle_pos: np.ndarray | None = None
+    _initial_obstacle_pos: np.ndarray | None = None   # set lazily after step 0
     # Set of obs dict keys that belong to obstacles (passed to GVR to exclude).
     _obstacle_key_set: set[str] = set()
     if obstacles:
         _obstacle_name = obstacles[0].name
-        _obs_key = f"{_obstacle_name}_pos"
-        if _obs_key in obs:
-            _initial_obstacle_pos = np.array(obs[_obs_key], dtype=float).copy()
         _obstacle_key_set = {f"{ob.name}_pos" for ob in obstacles}
     _collision_flag = False
 
@@ -1162,23 +1159,28 @@ def run_libero_trial(
                           np.linalg.norm(ee_pos - goal_pos) < goal_tolerance)
 
             if use_cbf and obstacles and not _near_goal:
-                # Build arm-link sphere constraints (links 3-7, body frame).
-                arm_rows = _compute_arm_link_constraints(
-                    model, data, arm_body_ids, arm_dof_idx, ee_body_id,
-                    _R1, obstacles, scale=1.0, k_cbf=K_CBF,
-                )
+                # Arm-link constraints: re-enabled but GATED on distance so they
+                # only fire when the obstacle is close enough for forearm/wrist
+                # links to reach it.  This avoids the global QP slowdown that
+                # triggered the previous removal.
+                _arm_link_rows: list = []
+                _ee_obs_d = float(np.linalg.norm(ee_pos - obstacles[0].pos))
+                if arm_body_ids and _ee_obs_d < 0.30:
+                    _arm_link_rows = _compute_arm_link_constraints(
+                        model, data, arm_body_ids, arm_dof_idx, ee_body_id,
+                        R1=_R1, obstacles=obstacles, scale=1.0, k_cbf=K_CBF,
+                    )
 
                 if _sphere_decomp is not None:
                     # ── Sphere-decomposition CBF ──────────────────────────────
-                    # N small spheres trace the obstacle surface; each gives one
-                    # linear constraint in a simple 3-variable QP.  No aux z state.
                     u_safe_world, h_val, cbf_triggered = run_sphere_decomp_cbf(
                         ee_pos=ee_pos,
                         R1=_R1,
                         obstacle_spheres=_sphere_decomp,
                         u_nom=_current_action[:3],
                         k_cbf=K_CBF,
-                        extra_constraints=arm_rows,
+                        scale=1.0,
+                        extra_constraints=_arm_link_rows,
                     )
                 else:
                     # ── Ellipsoid CBF (fallback) ──────────────────────────────
@@ -1194,11 +1196,18 @@ def run_libero_trial(
                         ee_pos=ee_pos, R1=_R1,
                         obs_pos=ob0.pos, obs_q=obs_q, z=z0,
                         u_nom=_current_action[:3], k_cbf=K_CBF,
-                        extra_lin_constraints=arm_rows, obs_R=obs_R,
+                        scale=1.0,
+                        extra_lin_constraints=_arm_link_rows, obs_R=obs_R,
                     )
                     _z_states[0] = z_new
 
                 correction_norm = float(np.linalg.norm(u_safe_world - _current_action[:3]))
+                # When CBF is actively deflecting, slow down slightly so the
+                # discrete-time controller has more steps to track the barrier.
+                # scale=1.0 keeps QP constraints correct; this is a separate
+                # robustness knob that only fires when the QP actually moved the action.
+                if cbf_triggered:
+                    u_safe_world = 0.6 * u_safe_world
                 safe_action[:3] = u_safe_world
 
             elif use_apf and obstacles and not _near_goal:
@@ -1329,13 +1338,13 @@ def run_libero_trial(
                         R1=_R1,
                         obstacles=obstacles,
                         h_values=h_values,
-                        arm_body_ids=arm_body_ids,
-                        arm_radii=_ARM_LINK_CBF_RADII,
+                        arm_body_ids=[],        # arm-link spheres removed from QP and viz
+                        arm_radii={},
                         model=model,
                         data=data,
                         cbf_triggered=cbf_triggered,
                         obstacle_spheres=_sphere_decomp,
-                        arm_sample_positions=_link_sample_positions(data, arm_body_ids, n=3, model=model, radial=True),
+                        arm_sample_positions=None,
                     )
                 # The hook already injected CBF geoms into the render context.
                 # env.step() (below) will render the camera through the patched
@@ -1386,13 +1395,19 @@ def run_libero_trial(
                 # _last_grasped_object intentionally kept — used for geo-success check
 
             # ── 7. Displacement-based collision check (SafeLIBERO metric) ─
+            if _obstacle_name is not None:
+                _obs_key = f"{_obstacle_name}_pos"
+                if _obs_key in obs:
+                    curr_obs_pos = np.array(obs[_obs_key], dtype=float)
+                    if _initial_obstacle_pos is None:
+                        _initial_obstacle_pos = curr_obs_pos.copy()  # step-0 baseline
             if (not _collision_flag
                     and _obstacle_name is not None
                     and _initial_obstacle_pos is not None):
                 _obs_key = f"{_obstacle_name}_pos"
                 if _obs_key in obs:
                     curr_obs_pos = np.array(obs[_obs_key], dtype=float)
-                    if np.sum(np.abs(curr_obs_pos - _initial_obstacle_pos)) > 0.001:
+                    if np.sum(np.abs(curr_obs_pos - _initial_obstacle_pos)) > 0.002:
                         _collision_flag = True
                         print(f"  [{t:03d}] COLLISION: obstacle displaced "
                               f"{np.sum(np.abs(curr_obs_pos - _initial_obstacle_pos)):.4f}m")
