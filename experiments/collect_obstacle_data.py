@@ -420,7 +420,13 @@ def _collect_episode_body(
             else:
                 _gripper_close_steps = 0
 
-        if correction == "apf":
+        if correction == "none":
+            safe_xyz = nom_xyz.copy()
+            dist     = float(np.linalg.norm(ee_pos - near_ob.pos))
+            corr_mag = 0.0
+            label    = 0
+
+        elif correction == "apf":
             safe_xyz, dist, corr_mag = _apf_correction(
                 ee_pos, near_ob, nom_xyz, k_rep=k_rep, d_influence=d_influence)
             if dist < D_DISCARD:
@@ -476,12 +482,73 @@ def _collect_episode_body(
 
         exec_action = safe_action if label == 1 else nom_action
         _cbf_on = (label == 1)
+
+        # ── Near-grasp commit ─────────────────────────────────────────────────
+        # When EE is within 12 cm of the nearest graspable target: lock gripper
+        # closed, force descent to target_z + 1 cm, block upward escape until
+        # fingers physically close.  Mirrors the same block in libero_runner.py.
+        _GC_Z_STOP  = 0.010
+        _GC_DESCENT = -0.35
+        _gc_near_key, _gc_near_dist = None, float("inf")
+        for _gck in _target_keys:
+            if _gck not in obs:
+                continue
+            _gcp = np.array(obs[_gck], dtype=float)
+            if _gcp[2] > 1.02:   # skip objects already at goal/placement height
+                continue
+            _d = float(np.linalg.norm(ee_pos - _gcp))
+            if _d < _gc_near_dist:
+                _gc_near_dist, _gc_near_key = _d, _gck
+        _in_gc_range = (correction != "none"
+                        and _gc_near_key is not None
+                        and _gc_near_dist < 0.12
+                        and _grasp_step is None)
+
+        # ── Pre-open: keep gripper open during far approach ──────────────────
+        # The VLA closes the gripper from step 1 due to distribution shift.
+        # Force it open while EE is still far from any target so it's open
+        # when the near-grasp commit descends onto the object.
+        _PRE_OPEN_DIST = 0.15   # m — force open beyond this range
+        _pre_open_active = (
+            correction != "none"
+            and _gc_near_key is not None
+            and _gc_near_dist > _PRE_OPEN_DIST
+            and _grasp_step is None
+        )
+
+        if _in_gc_range:
+            _gc_tgt_pos = np.array(obs[_gc_near_key], dtype=float)
+            _gc_tgt_z   = float(_gc_tgt_pos[2])
+            exec_action = exec_action.copy()
+            exec_action[6] = 1.0   # lock gripper CLOSED
+            _gc_xy_err  = _gc_tgt_pos[:2] - ee_pos[:2]
+            _gc_xy_pull = np.clip(0.4 * _gc_xy_err, -0.012, 0.012)
+            exec_action[0] += _gc_xy_pull[0]
+            exec_action[1] += _gc_xy_pull[1]
+            if ee_pos[2] > _gc_tgt_z + _GC_Z_STOP:
+                exec_action[2] = min(exec_action[2], _GC_DESCENT)
+                if t % 8 == 0:
+                    print(f"  [{t:03d}] GC: descend+pull → "
+                          f"{_gc_near_key.replace('_pos','')} "
+                          f"EEz={ee_pos[2]:.3f} tgtz={_gc_tgt_z:.3f} "
+                          f"xy_err=[{_gc_xy_err[0]:+.3f},{_gc_xy_err[1]:+.3f}]")
+            # Block upward escape until fingers physically close
+            _gc_gq = np.abs(np.array(obs.get("robot0_gripper_qpos",
+                                               [0.04, 0.04]), dtype=float))
+            if float(np.max(_gc_gq)) > 0.015:   # fingers still open
+                exec_action[2] = min(exec_action[2], 0.0)
+        elif _pre_open_active:
+            exec_action = exec_action.copy()
+            exec_action[6] = -1.0  # force gripper OPEN
+
         print(
             f"  act nom=[{nom_action[0]:+.4f},{nom_action[1]:+.4f},{nom_action[2]:+.4f}"
             f" r={nom_action[3]:+.3f},{nom_action[4]:+.3f},{nom_action[5]:+.3f}"
             f" g={nom_action[6]:+.0f}]"
             + (f"  CBF→[{safe_action[0]:+.4f},{safe_action[1]:+.4f},{safe_action[2]:+.4f}]"
                if _cbf_on else "")
+            + (f"  GC→z={exec_action[2]:+.4f}" if _in_gc_range else "")
+            + (f"  OPN" if _pre_open_active else "")
         )
         step_out = env.step(exec_action)
         obs = step_out[0] if isinstance(step_out[0], dict) else step_out[0]
@@ -660,8 +727,8 @@ def main():
     parser.add_argument("--horizon",    type=int, default=400)
     parser.add_argument("--replan-steps", type=int, default=8)
     # Correction mode
-    parser.add_argument("--correction", choices=["cbf", "apf"], default="apf",
-                        help="cbf: reactive CBF filter; apf: smooth APF repulsion (default)")
+    parser.add_argument("--correction", choices=["cbf", "apf", "none"], default="apf",
+                        help="cbf: reactive CBF filter; apf: smooth APF repulsion (default); none: pure VLA")
     # APF params
     parser.add_argument("--k-rep",       type=float, default=2.0,
                         help="APF gain (dimensionless; default 2.0)")

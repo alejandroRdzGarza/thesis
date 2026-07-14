@@ -10,10 +10,11 @@ set -e
 VENV=/workspace/pi_env
 LIBERO_DIR=/workspace/LIBERO
 THESIS=/workspace/thesis
+OPENPI_DIR=/workspace/thesis/openpi
 
 echo "=== System packages ==="
 apt-get update -qq
-apt-get install -y libegl1 libgles2 libosmesa6 libgl1 libglu1-mesa -qq
+apt-get install -y libegl1 libgles2 libosmesa6 libgl1 libglu1-mesa git-lfs -qq
 
 echo "=== Python venv ==="
 python3.11 -m venv "$VENV" 2>/dev/null || true
@@ -40,8 +41,24 @@ pip install -q \
     cloudpickle \
     lxml
 
-echo "=== openpi-client ==="
-pip install -q "$THESIS/openpi/packages/openpi-client/"
+echo "=== uv (openpi package manager) ==="
+if ! command -v uv &>/dev/null; then
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    source "$HOME/.local/bin/env"
+fi
+
+echo "=== openpi repo ==="
+if [ ! -d "$OPENPI_DIR" ]; then
+    GIT_LFS_SKIP_SMUDGE=1 git clone https://github.com/Physical-Intelligence/openpi.git "$OPENPI_DIR"
+fi
+
+echo "=== openpi deps (uv sync) ==="
+cd "$OPENPI_DIR"
+GIT_LFS_SKIP_SMUDGE=1 uv sync
+GIT_LFS_SKIP_SMUDGE=1 uv pip install -e .
+
+echo "=== openpi-client (for LIBERO runner) ==="
+pip install -q -e "$OPENPI_DIR/packages/openpi-client/"
 
 echo "=== LIBERO from source ==="
 if [ ! -d "$LIBERO_DIR" ]; then
@@ -50,7 +67,7 @@ fi
 pip install -q -e "$LIBERO_DIR"
 
 echo "=== Environment variables ==="
-cat >> "$VENV/bin/activate" << 'EOF'
+grep -q "MUJOCO_GL=egl" "$VENV/bin/activate" 2>/dev/null || cat >> "$VENV/bin/activate" << 'EOF'
 
 # π0.5 + LIBERO rendering and path setup
 export MUJOCO_GL=egl
@@ -62,11 +79,13 @@ echo ""
 echo "=== Done! Activate with: ==="
 echo "  source $VENV/bin/activate"
 echo ""
-echo "=== Then start the π0.5 server (terminal 1): ==="
-echo "  source \$HOME/.local/bin/env"
-echo "  cd $THESIS/openpi && export OPENPI_DATA_HOME=/workspace/openpi-cache"
+echo "=== Then start the π0.5 server (terminal 1, checkpoint auto-downloads ~10GB): ==="
+echo "  source \$HOME/.local/bin/env   # activate uv"
+echo "  cd $OPENPI_DIR"
+echo "  export OPENPI_DATA_HOME=/workspace/openpi-cache"
 echo "  uv run scripts/serve_policy.py --env libero"
 echo ""
 echo "=== And run the benchmark (terminal 2): ==="
+echo "  source $VENV/bin/activate"
 echo "  cd $THESIS"
-echo "  python run_libero_benchmark.py --suite libero_spatial --task 0 --mode plain --episodes 2 --vla pi05 --horizon 200"
+echo "  python run_libero_benchmark.py --vla pi05 --suite libero_spatial --task 0 --episodes 5"

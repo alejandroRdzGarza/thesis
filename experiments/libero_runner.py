@@ -1155,7 +1155,26 @@ def run_libero_trial(
             _near_goal = (goal_pos is not None and
                           np.linalg.norm(ee_pos - goal_pos) < goal_tolerance)
 
-            if use_cbf and obstacles and not _near_goal:
+            # Pre-check grasp commit range.  When the EE is within 12 cm of a
+            # graspable target, CBF is also disabled — at this range the
+            # obstacle is already cleared and CBF pushes the EE AWAY from the
+            # bowl (opposite direction to the commit XY pull), which would
+            # counteract the grasp assist entirely.
+            _gc_near_key_pre, _gc_near_dist_pre = None, float("inf")
+            if not _near_goal and not _grasp_flag:
+                for _gck in _obj_pos_keys:
+                    if _gck in _obstacle_key_set or _gck not in obs:
+                        continue
+                    _gcp = np.array(obs[_gck], dtype=float)
+                    if _gcp[2] > 1.02:
+                        continue
+                    _d = float(np.linalg.norm(ee_pos - _gcp))
+                    if _d < _gc_near_dist_pre:
+                        _gc_near_dist_pre, _gc_near_key_pre = _d, _gck
+            _in_gc_range = (_gc_near_key_pre is not None
+                            and _gc_near_dist_pre < 0.12)
+
+            if use_cbf and obstacles and not _near_goal and not _in_gc_range:
                 # Arm-link constraints: re-enabled but GATED on distance so they
                 # only fire when the obstacle is close enough for forearm/wrist
                 # links to reach it.  This avoids the global QP slowdown that
@@ -1229,6 +1248,40 @@ def run_libero_trial(
                     safe_action[6] = -1.0  # force release
             else:
                 _goal_hold_steps = 0
+
+            # ── 3d. Near-grasp commit ─────────────────────────────────────
+            # Reuses _in_gc_range / _gc_near_key_pre computed above.
+            # CBF is already disabled in this range, so XY pull is uncontested.
+            _GC_Z_STOP  = 0.010  # stop forcing down when EE z < target_z + 1 cm
+            _GC_DESCENT = -0.35  # z override while descending into grasp
+
+            if _in_gc_range:
+                _gc_tgt_pos = np.array(obs[_gc_near_key_pre], dtype=float)
+                _gc_tgt_z   = float(_gc_tgt_pos[2])
+                safe_action[6] = 1.0   # lock gripper CLOSED
+                # XY pull toward target (CBF disabled here so this is uncontested)
+                _gc_xy_err  = _gc_tgt_pos[:2] - ee_pos[:2]
+                _gc_xy_pull = np.clip(0.4 * _gc_xy_err, -0.012, 0.012)
+                safe_action[0] += _gc_xy_pull[0]
+                safe_action[1] += _gc_xy_pull[1]
+                if ee_pos[2] > _gc_tgt_z + _GC_Z_STOP:
+                    safe_action[2] = min(safe_action[2], _GC_DESCENT)
+                    if t % 8 == 0:
+                        print(f"  [{t:03d}] GC: descend+pull → "
+                              f"{_gc_near_key_pre.replace('_pos','')} "
+                              f"EEz={ee_pos[2]:.3f} tgtz={_gc_tgt_z:.3f} "
+                              f"xy_err=[{_gc_xy_err[0]:+.3f},{_gc_xy_err[1]:+.3f}]")
+                # Block upward motion until gripper physically closes.
+                # VLA often commands lift immediately after a failed pinch.
+                _gc_gq = np.abs(np.array(obs.get("robot0_gripper_qpos",
+                                                   [0.04, 0.04]), dtype=float))
+                if float(np.max(_gc_gq)) > 0.015:   # fingers still open
+                    safe_action[2] = min(safe_action[2], 0.0)
+            elif (_gc_near_key_pre is not None and _gc_near_dist_pre > 0.15):
+                # Pre-open: VLA closes gripper too early (distribution shift).
+                # Keep it open during far approach so fingers can wrap the object
+                # when the near-grasp commit descends at d < 0.12 m.
+                safe_action[6] = -1.0
 
             # ── 4. Safety monitoring ──────────────────────────────────────
             ee_c = ee_ellipsoid_center(ee_pos, _R1)
