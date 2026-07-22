@@ -1105,6 +1105,15 @@ def run_libero_trial(
     # whose only gate is a per-episode "obstacle present?" flag. Set False to
     # restore the legacy heuristic behaviour.
     aegis_faithful: bool = True,
+    # Co-located RL rollout (Option B): in-process policy override. When provided,
+    # actions come from policy_fn(img, wrist_img, state, instruction, num_actions) ->
+    # (list[7-D action], QueryTrace | None) instead of the VLA server. This bypasses
+    # the websocket entirely (env + model share the process). When record_policy_trace
+    # is True, each returned QueryTrace is appended to metrics.policy_trace for the
+    # on-policy GRPO update. The CBF shield, collision attribution and reward metrics
+    # are untouched — only the action SOURCE changes.
+    policy_fn=None,
+    record_policy_trace: bool = False,
 ) -> MetricsTracker:
     """Run one LIBERO episode using OpenVLA + optional Cartesian CBF.
 
@@ -1125,7 +1134,7 @@ def run_libero_trial(
     if not _HAS_MUJOCO:
         raise RuntimeError("mujoco not available in this environment")
 
-    if vla == "pi05":
+    if vla == "pi05" and policy_fn is None:
         _init_pi05_client(pi05_host, pi05_port)
 
     # Resolve auto defaults: OpenVLA keeps original True behaviour;
@@ -1168,6 +1177,8 @@ def run_libero_trial(
     print(f"  Arm bodies: {len(arm_body_ids)}  Arm DOFs: {arm_dof_idx}")
 
     metrics = MetricsTracker(scene_name, mode, model_name=vla)
+    # On-policy GRPO trace buffer (populated only when policy_fn records traces).
+    metrics.policy_trace = []
 
     goal_str = np.round(goal_pos, 3) if goal_pos is not None else "auto"
     print(f"\n  [{scene_name}] ep={episode_idx}  mode={mode.upper()}  "
@@ -1324,7 +1335,20 @@ def run_libero_trial(
             if not action_queue:
                 try:
                     _t0 = _time.perf_counter()
-                    if vla == "pi05":
+                    if policy_fn is not None:
+                        # Co-located in-process policy (Option B): returns env-ready
+                        # 7-D actions + the flow-SDE QueryTrace for this chunk.
+                        raw_chunk, _qtrace = policy_fn(
+                            img, wrist_img, state,
+                            _instruction_effective, replan_steps)
+                        action_queue = [np.asarray(a, dtype=np.float64).copy()
+                                        for a in raw_chunk]
+                        if _use_translational_only:
+                            for a in action_queue:
+                                a[3:6] = 0.0  # zero rotational deltas — match AEGIS setup
+                        if record_policy_trace and _qtrace is not None:
+                            metrics.policy_trace.append(_qtrace)
+                    elif vla == "pi05":
                         raw_chunk = _query_pi05_chunk(img, wrist_img, state,
                                                       _instruction_effective, num_actions=replan_steps)
                         action_queue = [a.copy() for a in raw_chunk]
