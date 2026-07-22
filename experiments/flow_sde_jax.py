@@ -66,7 +66,62 @@ def sde_step_with_logprob(
     else:
         raise ValueError(f"sde_type must be 'sde' or 'cps', got {sde_type!r}")
 
-    return prev_sample, jnp.mean(logp), prev_mean, std
+    # Reduce over the action dims (H, action_dim), keeping any leading batch dim:
+    # per-sample logp (Flow-GRPO's "mean over non-batch dims"). For a single (H, ad)
+    # chunk this is a scalar; for a (batch, H, ad) training batch it is (batch,).
+    return prev_sample, jnp.mean(logp, axis=(-2, -1)), prev_mean, std
+
+
+def make_sigmas(num_steps: int):
+    """π0.5 sigma(=time) schedule 1→0 in num_steps steps (uniform, dt=-1/N)."""
+    return jnp.linspace(1.0, 0.0, num_steps + 1)
+
+
+def flow_sde_sample(velocity_fn, noise, sigmas, noise_level, key, sde_type="sde"):
+    """Full flow-SDE sampling loop — the body of pi0.py::sample_actions_with_logprob.
+
+    `velocity_fn(x_t, sigma) -> v` is the model's action-head forward pass (closes over
+    the prefix KV cache in the real model). Uses jax.lax.scan over the denoising steps,
+    same structure as the deterministic sampler but with the SDE step. Returns:
+      action    : x_0
+      chain     : (num_steps+1, *action_shape) latent trajectory
+      step_logp : (num_steps,) per-step logp under the sampling policy (= logp_old)
+    """
+    sigma_max = sigmas[1]
+    num_steps = sigmas.shape[0] - 1
+    keys = jax.random.split(key, num_steps)
+
+    def body(x, inp):
+        sig, sig_prev, k = inp
+        v = velocity_fn(x, sig)
+        x_next, logp, _, _ = sde_step_with_logprob(
+            v, sig, sig_prev, x, noise_level, k, sde_type, sigma_max)
+        return x_next, (x_next, logp)
+
+    x0, (chain_tail, step_logp) = jax.lax.scan(
+        body, noise, (sigmas[:-1], sigmas[1:], keys))
+    chain = jnp.concatenate([noise[None], chain_tail], axis=0)
+    return {"action": x0, "chain": chain, "step_logp": step_logp}
+
+
+def flow_sde_recompute_logp(velocity_fn, chain, sigmas, noise_level, sde_type="sde"):
+    """Per-step logp of a RECORDED chain under the current policy (for the GRPO ratio).
+
+    With velocity_fn = sampling policy this exactly reproduces step_logp (ratio ≡ 1).
+    This is what the training loss calls each update.
+    """
+    sigma_max = sigmas[1]
+
+    def body(_, inp):
+        sig, sig_prev, x, x_next = inp
+        v = velocity_fn(x, sig)
+        _, logp, _, _ = sde_step_with_logprob(
+            v, sig, sig_prev, x, noise_level, None, sde_type, sigma_max, prev_sample=x_next)
+        return None, logp
+
+    _, step_logp = jax.lax.scan(
+        body, None, (sigmas[:-1], sigmas[1:], chain[:-1], chain[1:]))
+    return step_logp
 
 
 def grpo_surrogate(logp_new, logp_old, advantage, clip: float = 0.2):

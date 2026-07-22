@@ -49,5 +49,22 @@ for ln, lo, a in [(0.1, 0.0, 1.0), (np.log(2.0), 0.0, 1.0), (np.log(0.5), 0.0, -
     sj = float(jx_surr(jnp.array([ln]), jnp.array([lo]), jnp.array([a]))[0])
     check(f"surrogate parity (ln={ln:.2f},a={a})", abs(sn - sj) < 1e-5, f"(np={sn:.3f} jax={sj:.3f})")
 
+# ── sampling-loop self-consistency (the on-policy ratio≡1 check) ──
+import jax
+from experiments.flow_sde_jax import make_sigmas, flow_sde_sample, flow_sde_recompute_logp
+Hh, Dd = 5, 7
+sigmas = make_sigmas(6)
+cvec = (np.arange(Dd, dtype=np.float32) - 3) * 0.1
+def vfun(x, sigma):            # mock velocity (constant), stands in for the action head
+    return jnp.broadcast_to(jnp.asarray(cvec), x.shape)
+noise = jax.random.normal(jax.random.PRNGKey(0), (Hh, Dd))
+for mode in ("sde", "cps"):
+    roll = flow_sde_sample(vfun, noise, sigmas, 0.7, jax.random.PRNGKey(1), sde_type=mode)
+    check(f"[{mode}] sample: chain len == num_steps+1", roll["chain"].shape[0] == sigmas.shape[0])
+    check(f"[{mode}] sample: step_logp len == num_steps", roll["step_logp"].shape[0] == sigmas.shape[0]-1)
+    lp_new = flow_sde_recompute_logp(vfun, roll["chain"], sigmas, 0.7, sde_type=mode)
+    dmax = float(jnp.max(jnp.abs(lp_new - roll["step_logp"])))
+    check(f"[{mode}] on-policy ratio≡1 (recompute==sample logp)", dmax < 1e-4, f"(Δ={dmax:.2e})")
+
 print("\nALL PASS — JAX port matches NumPy reference" if ok else "\nSOME FAILED")
 raise SystemExit(0 if ok else 1)
