@@ -1,0 +1,359 @@
+diff --git a/src/openpi/models/flow_sde.py b/src/openpi/models/flow_sde.py
+new file mode 100644
+index 0000000..8419c0f
+--- /dev/null
++++ b/src/openpi/models/flow_sde.py
+@@ -0,0 +1,131 @@
++"""
++flow_sde.py — Flow-GRPO SDE step + sampling loop + GRPO surrogate for π0.5 (JAX).
++Validated against experiments/flow_sde.py (NumPy) via experiments/test_flow_sde_jax.py.
++
++This is the exact math to drop into openpi's pi0.py::sample_actions (serving side)
++and to recompute log-probs in the GRPO loss (train side). It is a line-for-line JAX
++translation of flow_sde.sde_step_with_logprob (both 'sde' and 'cps' branches) +
++grpo_surrogate. Run experiments/test_flow_sde_jax.py (openpi/.venv python) to confirm
++numerical equivalence to the NumPy version.
++
++Convention (matches pi0.py:271 and flow_sde.py): sigma == time t, sigma runs 1→0,
++dt = sigma_prev - sigma < 0.  `v` is the model velocity (action_out_proj output).
++"""
++
++from __future__ import annotations
++
++import math
++import jax
++import jax.numpy as jnp
++
++_SIGMA_ONE_EPS = 1e-9
++
++
++def sde_step_with_logprob(
++    v, sigma, sigma_prev, sample, noise_level, key,
++    sde_type: str = "sde", sigma_max: float = 1.0, prev_sample=None,
++):
++    """One flow-SDE denoising step (JAX). Returns (prev_sample, logp, mean, std).
++
++    logp is the MEAN over action dims (matches Flow-GRPO / flow_sde.py). If prev_sample
++    is provided, logp is evaluated for it (recompute path); else a new prev_sample is
++    drawn from `key`. sigma/sigma_prev/noise_level are Python/array scalars.
++    """
++    v = jnp.asarray(v, jnp.float32)
++    sample = jnp.asarray(sample, jnp.float32)
++    dt = jnp.float32(sigma_prev - sigma)                     # negative
++
++    if sde_type == "sde":
++        # Guard sigma==1 exactly (denominator 1-sigma → use sigma_max), matching AEGIS.
++        near_one = jnp.abs(sigma - 1.0) < _SIGMA_ONE_EPS
++        denom = 1.0 - jnp.where(near_one, sigma_max, sigma)
++        std_dev_t = jnp.where(denom > 0, noise_level * jnp.sqrt(sigma / denom), 0.0)
++        safe_sigma = jnp.where(sigma > 0, sigma, 1.0)
++        mean_full = (sample * (1.0 + std_dev_t**2 / (2.0 * safe_sigma) * dt)
++                     + v * (1.0 + std_dev_t**2 * (1.0 - sigma) / (2.0 * safe_sigma)) * dt)
++        prev_mean = jnp.where(sigma > 0, mean_full, sample + v * dt)
++        std = std_dev_t * jnp.sqrt(-dt)
++        if prev_sample is None:
++            prev_sample = prev_mean + std * jax.random.normal(key, sample.shape, sample.dtype)
++        prev_sample = jnp.asarray(prev_sample, jnp.float32)
++        s2 = jnp.maximum(std * std, 1e-16)
++        logp = (-((prev_sample - prev_mean) ** 2) / (2.0 * s2)
++                - jnp.log(jnp.maximum(std, 1e-8)) - 0.5 * jnp.log(2.0 * jnp.pi))
++
++    elif sde_type == "cps":
++        std_dev_t = sigma_prev * jnp.sin(noise_level * jnp.pi / 2.0)
++        x0_hat = sample - sigma * v
++        x1_hat = sample + v * (1.0 - sigma)
++        prev_mean = x0_hat * (1.0 - sigma_prev) + x1_hat * jnp.sqrt(
++            jnp.maximum(sigma_prev**2 - std_dev_t**2, 0.0))
++        std = std_dev_t
++        if prev_sample is None:
++            prev_sample = prev_mean + std * jax.random.normal(key, sample.shape, sample.dtype)
++        prev_sample = jnp.asarray(prev_sample, jnp.float32)
++        logp = -((prev_sample - prev_mean) ** 2)            # constants dropped (cancel in ratio)
++    else:
++        raise ValueError(f"sde_type must be 'sde' or 'cps', got {sde_type!r}")
++
++    # Reduce over the action dims (H, action_dim), keeping any leading batch dim:
++    # per-sample logp (Flow-GRPO's "mean over non-batch dims"). For a single (H, ad)
++    # chunk this is a scalar; for a (batch, H, ad) training batch it is (batch,).
++    return prev_sample, jnp.mean(logp, axis=(-2, -1)), prev_mean, std
++
++
++def make_sigmas(num_steps: int):
++    """π0.5 sigma(=time) schedule 1→0 in num_steps steps (uniform, dt=-1/N)."""
++    return jnp.linspace(1.0, 0.0, num_steps + 1)
++
++
++def flow_sde_sample(velocity_fn, noise, sigmas, noise_level, key, sde_type="sde"):
++    """Full flow-SDE sampling loop — the body of pi0.py::sample_actions_with_logprob.
++
++    `velocity_fn(x_t, sigma) -> v` is the model's action-head forward pass (closes over
++    the prefix KV cache in the real model). Uses jax.lax.scan over the denoising steps,
++    same structure as the deterministic sampler but with the SDE step. Returns:
++      action    : x_0
++      chain     : (num_steps+1, *action_shape) latent trajectory
++      step_logp : (num_steps,) per-step logp under the sampling policy (= logp_old)
++    """
++    sigma_max = sigmas[1]
++    num_steps = sigmas.shape[0] - 1
++    keys = jax.random.split(key, num_steps)
++
++    def body(x, inp):
++        sig, sig_prev, k = inp
++        v = velocity_fn(x, sig)
++        x_next, logp, _, _ = sde_step_with_logprob(
++            v, sig, sig_prev, x, noise_level, k, sde_type, sigma_max)
++        return x_next, (x_next, logp)
++
++    x0, (chain_tail, step_logp) = jax.lax.scan(
++        body, noise, (sigmas[:-1], sigmas[1:], keys))
++    chain = jnp.concatenate([noise[None], chain_tail], axis=0)
++    return {"action": x0, "chain": chain, "step_logp": step_logp}
++
++
++def flow_sde_recompute_logp(velocity_fn, chain, sigmas, noise_level, sde_type="sde"):
++    """Per-step logp of a RECORDED chain under the current policy (for the GRPO ratio).
++
++    With velocity_fn = sampling policy this exactly reproduces step_logp (ratio ≡ 1).
++    This is what the training loss calls each update.
++    """
++    sigma_max = sigmas[1]
++
++    def body(_, inp):
++        sig, sig_prev, x, x_next = inp
++        v = velocity_fn(x, sig)
++        _, logp, _, _ = sde_step_with_logprob(
++            v, sig, sig_prev, x, noise_level, None, sde_type, sigma_max, prev_sample=x_next)
++        return None, logp
++
++    _, step_logp = jax.lax.scan(
++        body, None, (sigmas[:-1], sigmas[1:], chain[:-1], chain[1:]))
++    return step_logp
++
++
++def grpo_surrogate(logp_new, logp_old, advantage, clip: float = 0.2):
++    """PPO/GRPO clipped surrogate (JAX; MAXIMISE → loss = -mean(surrogate))."""
++    ratio = jnp.exp(logp_new - logp_old)
++    return jnp.minimum(ratio * advantage,
++                       jnp.clip(ratio, 1.0 - clip, 1.0 + clip) * advantage)
+diff --git a/src/openpi/models/pi0.py b/src/openpi/models/pi0.py
+index ae7c459..f777a2f 100644
+--- a/src/openpi/models/pi0.py
++++ b/src/openpi/models/pi0.py
+@@ -277,3 +277,60 @@ class Pi0(_model.BaseModel):
+ 
+         x_0, _ = jax.lax.while_loop(cond, step, (noise, 1.0))
+         return x_0
++
++    def sample_actions_with_logprob(
++        self,
++        rng: at.KeyArrayLike,
++        observation: _model.Observation,
++        *,
++        num_steps: int = 10,
++        noise_level: float = 0.7,
++        sde_type: str = "cps",
++        noise: at.Float[at.Array, "b ah ad"] | None = None,
++    ):
++        """Flow-SDE sampling for on-policy RL (Flow-GRPO). HOOK A.
++
++        Same forward pass as sample_actions, but the deterministic Euler step is
++        replaced by the marginal-preserving SDE step (openpi.models.flow_sde), so the
++        action becomes a stochastic sample with a tractable per-step log-prob.
++
++        Returns (action, chain, step_logp):
++          action    : x_0                       (b, ah, ad)
++          chain     : (num_steps+1, b, ah, ad)  denoising latent trajectory
++          step_logp : (num_steps, b)            per-step logp under the sampling policy
++        num_steps must be a static Python int (the SDE loop uses lax.scan).
++        SANITY: noise_level=0 reproduces the deterministic sample_actions output.
++        """
++        from openpi.models import flow_sde as _fsde
++
++        observation = _model.preprocess_observation(None, observation, train=False)
++        batch_size = observation.state.shape[0]
++        if noise is None:
++            noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))
++
++        # Fill the KV cache with a prefix forward pass (identical to sample_actions).
++        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
++        prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
++        positions = jnp.cumsum(prefix_mask, axis=1) - 1
++        _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
++
++        def velocity_fn(x_t, time):
++            # The velocity is the model's action-head output at (x_t, time) — this is
++            # exactly the body of the deterministic `step`, minus the Euler update.
++            suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
++                observation, x_t, jnp.broadcast_to(time, batch_size)
++            )
++            suffix_attn_mask = make_attn_mask(suffix_mask, suffix_ar_mask)
++            prefix_attn_mask_s = einops.repeat(prefix_mask, "b p -> b s p", s=suffix_tokens.shape[1])
++            full_attn_mask = jnp.concatenate([prefix_attn_mask_s, suffix_attn_mask], axis=-1)
++            pos = jnp.sum(prefix_mask, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
++            (prefix_out, suffix_out), _ = self.PaliGemma.llm(
++                [None, suffix_tokens], mask=full_attn_mask, positions=pos,
++                kv_cache=kv_cache, adarms_cond=[None, adarms_cond],
++            )
++            assert prefix_out is None
++            return self.action_out_proj(suffix_out[:, -self.action_horizon :])
++
++        sigmas = _fsde.make_sigmas(num_steps)
++        out = _fsde.flow_sde_sample(velocity_fn, noise, sigmas, noise_level, rng, sde_type=sde_type)
++        return out["action"], out["chain"], out["step_logp"]
+diff --git a/src/openpi/policies/policy_logprob.py b/src/openpi/policies/policy_logprob.py
+new file mode 100644
+index 0000000..f5685b2
+--- /dev/null
++++ b/src/openpi/policies/policy_logprob.py
+@@ -0,0 +1,107 @@
++"""PolicyWithLogprob — flow-SDE sampling wrapper for on-policy GRPO rollouts (HOOK B).
++
++Wraps a server-built openpi Policy (see create_trained_policy) and, instead of the
++deterministic ODE sampler, draws actions with Pi0.sample_actions_with_logprob so every
++query yields the denoising CHAIN + per-step logp under the sampling policy (logp_old).
++
++Two action spaces, kept deliberately separate:
++  • The env-ready action is produced by the SAME output transform the server uses
++    (unnormalize + un-pad to the 7-D env action) — so the shielded rollout behaves
++    exactly like a served π0.5 rollout.
++  • The chain and logp stay in the model's NATIVE (normalized, action_dim-padded) space
++    — that is the space the model samples in, so flow_sde.flow_sde_recompute_logp
++    reproduces logp_old exactly at training time (on-policy ratio ≡ 1). Do NOT
++    output-transform the chain.
++
++JAX / Pi0 flow-matching only. Reuses the wrapped policy's input/output transforms and
++forks its own RNG stream (does not disturb policy.infer's stream).
++"""
++
++from __future__ import annotations
++
++import time
++
++import jax
++import jax.numpy as jnp
++import numpy as np
++
++from openpi.models import flow_sde as _fsde
++from openpi.models import model as _model
++from openpi.policies import policy as _policy
++from openpi.shared import nnx_utils
++
++
++class PolicyWithLogprob:
++    """Flow-SDE (stochastic) inference wrapper around a trained JAX Policy."""
++
++    def __init__(
++        self,
++        policy: _policy.Policy,
++        *,
++        num_steps: int = 10,
++        noise_level: float = 0.7,
++        sde_type: str = "cps",
++        seed: int = 0,
++    ):
++        if getattr(policy, "_is_pytorch_model", False):
++            raise NotImplementedError("PolicyWithLogprob supports JAX Pi0 models only.")
++        self._input_transform = policy._input_transform
++        self._output_transform = policy._output_transform
++        self.num_steps = int(num_steps)
++        self.noise_level = float(noise_level)
++        self.sde_type = str(sde_type)
++        self._rng = jax.random.key(seed)
++        # Compiled flow-SDE sampler. num_steps/sde_type are static (loop length is
++        # built from a Python int; sde_type selects a Python branch).
++        self._sample_lp = nnx_utils.module_jit(
++            policy._model.sample_actions_with_logprob,
++            static_argnames=("num_steps", "sde_type"),
++        )
++        # sigma grid is constant for a given num_steps.
++        self._sigmas = np.asarray(_fsde.make_sigmas(self.num_steps))
++
++    def infer_with_logprob(self, obs: dict, *, noise: np.ndarray | None = None) -> dict:
++        """Sample one action chunk stochastically and return it + its policy trace.
++
++        Returns a dict compatible with policy_trace.from_flow_sde_roll:
++          actions     : (action_horizon, action_dim_env)   env-ready (unnormalized)
++          chain       : (num_steps+1, action_horizon, action_dim)  model-space latents
++          step_logp   : (num_steps,)                        logp under the sampling policy
++          sigmas      : (num_steps+1,)
++          noise_level : float
++          sde_type    : "sde" | "cps"
++        """
++        inputs = jax.tree.map(lambda x: x, obs)          # shallow copy (transforms mutate)
++        inputs = self._input_transform(inputs)
++        inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)  # add batch
++        self._rng, sample_rng = jax.random.split(self._rng)
++
++        n = None
++        if noise is not None:
++            n = jnp.asarray(noise)
++            if n.ndim == 2:
++                n = n[None, ...]
++
++        observation = _model.Observation.from_dict(inputs)
++        t0 = time.monotonic()
++        action, chain, step_logp = self._sample_lp(
++            sample_rng, observation,
++            num_steps=self.num_steps, noise_level=self.noise_level,
++            sde_type=self.sde_type, noise=n,
++        )
++        infer_ms = (time.monotonic() - t0) * 1000
++
++        # Env-ready action: unbatch then apply the server output transform (action only).
++        outputs = {"state": inputs["state"], "actions": action}
++        outputs = jax.tree.map(lambda x: np.asarray(x[0, ...]), outputs)
++        outputs = self._output_transform(outputs)
++
++        return {
++            "actions": np.asarray(outputs["actions"]),   # (ah, ad_env) env-ready
++            "chain": np.asarray(chain[:, 0]),            # (S+1, ah, ad) model space
++            "step_logp": np.asarray(step_logp[:, 0]),    # (S,)
++            "sigmas": self._sigmas,
++            "noise_level": self.noise_level,
++            "sde_type": self.sde_type,
++            "policy_timing": {"infer_ms": infer_ms},
++        }
+diff --git a/src/openpi/training/config.py b/src/openpi/training/config.py
+index 4ca47e1..aa7f958 100644
+--- a/src/openpi/training/config.py
++++ b/src/openpi/training/config.py
+@@ -761,6 +761,39 @@ _CONFIGS = [
+         pytorch_weight_path="/path/to/your/pytorch_weight_path",
+         num_train_steps=30_000,
+     ),
++    TrainConfig(
++        name="pi05_libero_cbf",
++        model=pi0_config.Pi0Config(
++            pi05=True,
++            action_horizon=10,
++            discrete_state_input=False,
++            paligemma_variant="gemma_2b_lora",
++            action_expert_variant="gemma_300m_lora",
++        ),
++        data=LeRobotLiberoDataConfig(
++            repo_id="pi05_libero_cbf_dagger",
++            base_config=DataConfig(prompt_from_task=True),
++            extra_delta_transform=False,
++        ),
++        batch_size=16,
++        lr_schedule=_optimizer.CosineDecaySchedule(
++            warmup_steps=500,
++            peak_lr=2e-4,
++            decay_steps=10_000,
++            decay_lr=2e-5,
++        ),
++        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
++        ema_decay=None,
++        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_libero/params"),
++        num_train_steps=10_000,
++        freeze_filter=pi0_config.Pi0Config(
++            pi05=True,
++            action_horizon=10,
++            discrete_state_input=False,
++            paligemma_variant="gemma_2b_lora",
++            action_expert_variant="gemma_300m_lora",
++        ).get_freeze_filter(),
++    ),
+     #
+     # Fine-tuning Aloha configs.
+     #
