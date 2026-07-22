@@ -44,7 +44,7 @@ except ImportError:
 
 try:
     from experiments.cbf_visualizer import (
-        fit_obstacle_ellipsoid, install_scene_hook, push_cbf_geoms,
+        fit_obstacle_ellipsoid, fit_obstacle_mvee, install_scene_hook, push_cbf_geoms,
     )
     _HAS_VIZ = True
 except ImportError:
@@ -86,8 +86,8 @@ from experiments.scene_config import ObstacleConfig
 from experiments.metrics import MetricsTracker, StepRecord
 from experiments.cbf_ellipsoid import (
     run_ellipsoid_cbf, init_z, ee_ellipsoid_center,
-    compute_h, EE_Q_DIAG_DEFAULT, K_CBF,
-    run_sphere_decomp_cbf,
+    compute_h, EE_Q_DIAG_DEFAULT, EE_Q_DIAG_TALL, _TALL_OBJECT_KEYS, K_CBF,
+    run_sphere_decomp_cbf, get_ee_spheres,
 )
 from experiments.gvr import GVR
 
@@ -531,6 +531,120 @@ def _unwrap_sim(env):
     return model, data
 
 
+# ── Collision-source attribution ────────────────────────────────────────────
+def _classify_contact_body(bname: str, grasped_base: str | None) -> str:
+    """Map a body name to a collision-culprit category."""
+    n = bname.lower()
+    if "gripper" in n or "finger" in n or "eef" in n or ("hand" in n and "robot" in n):
+        return "gripper"
+    if "link" in n:                         # robot0_link0..7 (upper arm / forearm / wrist)
+        return "arm_link"
+    if grasped_base and grasped_base.lower() in n:
+        return "held_object"
+    if n.startswith("robot") or "robot0" in n:
+        return "robot_other"
+    return "scene_object"
+
+
+def _obstacle_contact_culprits(model, data, obstacle_body_name: str,
+                               grasped_base: str | None = None) -> set[str]:
+    """Categories of bodies currently in MuJoCo contact with the obstacle body.
+
+    Reads the live contact list (data.contact[:ncon]) and, for every contact that
+    involves an obstacle geom, classifies the OTHER body. This attributes an
+    obstacle displacement to the gripper, an arm link, the held object, etc.
+    """
+    if not _HAS_MUJOCO:
+        return set()
+    obs_body_ids: set[int] = set()
+    for suffix in ("", "_main"):
+        bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY,
+                                f"{obstacle_body_name}{suffix}")
+        if bid >= 0:
+            obs_body_ids.add(int(bid))
+    if not obs_body_ids:
+        return set()
+    obs_geoms = {g for g in range(model.ngeom)
+                 if int(model.geom_bodyid[g]) in obs_body_ids}
+    culprits: set[str] = set()
+    for i in range(int(data.ncon)):
+        c = data.contact[i]
+        g1, g2 = int(c.geom1), int(c.geom2)
+        in1, in2 = g1 in obs_geoms, g2 in obs_geoms
+        if in1 == in2:                      # neither (or both) obstacle → skip
+            continue
+        other = g2 if in1 else g1
+        bid = int(model.geom_bodyid[other])
+        bname = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, bid) or ""
+        culprits.add(_classify_contact_body(bname, grasped_base))
+    return culprits
+
+
+def _robot_body_ids(model) -> set[int]:
+    """Body ids belonging to the robot (arm links + gripper + fingers)."""
+    ids: set[int] = set()
+    for bid in range(model.nbody):
+        n = (mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, bid) or "").lower()
+        if "robot" in n or "gripper" in n or "finger" in n:
+            ids.add(bid)
+    return ids
+
+
+def robot_caused_displacement(model, data, obstacle_body_names) -> bool:
+    """Did the ROBOT cause a protected object to move — directly OR via a push chain?
+
+    Builds the body-body contact graph from data.contact and BFS-searches from the
+    robot bodies to the obstacle bodies. To avoid the trap that everything rests on
+    the table/floor (which would connect all objects through the ground), only
+    DYNAMIC bodies (body_dofnum > 0) and robot bodies act as conduits — static
+    world/table/fixture bodies are excluded. So the search only follows genuine
+    robot→object→…→obstacle push chains.
+
+    Generalises to multi-obstacle scenes: pass every protected object body name.
+    Returns True iff at least one obstacle is reachable from the robot.
+    """
+    if not _HAS_MUJOCO:
+        return False
+    from collections import deque
+
+    robot_ids = _robot_body_ids(model)
+
+    def _is_conduit(bid: int) -> bool:
+        return bid in robot_ids or int(model.body_dofnum[bid]) > 0
+
+    # Adjacency among conduit bodies only.
+    adj: dict[int, set[int]] = {}
+    for i in range(int(data.ncon)):
+        c = data.contact[i]
+        b1 = int(model.geom_bodyid[int(c.geom1)])
+        b2 = int(model.geom_bodyid[int(c.geom2)])
+        if b1 == b2 or not _is_conduit(b1) or not _is_conduit(b2):
+            continue
+        adj.setdefault(b1, set()).add(b2)
+        adj.setdefault(b2, set()).add(b1)
+
+    obstacle_ids: set[int] = set()
+    names = ([obstacle_body_names] if isinstance(obstacle_body_names, str)
+             else list(obstacle_body_names))
+    for name in names:
+        for suffix in ("", "_main"):
+            bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, f"{name}{suffix}")
+            if bid >= 0:
+                obstacle_ids.add(int(bid))
+    if not obstacle_ids or not robot_ids:
+        return False
+
+    seen = set(robot_ids)
+    dq = deque(robot_ids)
+    while dq:
+        b = dq.popleft()
+        for nb in adj.get(b, ()):  # noqa: SIM113
+            if nb not in seen:
+                seen.add(nb)
+                dq.append(nb)
+    return bool(seen & obstacle_ids)
+
+
 # ── Environment factories ──────────────────────────────────────────────────────
 def make_libero_env(task_suite: str = "libero_spatial",
                     task_idx: int = 0,
@@ -568,19 +682,44 @@ def make_libero_env(task_suite: str = "libero_spatial",
     bddl_full = os.path.join(bddl_root, task.problem_folder, task.bddl_file)
 
     from libero.libero.envs import OffScreenRenderEnv
-    env = OffScreenRenderEnv(
-        bddl_file_name=bddl_full,
-        controller="OSC_POSE",          # matches OpenVLA fine-tuning setup
-        camera_heights=256,
-        camera_widths=256,
-        camera_names=["agentview", "robot0_eye_in_hand"],   # wrist cam needed for OFT
-        has_renderer=has_renderer,
-        has_offscreen_renderer=True,
-        use_camera_obs=True,
-        control_freq=20,
-        horizon=horizon,
-        ignore_done=True,
-    )
+    try:
+        from robosuite.utils.errors import RandomizationError
+    except Exception:                       # pragma: no cover
+        RandomizationError = Exception
+
+    def _make(_seed):
+        # LIBERO's placement sampler draws from numpy's global RNG at construction;
+        # reseed before each attempt so a retry actually explores a new layout.
+        np.random.seed(_seed)
+        return OffScreenRenderEnv(
+            bddl_file_name=bddl_full,
+            controller="OSC_POSE",          # matches OpenVLA fine-tuning setup
+            camera_heights=256,
+            camera_widths=256,
+            camera_names=["agentview", "robot0_eye_in_hand"],   # wrist cam needed for OFT
+            has_renderer=has_renderer,
+            has_offscreen_renderer=True,
+            use_camera_obs=True,
+            control_freq=20,
+            horizon=horizon,
+            ignore_done=True,
+        )
+
+    # Retry on RandomizationError ("Cannot place all objects") — a stochastic
+    # placement-sampler failure that otherwise kills the whole sweep.
+    _MAX_ENV_TRIES = 10
+    env = None
+    for _attempt in range(_MAX_ENV_TRIES):
+        try:
+            env = _make(_seed=_attempt)
+            break
+        except RandomizationError as e:
+            print(f"  [make_libero_env] placement failed (attempt "
+                  f"{_attempt + 1}/{_MAX_ENV_TRIES}): {e} — retrying")
+    if env is None:
+        raise RuntimeError(
+            f"make_libero_env: placement sampler failed {_MAX_ENV_TRIES}× for "
+            f"{task_suite} task {task_idx} — skipping this task/mode.")
 
     env.seed(0)
 
@@ -632,20 +771,74 @@ def list_tasks(suite_name: str = "libero_spatial",
     return tasks
 
 
+_OBSTACLE_NAME_MAP = {
+    "wine_bottle":       "wine bottle",
+    "moka_pot":          "moka pot",
+    "wooden_block":      "wooden block",
+    "red_cup":           "red cup",
+    "blue_cup":          "blue cup",
+    "yellow_cup":        "yellow cup",
+    "orange_cup":        "orange cup",
+    "butter_container":  "butter container",
+    "white_yellow_mug":  "white mug",
+    "tomato_sauce":      "tomato sauce bottle",
+    "mayo_bottle":       "mayo bottle",
+    "windex_bottle":     "windex bottle",
+    "bread":             "bread loaf",
+    "chocolate_pudding": "chocolate pudding",
+}
+
+
+def _readable_obstacle_name(raw_name: str) -> str:
+    """Convert MuJoCo joint/body name to human-readable obstacle name."""
+    name = raw_name.lower()
+    # Strip safelibero suffixes
+    for suffix in ("_obstacle", "_main", "_geom"):
+        name = name.replace(suffix, "")
+    import re
+    name = re.sub(r'_\d+$', '', name).strip('_')
+    for key, readable in _OBSTACLE_NAME_MAP.items():
+        if key in name:
+            return readable
+    return name.replace("_", " ")
+
+
+def generate_safety_prompt(task_instruction: str, obstacle: "ObstacleConfig") -> str:
+    """Augment a task instruction with a natural language obstacle warning.
+
+    Computes the obstacle's spatial position relative to the robot base
+    (robot base ≈ world origin in LIBERO) and generates a structured prompt
+    that π0.5 can use to plan a collision-avoiding trajectory.
+    """
+    obs_xy = obstacle.pos[:2]
+    dist_m = float(np.linalg.norm(obs_xy))
+
+    # Lateral direction: robot faces +x, so y>0 is left, y<0 is right
+    if obs_xy[1] > 0.08:
+        lateral = "to the left"
+    elif obs_xy[1] < -0.08:
+        lateral = "to the right"
+    else:
+        lateral = "directly in front of you"
+
+    readable = _readable_obstacle_name(obstacle.name)
+    dist_cm  = int(round(dist_m * 100))
+
+    return (
+        f"{task_instruction} "
+        f"Caution: there is a {readable} approximately {dist_cm} cm {lateral}. "
+        f"Navigate carefully to avoid hitting it."
+    )
+
+
 def detect_safelibero_obstacle(env, obs: dict,
-                                safety_radius: float = 0.10) -> ObstacleConfig | None:
+                                safety_radius: float = 0.10) -> "ObstacleConfig | None":
     """Auto-detect the active SafeLIBERO obstacle from the environment.
 
-    SafeLIBERO BDDL files place multiple obstacle objects in the scene but only
-    one of them lands within the robot workspace per episode (the others are
-    placed far off-table by the .pruned_init file).  This function identifies
-    the active obstacle by scanning joint names for 'obstacle' and checking
-    which object position falls within the workspace bounds.
+    SafeLIBERO places exactly one obstacle within the workspace per episode
+    (the rest are placed far off-table by the .pruned_init file).
 
-    Also fits the actual obstacle ellipsoid from MuJoCo collision geoms so the
-    CBF uses the real object shape instead of a conservative isotropic sphere.
-
-    Returns an ObstacleConfig for the active obstacle, or None if not found.
+    Returns the ObstacleConfig for the active obstacle, or None if not found.
     """
     try:
         joint_names = list(env.sim.model.joint_names)
@@ -661,19 +854,24 @@ def detect_safelibero_obstacle(env, obs: dict,
         if key not in obs:
             continue
         p = np.array(obs[key], dtype=float)
-        if p[2] > 0.5 and -0.5 < p[0] < 0.5 and -0.5 < p[1] < 0.5:
-            # Fit actual obstacle ellipsoid from MuJoCo collision geoms.
-            # Use the geom center (not the obs/root-body pos) as the CBF
-            # center — the root body origin can be offset from the geoms.
+        # Active obstacle = the one inside the workspace footprint. Parked/off-table
+        # obstacles are flung far in XY (|x|,|y| = 10–20), so the XY bounds isolate
+        # the active one across all suites. The z filter only rejects floor-fallen
+        # obstacles (z≈0); it must be LOOSE — the object suite's table sits at
+        # z≈0.18, so the old z>0.5 (tuned to the spatial suite) wrongly rejected it.
+        if p[2] > 0.05 and -0.5 < p[0] < 0.5 and -0.5 < p[1] < 0.5:
+            # Fit an oriented MVEE ellipsoid to the obstacle's real geometry
+            # (mesh vertices + primitive geoms), matching AEGIS's method.
             q_diag = None
-            geom_center = p.copy()  # fallback: root body obs position
+            q_R = None
+            geom_center = p.copy()
             if _HAS_VIZ:
                 for suffix in ("_main", ""):
-                    result = fit_obstacle_ellipsoid(
+                    result = fit_obstacle_mvee(
                         model, data, f"{name}{suffix}", safety_margin=0.010,
                     )
                     if result is not None:
-                        geom_center, q_diag = result
+                        geom_center, q_R, q_diag = result
                         break
             return ObstacleConfig(
                 pos=geom_center,
@@ -681,6 +879,7 @@ def detect_safelibero_obstacle(env, obs: dict,
                 safety_radius=safety_radius,
                 name=name,
                 q_diag=q_diag,
+                q_R=q_R,
             )
     return None
 
@@ -896,6 +1095,16 @@ def run_libero_trial(
     use_apf: bool = False,
     apf_k_rep: float = 2.0,
     apf_d_influence: float = 0.20,
+    # Safety-conditioned prompting: inject obstacle warning into language instruction
+    use_safety_prompt: bool = False,
+    # AEGIS-faithful mode (default): apply the CBF on EVERY step whenever an
+    # obstacle is present, with the single-ellipsoid barrier and NO local
+    # heuristics (no _near_goal gate, no grasp-commit/pull, no placement force-
+    # release, no post-trigger slowdown, no arm-link constraints, no sphere
+    # decomposition). This replicates AEGIS/VLSA main_aegis_translational.py,
+    # whose only gate is a per-episode "obstacle present?" flag. Set False to
+    # restore the legacy heuristic behaviour.
+    aegis_faithful: bool = True,
 ) -> MetricsTracker:
     """Run one LIBERO episode using OpenVLA + optional Cartesian CBF.
 
@@ -996,6 +1205,7 @@ def run_libero_trial(
     _grasp_flag          = False
     _grasped_object:      str | None = None
     _last_grasped_object: str | None = None   # persists after gripper opens
+    _last_release_step:   int        = -999   # step when grasp last went True→False
     _goal_hold_steps = 0  # steps continuously holding object at goal (for force-release)
 
     # ── GVR: Grasp Verification & Recovery ───────────────────────────────────
@@ -1019,20 +1229,31 @@ def run_libero_trial(
             obstacles = []
             print("  [warn] No obstacle found in workspace — running without CBF obstacles")
 
+    # ── Safety-conditioned prompt ─────────────────────────────────────────────
+    # Replace the bare task instruction with one that names the obstacle and its
+    # spatial position relative to the robot, so π0.5 can plan around it.
+    _instruction_effective = instruction
+    if use_safety_prompt and obstacles:
+        _instruction_effective = generate_safety_prompt(instruction, obstacles[0])
+        print(f"  Safety prompt: '{_instruction_effective}'")
+
     # ── Sphere decomposition for active obstacle ──────────────────────────────
     # Compute once per episode (obstacles are static).  Replaces the single
     # coarse ellipsoid with N small spheres tracing the actual object surface,
     # giving the CBF accurate geometry for concave / irregular obstacles.
     # Falls back to ellipsoid CBF automatically if decomposition fails.
     _sphere_decomp: list | None = None
-    if use_cbf and use_sphere_decomp and obstacles and _HAS_VIZ and _HAS_MUJOCO:
+    if aegis_faithful and use_cbf and obstacles:
+        print("  [AEGIS-faithful] CBF applied every step · single ellipsoid · "
+              "no local heuristics")
+    if use_cbf and use_sphere_decomp and not aegis_faithful and obstacles and _HAS_VIZ and _HAS_MUJOCO:
         from experiments.cbf_visualizer import decompose_obstacle_to_spheres
         ob0_name = obstacles[0].name
         for suffix in ("_main", ""):
             _sphere_decomp = decompose_obstacle_to_spheres(
                 model, data, f"{ob0_name}{suffix}",
                 n_spheres=sphere_decomp_n,
-                r_sphere=0.010,   # thin surface marker; clearance comes from r_ee + safety_margin
+                r_sphere=0.015,   # surface marker; clearance also from EE sphere radii
                 safety_margin=0.010,
             )
             if _sphere_decomp is not None:
@@ -1044,13 +1265,19 @@ def run_libero_trial(
 
     # Record initial obstacle position for displacement-based collision check.
     _obstacle_name: str | None = None
-    _initial_obstacle_pos: np.ndarray | None = None   # set lazily after step 0
-    # Set of obs dict keys that belong to obstacles (passed to GVR to exclude).
+    _initial_obstacle_pos: np.ndarray | None = None
     _obstacle_key_set: set[str] = set()
     if obstacles:
         _obstacle_name = obstacles[0].name
         _obstacle_key_set = {f"{ob.name}_pos" for ob in obstacles}
     _collision_flag = False
+    # Collision-source attribution: what bodies touch the obstacle over the episode,
+    # and specifically what was touching it at the moment displacement first fired.
+    _obs_touch_seen: set[str] = set()
+    _collision_culprits: set[str] = set()
+    _collision_robot_caused = False   # robot caused it (directly or via push chain)
+    from collections import deque as _deque
+    _robot_chain_window = _deque(maxlen=8)   # recent robot→obstacle chain connectivity
 
     # ── Ellipsoid CBF state (per-obstacle auxiliary z direction) ─────────────
     # R1: EE rotation matrix (updated each step from eef_quat)
@@ -1075,6 +1302,7 @@ def run_libero_trial(
     vla_cnt      = 0
     _current_action = _DUMMY_ACTION.copy()
     vla_raw      = np.zeros(7)
+    _prev_min_d  = float("inf")   # CBF constraint distance from previous step
 
     _vla_executor = ThreadPoolExecutor(max_workers=1)
 
@@ -1098,7 +1326,7 @@ def run_libero_trial(
                     _t0 = _time.perf_counter()
                     if vla == "pi05":
                         raw_chunk = _query_pi05_chunk(img, wrist_img, state,
-                                                      instruction, num_actions=replan_steps)
+                                                      _instruction_effective, num_actions=replan_steps)
                         action_queue = [a.copy() for a in raw_chunk]
                         if _use_translational_only:
                             for a in action_queue:
@@ -1113,7 +1341,7 @@ def run_libero_trial(
                             _near   = obstacles[int(np.argmin(_dists))]
                             _obs_feat = _compute_obs_features(_ee_now, _near.pos)
                         raw_chunk = _query_openvla_chunk(img, wrist_img, state,
-                                                         instruction, num_actions=replan_steps,
+                                                         _instruction_effective, num_actions=replan_steps,
                                                          url=_ovla_url,
                                                          obstacle_feat=_obs_feat)
                         action_queue = [_post_process_vla(a) for a in raw_chunk]
@@ -1122,6 +1350,10 @@ def run_libero_trial(
                     vla_cnt     += 1
                     ee_now = np.array(obs["robot0_eef_pos"])
                     grip_str = "CLOSE" if action_queue[0][6] > 0 else "open"
+                    # CBF margin from previous step (actual constraint distance)
+                    cbf_margin_str = (f"  cbf_margin={_prev_min_d:.3f}m"
+                                      if _prev_min_d < float("inf") else "")
+                    # Nearest scene object (for target tracking)
                     obj_dist_str = ""
                     if _obj_pos_keys:
                         dists = {k: np.linalg.norm(np.array(obs[k]) - ee_now)
@@ -1130,7 +1362,7 @@ def run_libero_trial(
                         obj_dist_str = f"  nearest={near_k.replace('_pos','')}({dists[near_k]:.3f}m)"
                     print(f"  [{t:03d}] VLA #{vla_cnt}  grip={grip_str}"
                           f"  EE=[{ee_now[0]:.3f},{ee_now[1]:.3f},{ee_now[2]:.3f}]"
-                          f"{obj_dist_str}  ({vla_ms:.0f}ms)")
+                          f"{cbf_margin_str}{obj_dist_str}  ({vla_ms:.0f}ms)")
                 except Exception as e:
                     print(f"  [{t:03d}] VLA query error (holding last action): {e}")
                     action_queue = [_current_action.copy()]
@@ -1174,14 +1406,18 @@ def run_libero_trial(
             _in_gc_range = (_gc_near_key_pre is not None
                             and _gc_near_dist_pre < 0.12)
 
-            if use_cbf and obstacles and not _near_goal and not _in_gc_range:
-                # Arm-link constraints: re-enabled but GATED on distance so they
-                # only fire when the obstacle is close enough for forearm/wrist
-                # links to reach it.  This avoids the global QP slowdown that
-                # triggered the previous removal.
+            h_val = float("inf")   # reset each step; overwritten by CBF/APF block
+            # AEGIS applies the CBF on every step whenever an obstacle exists.
+            # The _near_goal gate is a legacy heuristic that disabled the filter
+            # exactly where Level-I obstacles sit → strip it in faithful mode.
+            _cbf_active = use_cbf and obstacles and (aegis_faithful or not _near_goal)
+            if _cbf_active:
+                # Arm-link constraints are a local addition (not in AEGIS) — off
+                # in faithful mode. Otherwise gated on distance so they only fire
+                # when a forearm/wrist link can actually reach the obstacle.
                 _arm_link_rows: list = []
                 _ee_obs_d = float(np.linalg.norm(ee_pos - obstacles[0].pos))
-                if arm_body_ids and _ee_obs_d < 0.30:
+                if not aegis_faithful and arm_body_ids and _ee_obs_d < 0.30:
                     _arm_link_rows = _compute_arm_link_constraints(
                         model, data, arm_body_ids, arm_dof_idx, ee_body_id,
                         R1=_R1, obstacles=obstacles, scale=1.0, k_cbf=K_CBF,
@@ -1197,19 +1433,28 @@ def run_libero_trial(
                         k_cbf=K_CBF,
                         scale=1.0,
                         extra_constraints=_arm_link_rows,
+                        ee_spheres=get_ee_spheres(ee_pos, _R1),
                     )
                 else:
                     # ── Ellipsoid CBF (fallback) ──────────────────────────────
                     ob0   = obstacles[0]
                     z0    = _z_states[0]
                     obs_q = ob0.q_diag if ob0.q_diag is not None else np.array([ob0.safety_radius] * 3)
-                    if _HAS_MUJOCO:
+                    # Prefer the MVEE principal-axis orientation (q_R). Fall back
+                    # to the obstacle body frame, then identity.
+                    if ob0.q_R is not None:
+                        obs_R = ob0.q_R
+                    elif _HAS_MUJOCO:
                         _ob_bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, ob0.name)
                         obs_R = data.xmat[_ob_bid].reshape(3, 3).copy() if _ob_bid >= 0 else np.eye(3)
                     else:
                         obs_R = np.eye(3)
+                    # AEGIS uses a taller EE ellipsoid (z=0.20) for tall cartons.
+                    _ee_q1 = (EE_Q_DIAG_TALL
+                              if any(k in instruction.lower() for k in _TALL_OBJECT_KEYS)
+                              else EE_Q_DIAG_DEFAULT)
                     u_safe_world, z_new, h_val, cbf_triggered = run_ellipsoid_cbf(
-                        ee_pos=ee_pos, R1=_R1,
+                        ee_pos=ee_pos, R1=_R1, Q1_diag=_ee_q1,
                         obs_pos=ob0.pos, obs_q=obs_q, z=z0,
                         u_nom=_current_action[:3], k_cbf=K_CBF,
                         scale=1.0,
@@ -1218,15 +1463,13 @@ def run_libero_trial(
                     _z_states[0] = z_new
 
                 correction_norm = float(np.linalg.norm(u_safe_world - _current_action[:3]))
-                # When CBF is actively deflecting, slow down slightly so the
-                # discrete-time controller has more steps to track the barrier.
-                # scale=1.0 keeps QP constraints correct; this is a separate
-                # robustness knob that only fires when the QP actually moved the action.
-                if cbf_triggered:
+                # 0.6× post-trigger slowdown is a local robustness knob, not in
+                # AEGIS — skip it in faithful mode.
+                if cbf_triggered and not aegis_faithful:
                     u_safe_world = 0.6 * u_safe_world
                 safe_action[:3] = u_safe_world
 
-            elif use_apf and obstacles and not _near_goal:
+            elif use_apf and obstacles and (aegis_faithful or not _near_goal):
                 apf_xyz, _apf_dist, cbf_triggered = _apf_xyz_correction(
                     ee_pos, obstacles, _current_action[:3],
                     k_rep=apf_k_rep, d_influence=apf_d_influence,
@@ -1235,27 +1478,34 @@ def run_libero_trial(
                 safe_action[:3] = apf_xyz
                 h_val = _apf_dist
 
+            _prev_min_d = h_val   # track real CBF barrier value for VLA print line
             _gvr_phase = "normal"
 
-            # ── 3c. Placement heuristic ───────────────────────────────────
-            # If the arm has been holding an object AT the goal for several
-            # consecutive steps, the VLA is likely stuck (OOD near target).
-            # Force the gripper open so the bowl can settle on the plate.
-            # LIBERO OSC_POSE convention: gripper -1 = open, +1 = close.
-            if _near_goal and _grasp_flag:
+            # ── 3c/3d. Local grasp/placement heuristics (NOT in AEGIS) ────
+            # AEGIS passes the VLA gripper command straight through and never
+            # overrides translation for grasping. Everything below — the
+            # placement force-release and the near-grasp descend/pull/lock — is a
+            # local TSR-recovery hack. Skip it entirely in faithful mode.
+            if not aegis_faithful:
+              # ── 3c. Placement heuristic ─────────────────────────────────
+              # If the arm has been holding an object AT the goal for several
+              # consecutive steps, the VLA is likely stuck (OOD near target).
+              # Force the gripper open so the bowl can settle on the plate.
+              # LIBERO OSC_POSE convention: gripper -1 = open, +1 = close.
+              if _near_goal and _grasp_flag:
                 _goal_hold_steps += 1
                 if _goal_hold_steps >= 8:
                     safe_action[6] = -1.0  # force release
-            else:
+              else:
                 _goal_hold_steps = 0
 
-            # ── 3d. Near-grasp commit ─────────────────────────────────────
-            # Reuses _in_gc_range / _gc_near_key_pre computed above.
-            # CBF is already disabled in this range, so XY pull is uncontested.
-            _GC_Z_STOP  = 0.010  # stop forcing down when EE z < target_z + 1 cm
-            _GC_DESCENT = -0.35  # z override while descending into grasp
+              # ── 3d. Near-grasp commit ───────────────────────────────────
+              # Reuses _in_gc_range / _gc_near_key_pre computed above.
+              # CBF is already disabled in this range, so XY pull is uncontested.
+              _GC_Z_STOP  = 0.010  # stop forcing down when EE z < target_z + 1 cm
+              _GC_DESCENT = -0.35  # z override while descending into grasp
 
-            if _in_gc_range:
+              if _in_gc_range:
                 _gc_tgt_pos = np.array(obs[_gc_near_key_pre], dtype=float)
                 _gc_tgt_z   = float(_gc_tgt_pos[2])
                 safe_action[6] = 1.0   # lock gripper CLOSED
@@ -1277,7 +1527,7 @@ def run_libero_trial(
                                                    [0.04, 0.04]), dtype=float))
                 if float(np.max(_gc_gq)) > 0.015:   # fingers still open
                     safe_action[2] = min(safe_action[2], 0.0)
-            elif (_gc_near_key_pre is not None and _gc_near_dist_pre > 0.15):
+              elif (_gc_near_key_pre is not None and _gc_near_dist_pre > 0.15):
                 # Pre-open: VLA closes gripper too early (distribution shift).
                 # Keep it open during far approach so fingers can wrap the object
                 # when the near-grasp commit descends at d < 0.12 m.
@@ -1367,11 +1617,27 @@ def run_libero_trial(
             else:
                 if _grasp_flag:
                     print(f"  [{t:03d}] *** RELEASED: {_grasped_object}")
+                    _last_release_step = t
                 _grasp_flag     = False
                 _grasped_object = None
                 # _last_grasped_object intentionally kept — used for geo-success check
 
             # ── 7. Displacement-based collision check (SafeLIBERO metric) ─
+            # Attribution: scan live MuJoCo contacts to see which bodies (gripper,
+            # arm link, held object, …) are touching the obstacle right now.
+            _now_touch: set[str] = set()
+            if _obstacle_name is not None and _HAS_MUJOCO:
+                _grasp_base = (_grasped_object or _last_grasped_object or "")
+                _grasp_base = _grasp_base.replace("_pos", "") if _grasp_base else None
+                _now_touch = _obstacle_contact_culprits(
+                    model, data, _obstacle_name, grasped_base=_grasp_base)
+                _obs_touch_seen |= _now_touch
+                # Windowed robot-causation: was the robot in a contact chain to the
+                # obstacle in the last few steps? (Displacement crosses threshold a
+                # step or two AFTER the push, so a single-step check misses it.)
+                _robot_chain_window.append(
+                    robot_caused_displacement(model, data, _obstacle_name))
+
             if _obstacle_name is not None:
                 _obs_key = f"{_obstacle_name}_pos"
                 if _obs_key in obs:
@@ -1384,10 +1650,23 @@ def run_libero_trial(
                 _obs_key = f"{_obstacle_name}_pos"
                 if _obs_key in obs:
                     curr_obs_pos = np.array(obs[_obs_key], dtype=float)
-                    if np.sum(np.abs(curr_obs_pos - _initial_obstacle_pos)) > 0.002:
+                    # Collision threshold matched to AEGIS/VLSA (>0.001 m displacement).
+                    if np.sum(np.abs(curr_obs_pos - _initial_obstacle_pos)) > 0.001:
                         _collision_flag = True
+                        # Culprit = what's touching now, else the last body seen
+                        # touching the obstacle this episode.
+                        _collision_culprits = _now_touch or _obs_touch_seen or {"unknown"}
+                        # Did the robot cause it (direct hit OR push chain)? This is
+                        # what the RL reward penalises — it counts scene_object domino
+                        # pushes as the robot's fault while excluding physics settling.
+                        # Use the recent window (push may precede threshold-crossing).
+                        _collision_robot_caused = (
+                            any(_robot_chain_window)
+                            or robot_caused_displacement(model, data, _obstacle_name))
                         print(f"  [{t:03d}] COLLISION: obstacle displaced "
-                              f"{np.sum(np.abs(curr_obs_pos - _initial_obstacle_pos)):.4f}m")
+                              f"{np.sum(np.abs(curr_obs_pos - _initial_obstacle_pos)):.4f}m"
+                              f"  culprit={sorted(_collision_culprits)}"
+                              f"  robot_caused={_collision_robot_caused}")
 
             # ── 8. Success check ──────────────────────────────────────────
             # BDDLBaseDomain.step() sets done = self._check_success() directly
@@ -1421,14 +1700,20 @@ def run_libero_trial(
                     obj_pos_geo = np.array(obs[_geo_candidate], dtype=float)
                     xy_dist_geo = np.linalg.norm(obj_pos_geo[:2] - goal_pos[:2])
                     z_ok = 0.88 < obj_pos_geo[2] < goal_pos[2] + 0.08
-                    # Only count as geo-success once the object is released —
-                    # while the arm is carrying it near the goal the z/xy
-                    # conditions are satisfied in mid-air, causing a premature
-                    # episode termination before the placement heuristic fires.
-                    if xy_dist_geo < 0.10 and z_ok and not _grasp_flag:
+                    # Require the object was actually released (not just the gripper
+                    # action momentarily dipping to ≤ 0 between VLA chunks) AND that
+                    # at least 8 steps have passed since release so the physics can
+                    # settle and confirm the object landed on the target surface.
+                    settled = (
+                        not _grasp_flag
+                        and _last_release_step > 0
+                        and (t - _last_release_step) >= 8
+                    )
+                    if xy_dist_geo < 0.10 and z_ok and settled:
                         geo_success = True
                         print(f"  [{t:03d}] GEO-SUCCESS: {_geo_candidate} "
-                              f"xy_dist={xy_dist_geo:.3f}m z={obj_pos_geo[2]:.3f}m")
+                              f"xy_dist={xy_dist_geo:.3f}m z={obj_pos_geo[2]:.3f}m"
+                              f"  (released at step {_last_release_step})")
 
             success_flag = task_success or geo_success or done or bool(info.get("success", False))
             if t % 8 == 0:  # print every chunk so we can see the value live
@@ -1550,8 +1835,17 @@ def run_libero_trial(
         metrics.save_hdf5(cbf_dataset_path, instruction=instruction)
 
     s = metrics.summary()
+    # Attach attribution to the metrics object so run_task can persist it to CSV
+    # ('|'-joined so it survives as a single CSV cell).
+    metrics.collision_culprit = "|".join(sorted(_collision_culprits)) if _collision_flag else ""
+    metrics.collision_robot_caused = bool(_collision_flag and _collision_robot_caused)
+    metrics.obs_touched_by    = "|".join(sorted(_obs_touch_seen))
+    _culprit_str = (f"  culprit={sorted(_collision_culprits)}"
+                    if _collision_flag else "")
+    _touch_str = (f"  touched_by={sorted(_obs_touch_seen)}"
+                  if _obs_touch_seen else "")
     print(f"  Done — TSR={s['goal_reached']}  "
           f"collision={s['collision_detected']}  "
           f"CBF={s['cbf_activations']} acts  "
-          f"violations={s['violation_steps']}")
+          f"violations={s['violation_steps']}{_culprit_str}{_touch_str}")
     return metrics

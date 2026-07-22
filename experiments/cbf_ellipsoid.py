@@ -29,28 +29,41 @@ try:
 except ImportError:
     _HAS_CVXPY = False
 
-# EE ellipsoid semi-axes (meters) — calibrated from the actual Franka Emika
-# Panda gripper collision geometry in LIBERO/MuJoCo (gripper0_hand_collision +
-# both finger + finger-pad collision meshes, measured as AABB half-extents in
-# the EE local frame, + 5 mm safety margin on each axis):
-#   x (gripper width):       measured 0.032 m  → 0.040 m with margin
-#   y (finger spread ±):     measured 0.105 m  → 0.115 m with margin
-#   z (hand depth, wrist→tip):measured 0.069 m  → 0.075 m with margin
-EE_Q_DIAG_DEFAULT = np.array([0.040, 0.115, 0.075])
+# EE ellipsoid semi-axes (meters) — MATCHED TO AEGIS/VLSA
+# (main_aegis_translational.py: Q1_diag = diag(0.06, 0.12, 0.11)). AEGIS deliberately
+# uses an INFLATED end-effector ellipsoid — much larger than the true gripper AABB
+# (~0.032, 0.102, 0.066) — to create standoff so the barrier engages EARLY and keeps
+# grazes out. Our earlier tight [0.040, 0.115, 0.075] fired late (cbf_activation ~0.11)
+# and gave CAR ~31% vs AEGIS ~77%. Matching their ellipsoid is the primary CAR fix.
+# For tall cartons (orange juice / milk / alphabet soup) AEGIS uses z=0.20; the runner
+# passes that per-instruction via EE_Q_DIAG_TALL.
+EE_Q_DIAG_DEFAULT = np.array([0.06, 0.12, 0.11])
+EE_Q_DIAG_TALL    = np.array([0.06, 0.12, 0.20])
+_TALL_OBJECT_KEYS = ("orange juice", "milk", "alphabet soup")
 
-# Offset from robot0_eef_pos (grasp-site) to the geometric centre of the
-# full gripper AABB in the EE local frame.
-#
-# robot0_eef_pos in LIBERO/robosuite sits at the fingertip grasp site
-# (gripper0_eef body).  The full gripper assembly (hand body + two fingers
-# + finger-pad geoms) spans z ∈ [-0.124, +0.013] in the EE local frame,
-# so its centre is at z = -0.056 m (56 mm toward the wrist).
-# Using zero offset (pure fingertip reference) leaves the hand-body portion
-# ~14 mm unprotected on the wrist side; centering correctly fixes this.
-EE_OFFSET_LOCAL = np.array([0.0, 0.0, -0.056])
+# Offset from robot0_eef_pos to the EE ellipsoid centre — MATCHED TO AEGIS ([0,0,-0.08]).
+EE_OFFSET_LOCAL = np.array([0.0, 0.0, -0.08])
 
 # CBF class-K coefficient: α(h) = K_CBF · h.  AEGIS uses 10.
+# Larger k is MORE permissive (allows the barrier to approach 0 faster → closer
+# approach). We match AEGIS's 10 for a like-for-like comparison; the diagnostic
+# (experiments/cbf_diagnostic.py, Test C) confirms the barrier holds at 10.
 K_CBF = 10.0
+
+# One-shot warning flag: the scipy SLSQP fallback silently keeps the raw action
+# on solver failure. Warn loudly the first time so a missing cvxpy install can't
+# hide a CBF bypass.
+_SLSQP_FAIL_WARNED = False
+
+
+def _warn_slsqp_failure(where: str) -> None:
+    global _SLSQP_FAIL_WARNED
+    if not _SLSQP_FAIL_WARNED:
+        print(f"[CBF][WARN] scipy SLSQP failed to converge in {where}; the RAW "
+              f"(uncorrected) action is being passed through — the CBF is NOT "
+              f"protecting this step. Install cvxpy to use the OSQP QP instead. "
+              f"(further failures suppressed)")
+        _SLSQP_FAIL_WARNED = True
 
 # Integration step for z-update (should match sim dt ≈ 0.05 s at 20 Hz).
 Z_UPDATE_DT = 0.05
@@ -169,7 +182,7 @@ def compute_h_coeffs(
     a_uz = (mu_row @ _project_matrix(z)).ravel()
 
     h = compute_h(p1, Q1_diag, R1, p2, Q2_diag, R2, z)
-    return a_v, a_uz, h
+    return a_v, a_uz, h, np.asarray(mu_row).ravel()
 
 
 # ── Sphere-decomposition CBF (replaces ellipsoid for obstacle geometry) ────────
@@ -189,38 +202,66 @@ def compute_h_coeffs(
 #   • Simpler QP (3 variables vs 6) and no per-obstacle z state to integrate
 #   • Arm-link sphere constraints drop into the same QP unchanged
 
-# Effective EE bounding-sphere radius for sphere–sphere CBF.
-# Chosen as the gripper half-width (narrowest cross-section in approach direction)
-# plus a small margin; less conservative than EE_Q_DIAG_DEFAULT.max = 0.115 m.
+# Effective EE bounding-sphere radius for sphere–sphere CBF (single-sphere fallback).
 EE_SPHERE_RADIUS = 0.06   # metres
+
+# Multi-sphere gripper model in the EE local frame (z = approach / finger direction).
+# Three spheres approximate the Franka Panda hand body + two finger pads.
+# Coordinates measured from the grasp-site (robot0_eef_pos):
+#   x = gripper width  (±4 cm)
+#   y = finger spread  (±10.5 cm)
+#   z = depth, wrist→tip  (negative = toward wrist)
+_EE_SPHERES_LOCAL: list[tuple[np.ndarray, float]] = [
+    (np.array([0.0,    0.0,   -0.056]),  0.048),   # hand body (4.8 cm radius covers the ±4 cm wide palm)
+    (np.array([0.0,  +0.036,  -0.105]),  0.020),   # left finger pad
+    (np.array([0.0,  -0.036,  -0.105]),  0.020),   # right finger pad
+]
+
+
+def get_ee_spheres(
+    ee_pos: np.ndarray, R1: np.ndarray
+) -> list[tuple[np.ndarray, float]]:
+    """Return the 3-sphere EE model in world frame (hand body + 2 finger pads)."""
+    return [(ee_pos + R1 @ offset, r) for offset, r in _EE_SPHERES_LOCAL]
 
 
 def compute_sphere_decomp_constraints(
-    ee_pos:  np.ndarray,
-    R1:      np.ndarray,
-    spheres: list[tuple[np.ndarray, float]],
-    r_ee:    float = EE_SPHERE_RADIUS,
-    k_cbf:   float = K_CBF,
-    scale:   float = 0.2,
+    ee_pos:     np.ndarray,
+    R1:         np.ndarray,
+    spheres:    list[tuple[np.ndarray, float]],
+    r_ee:       float = EE_SPHERE_RADIUS,
+    k_cbf:      float = K_CBF,
+    scale:      float = 0.2,
+    ee_spheres: list[tuple[np.ndarray, float]] | None = None,
 ) -> list[tuple[np.ndarray, float]]:
     """
     Build CBF QP rows for a sphere-decomposition obstacle model.
 
-    For each obstacle sphere (c_j, r_j):
-        h_j   = ||p_ee - c_j||² − (r_ee + r_j)²
-        ḣ_j   = 2(p_ee − c_j) · (scale · R1 @ u_v)
-        CBF:    [2(p_ee − c_j) @ (scale · R1)] @ u_v  +  k·h_j  ≥  0
+    If ee_spheres is provided, generates N_ee × N_obs constraint rows (one per
+    EE-sphere / obstacle-sphere pair) giving proper coverage of the elongated
+    gripper shape.  Otherwise falls back to a single sphere at ee_pos with r_ee.
 
-    Returns list of (a_body, b) pairs in the extra_lin_constraints format.
-    a_body is the (3,) coefficient vector on the body-frame QP variable u_v;
-    b is the scalar offset so the constraint is  a_body @ u_v + b >= 0.
+    For each (EE sphere i, obstacle sphere j) pair:
+        h_ij   = ||ee_c_i − c_j||² − (r_i + r_j)²
+        ḣ_ij   = 2(ee_c_i − c_j) · (scale · R1 @ u_v)      [rigid-body kinematics]
+        CBF:    [2(ee_c_i − c_j) @ (scale · R1)] @ u_v + k·h_ij  ≥  0
+
+    Returns list of (a_body, b) in extra_lin_constraints format.
     """
     rows: list[tuple[np.ndarray, float]] = []
-    for c_j, r_j in spheres:
-        diff   = ee_pos - c_j
-        h_j    = float(np.dot(diff, diff) - (r_ee + r_j) ** 2)
-        a_body = 2.0 * scale * (diff @ R1)   # (3,) body-frame coefficient
-        rows.append((a_body, k_cbf * h_j))
+    if ee_spheres is not None:
+        for ee_c, ee_r in ee_spheres:
+            for c_j, r_j in spheres:
+                diff   = ee_c - c_j
+                h_ij   = float(np.dot(diff, diff) - (ee_r + r_j) ** 2)
+                a_body = 2.0 * scale * (diff @ R1)
+                rows.append((a_body, k_cbf * h_ij))
+    else:
+        for c_j, r_j in spheres:
+            diff   = ee_pos - c_j
+            h_j    = float(np.dot(diff, diff) - (r_ee + r_j) ** 2)
+            a_body = 2.0 * scale * (diff @ R1)
+            rows.append((a_body, k_cbf * h_j))
     return rows
 
 
@@ -233,6 +274,7 @@ def run_sphere_decomp_cbf(
     k_cbf:             float = K_CBF,
     scale:             float = 0.2,
     extra_constraints: list | None = None,
+    ee_spheres:        list[tuple[np.ndarray, float]] | None = None,
 ) -> tuple[np.ndarray, float, bool]:
     """
     CBF-QP using sphere-decomposition obstacle geometry.
@@ -252,14 +294,21 @@ def run_sphere_decomp_cbf(
     u_v_ref = R1.T @ u_nom   # world → body frame reference
 
     sphere_rows = compute_sphere_decomp_constraints(
-        ee_pos, R1, obstacle_spheres, r_ee, k_cbf, scale,
+        ee_pos, R1, obstacle_spheres, r_ee, k_cbf, scale, ee_spheres=ee_spheres,
     )
     all_rows = sphere_rows + (extra_constraints or [])
 
-    h_values = [
-        float(np.dot(ee_pos - c_j, ee_pos - c_j) - (r_ee + r_j) ** 2)
-        for c_j, r_j in obstacle_spheres
-    ]
+    if ee_spheres is not None:
+        h_values = [
+            float(np.dot(ee_c - c_j, ee_c - c_j) - (ee_r + r_j) ** 2)
+            for ee_c, ee_r in ee_spheres
+            for c_j, r_j in obstacle_spheres
+        ]
+    else:
+        h_values = [
+            float(np.dot(ee_pos - c_j, ee_pos - c_j) - (r_ee + r_j) ** 2)
+            for c_j, r_j in obstacle_spheres
+        ]
     h_min = float(min(h_values)) if h_values else float("inf")
 
     u_v_out   = u_v_ref.copy()
@@ -276,6 +325,8 @@ def run_sphere_decomp_cbf(
         res = minimize(_obj, x0=u_v_ref.copy(), method="SLSQP", constraints=cons)
         if res.success:
             u_v_out = res.x
+        else:
+            _warn_slsqp_failure("run_sphere_decomp_cbf")
         triggered = bool(np.linalg.norm(u_v_out - u_v_ref) > 1e-4)
     else:
         import cvxpy as cp
@@ -329,12 +380,23 @@ def run_ellipsoid_cbf(
     Q2_diag = obs_q
     R2 = obs_R if obs_R is not None else np.eye(3)
 
-    a_v, a_uz, h = compute_h_coeffs(p1, Q1_diag, R1, obs_pos, Q2_diag, R2, z)
+    a_v, a_uz, h, mu_row = compute_h_coeffs(p1, Q1_diag, R1, obs_pos, Q2_diag, R2, z)
 
-    # Nominal reference: convert world-frame u_nom to body-frame, scale × 5
+    # Nominal reference: convert world-frame u_nom to body-frame.
+    #
+    # AEGIS blows the QP variable up by 5× (u_v_ref = 5·v_ref) purely for solver
+    # conditioning, then cancels it at the output with `0.2 · R1 @ u_v` (5×0.2=1).
+    # The blow-up factor MUST equal 1/scale so the passthrough is unit-gain:
+    #   output = scale · R1 @ (BETA · R1ᵀ u_nom) = scale·BETA · u_nom = u_nom.
+    # Previously this was hardcoded to 5.0 while scale=1.0 was passed, so the
+    # unconstrained (non-triggered) action came out 5× too large — a real bug.
+    beta       = 1.0 / scale if scale > 1e-9 else 1.0   # = 5.0 when scale=0.2 (AEGIS)
     v_ref_body = R1.T @ u_nom
-    u_v_ref    = 5.0 * v_ref_body     # AEGIS: u_v_ref = 5 * v_ref
-    u_z_nom    = 10.0 * (a_uz / (np.linalg.norm(a_uz) + 1e-12))
+    u_v_ref    = beta * v_ref_body
+    # AEGIS z-nominal: u_z_nom = 10·mu_row (raw ∂h/∂z), NOT the normalized a_uz. This
+    # drives the auxiliary direction toward the tightest separation, making the barrier
+    # less conservative in the *task* direction while still engaging (matches main_aegis).
+    u_z_nom    = 10.0 * mu_row
 
     triggered = False
     u_v_out   = v_ref_body.copy()
@@ -350,6 +412,8 @@ def run_ellipsoid_cbf(
                 cons.append({"type": "ineq",
                               "fun": lambda u, a=a_row, bv=b: float(a @ u) + bv})
         res = minimize(obj, x0=u_v_ref.copy(), method="SLSQP", constraints=cons)
+        if not res.success:
+            _warn_slsqp_failure("run_ellipsoid_cbf")
         u_v_out  = res.x if res.success else u_v_ref.copy()
         triggered = np.linalg.norm(u_v_out - u_v_ref) > 1e-4
         u_z_out   = u_z_nom.copy()

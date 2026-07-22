@@ -45,13 +45,161 @@ _RGBA_LINK        = np.array([0.20, 0.90, 0.90, 0.08], np.float32)   # cyan
 # thin appendages like handles that don't meaningfully obstruct the arm path).
 # Safety margin is added on top in detect_safelibero_obstacle().
 _KNOWN_OBSTACLE_Q: dict[str, np.ndarray] = {
-    "moka_pot_obstacle":          np.array([0.115, 0.085, 0.130]),  # conservative bound: spout extends ~5cm laterally
+    "moka_pot_obstacle":          np.array([0.115, 0.085, 0.155]),  # spout tip extends ~15.5 cm above body center
     "white_storage_box_obstacle": np.array([0.070, 0.070, 0.066]),  # measured from 4 wall geoms (outer faces ±0.070 xy, ±0.066 z)
     "wine_bottle_obstacle":       np.array([0.038, 0.038, 0.170]),  # tall thin cylinder
     "milk_obstacle":              np.array([0.048, 0.038, 0.110]),  # carton
     "red_coffee_mug_obstacle":    np.array([0.048, 0.048, 0.060]),  # mug
     "yellow_book_obstacle":       np.array([0.095, 0.135, 0.018]),  # flat book
 }
+
+
+# ── Shared obstacle point cloud (single geometry source) ─────────────────────
+#
+# Both the ellipsoid (MVEE) and the sphere-decomposition CBF now derive from ONE
+# real point cloud read directly from MuJoCo — mesh vertices AND primitive-geom
+# surface samples — instead of the hand-measured _KNOWN_OBSTACLE_Q table. This
+# mirrors AEGIS's method (they MVEE-fit a point cloud from VLM+depth); the only
+# difference is the cloud's source (sim ground-truth vs perception).
+
+def get_obstacle_point_cloud(
+    model, data, body_name: str, max_points: int = 2000,
+) -> np.ndarray | None:
+    """World-frame point cloud of an obstacle body's true collision geometry.
+
+    Reads actual mesh vertices (via geom_dataid → mesh_vert) and samples the
+    surfaces of all primitive geoms (box/sphere/cylinder/capsule/ellipsoid).
+    Returns an (N,3) array, or None if the body has no usable geometry.
+    """
+    body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, body_name)
+    if body_id < 0:
+        return None
+
+    _MESH     = int(mujoco.mjtGeom.mjGEOM_MESH)
+    _BOX      = int(mujoco.mjtGeom.mjGEOM_BOX)
+    _SPHERE   = int(mujoco.mjtGeom.mjGEOM_SPHERE)
+    _CYLINDER = int(mujoco.mjtGeom.mjGEOM_CYLINDER)
+    _CAPSULE  = int(mujoco.mjtGeom.mjGEOM_CAPSULE)
+    _ELLIP    = int(mujoco.mjtGeom.mjGEOM_ELLIPSOID)
+
+    pts: list[np.ndarray] = []
+    for gid in range(model.ngeom):
+        if model.geom_bodyid[gid] != body_id:
+            continue
+        gtype = int(model.geom_type[gid])
+        gpos  = data.geom_xpos[gid].copy()
+        gmat  = data.geom_xmat[gid].reshape(3, 3).copy()
+        gs    = model.geom_size[gid].copy()
+
+        def _w(lp, _p=gpos, _m=gmat):
+            return _p + _m @ np.asarray(lp, float)
+
+        if gtype == _MESH:
+            mid = int(model.geom_dataid[gid])
+            if mid < 0:
+                continue
+            va = int(model.mesh_vertadr[mid]); vn = int(model.mesh_vertnum[mid])
+            V = np.asarray(model.mesh_vert[va:va + vn]).reshape(-1, 3)
+            pts.append((gmat @ V.T).T + gpos)
+
+        elif gtype == _BOX:
+            hx, hy, hz = gs[0], gs[1], gs[2]
+            for sx in (-1, 1):
+                for sy in (-1, 1):
+                    for sz in (-1, 1):
+                        pts.append(_w([sx*hx, sy*hy, sz*hz])[None])
+            for ax, sign in ((0,1),(0,-1),(1,1),(1,-1),(2,1),(2,-1)):
+                p = [0.0, 0.0, 0.0]; p[ax] = sign * gs[ax]
+                pts.append(_w(p)[None])
+
+        elif gtype in (_SPHERE, _ELLIP):
+            rx, ry, rz = (gs[0], gs[0], gs[0]) if gtype == _SPHERE else (gs[0], gs[1], gs[2])
+            for theta in np.linspace(0, 2*np.pi, 8, endpoint=False):
+                for phi in np.linspace(0.3, np.pi - 0.3, 4):
+                    pts.append(_w([rx*np.sin(phi)*np.cos(theta),
+                                   ry*np.sin(phi)*np.sin(theta),
+                                   rz*np.cos(phi)])[None])
+            pts.append(_w([0, 0, rz])[None]); pts.append(_w([0, 0, -rz])[None])
+
+        elif gtype in (_CYLINDER, _CAPSULE):
+            r, hh = gs[0], gs[1]
+            for zz in np.linspace(-hh, hh, 3):
+                for theta in np.linspace(0, 2*np.pi, 8, endpoint=False):
+                    pts.append(_w([r*np.cos(theta), r*np.sin(theta), zz])[None])
+            pts.append(_w([0, 0, hh + (r if gtype == _CAPSULE else 0)])[None])
+            pts.append(_w([0, 0, -hh - (r if gtype == _CAPSULE else 0)])[None])
+
+    if not pts:
+        return None
+    P = np.vstack(pts)
+    if len(P) > max_points:
+        idx = np.random.default_rng(0).choice(len(P), max_points, replace=False)
+        P = P[idx]
+    return P
+
+
+def _mvee_khachiyan(P: np.ndarray, tol: float = 1e-3, max_iter: int = 2000):
+    """Minimum-volume enclosing ellipsoid (Khachiyan). No external deps.
+
+    Returns (center (3,), R (3,3) principal axes as columns, semi_axes (3,)),
+    or None if the cloud is degenerate (too few / coplanar points).
+    """
+    P = np.asarray(P, float)
+    N, d = P.shape
+    if N < d + 1:
+        return None
+    Q = np.vstack([P.T, np.ones(N)])           # (d+1, N)
+    u = np.full(N, 1.0 / N)
+    for _ in range(max_iter):
+        X = Q @ (u[:, None] * Q.T)             # (d+1, d+1)
+        try:
+            G = Q.T @ np.linalg.inv(X)         # (N, d+1)
+        except np.linalg.LinAlgError:
+            return None
+        M = np.einsum("ij,ij->i", G, Q.T)      # leverage scores (N,)
+        j = int(np.argmax(M)); step = (M[j] - d - 1) / ((d + 1) * (M[j] - 1))
+        if not np.isfinite(step) or step <= 0:
+            break
+        new_u = (1 - step) * u; new_u[j] += step
+        if np.linalg.norm(new_u - u) < tol:
+            u = new_u; break
+        u = new_u
+    c = P.T @ u
+    try:
+        A = np.linalg.inv(P.T @ (u[:, None] * P) - np.outer(c, c)) / d
+    except np.linalg.LinAlgError:
+        return None
+    vals, vecs = np.linalg.eigh(A)
+    vals = np.clip(vals, 1e-9, None)
+    semi_axes = 1.0 / np.sqrt(vals)            # along principal axes (columns of vecs)
+    return c, vecs, semi_axes
+
+
+def fit_obstacle_mvee(
+    model, data, body_name: str, safety_margin: float = 0.010,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    """Oriented MVEE ellipsoid for an obstacle: (center, R, q_diag).
+
+    q_diag are the semi-axes (metres) along the ellipsoid principal axes (the
+    columns of R). Falls back to the _KNOWN_OBSTACLE_Q table (axis-aligned) only
+    if the point cloud is unavailable.
+    """
+    P = get_obstacle_point_cloud(model, data, body_name)
+    if P is not None:
+        res = _mvee_khachiyan(P)
+        if res is not None:
+            c, R, semi = res
+            return c, R, semi + safety_margin
+
+    # Fallback: hand-measured table, axis-aligned.
+    body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, body_name)
+    if body_id < 0:
+        return None
+    center = data.xpos[body_id].copy()
+    for key, q in _KNOWN_OBSTACLE_Q.items():
+        if key in body_name:
+            return center, np.eye(3), q + safety_margin
+    return None
 
 
 # ── Obstacle geometry from MuJoCo ────────────────────────────────────────────
@@ -67,117 +215,35 @@ def decompose_obstacle_to_spheres(
     """
     Decompose an obstacle body into a cloud of spheres tracing its surface.
 
-    Samples surface points from all primitive (non-mesh) collision geoms
-    on the body, then thins them to n_spheres via farthest-point sampling
-    so the cloud gives uniform coverage of the object surface.
-
-    If no primitive geoms exist (mesh-only bodies), falls back to sampling
-    the surface of the known analytic ellipsoid from _KNOWN_OBSTACLE_Q.
+    Uses the shared get_obstacle_point_cloud() (mesh vertices + primitive-geom
+    surface samples — the SAME source the MVEE ellipsoid uses), then thins it to
+    n_spheres via farthest-point sampling for uniform surface coverage.
 
     Returns list of (center_world, radius) or None if body not found.
     Every sphere has radius = r_sphere + safety_margin.
     """
-    body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, body_name)
-    if body_id < 0:
-        return None
+    pts = get_obstacle_point_cloud(model, data, body_name)
 
-    body_pos = data.xpos[body_id].copy()
-
-    _MESH      = int(mujoco.mjtGeom.mjGEOM_MESH)
-    _BOX       = int(mujoco.mjtGeom.mjGEOM_BOX)
-    _SPHERE    = int(mujoco.mjtGeom.mjGEOM_SPHERE)
-    _CYLINDER  = int(mujoco.mjtGeom.mjGEOM_CYLINDER)
-    _CAPSULE   = int(mujoco.mjtGeom.mjGEOM_CAPSULE)
-    _ELLIPSOID = int(mujoco.mjtGeom.mjGEOM_ELLIPSOID)
-
-    surface_pts: list[np.ndarray] = []
-
-    for gid in range(model.ngeom):
-        if model.geom_bodyid[gid] != body_id:
-            continue
-        gtype = int(model.geom_type[gid])
-        gpos = data.geom_xpos[gid].copy()
-        gmat = data.geom_xmat[gid].reshape(3, 3).copy()
-        gs   = model.geom_size[gid].copy()
-
-        def _w(lp, _p=gpos, _m=gmat):
-            return _p + _m @ np.asarray(lp, float)
-
-        if gtype == _MESH:
-            continue  # mesh geom_xpos is at object base; geom_rbound from base spreads spheres on the floor
-
-        if gtype == _BOX:
-            hx, hy, hz = gs[0], gs[1], gs[2]
-            for sx in (-1, 1):
-                for sy in (-1, 1):
-                    for sz in (-1, 1):
-                        surface_pts.append(_w([sx*hx, sy*hy, sz*hz]))
-            for ax, sign in ((0,1),(0,-1),(1,1),(1,-1),(2,1),(2,-1)):
-                p = [0.0, 0.0, 0.0]; p[ax] = sign * gs[ax]
-                surface_pts.append(_w(p))
-
-        elif gtype == _SPHERE:
-            r = gs[0]
-            for theta in np.linspace(0, 2*np.pi, 8, endpoint=False):
-                for phi in np.linspace(0.3, np.pi - 0.3, 4):
-                    surface_pts.append(_w([
-                        r*np.sin(phi)*np.cos(theta),
-                        r*np.sin(phi)*np.sin(theta),
-                        r*np.cos(phi),
-                    ]))
-            surface_pts.extend([_w([0, 0, r]), _w([0, 0, -r])])
-
-        elif gtype == _CYLINDER:
-            r, hh = gs[0], gs[1]
-            for zz in (-hh, 0.0, hh):
-                n = 8 if zz == 0.0 else 6
-                for theta in np.linspace(0, 2*np.pi, n, endpoint=False):
-                    surface_pts.append(_w([r*np.cos(theta), r*np.sin(theta), zz]))
-            surface_pts.extend([_w([0, 0, hh]), _w([0, 0, -hh])])
-
-        elif gtype == _CAPSULE:
-            r, hh = gs[0], gs[1]
-            for zz in np.linspace(-hh, hh, 3):
-                for theta in np.linspace(0, 2*np.pi, 8, endpoint=False):
-                    surface_pts.append(_w([r*np.cos(theta), r*np.sin(theta), zz]))
-            for sign in (-1, 1):
-                z0 = sign * hh
-                for theta in np.linspace(0, 2*np.pi, 6, endpoint=False):
-                    for phi in (np.pi/4, np.pi/2):
-                        surface_pts.append(_w([
-                            r*np.sin(phi)*np.cos(theta),
-                            r*np.sin(phi)*np.sin(theta),
-                            z0 + sign*r*np.cos(phi),
-                        ]))
-
-        elif gtype == _ELLIPSOID:
-            rx, ry, rz = gs[0], gs[1], gs[2]
-            for theta in np.linspace(0, 2*np.pi, 8, endpoint=False):
-                for phi in np.linspace(0.3, np.pi - 0.3, 4):
-                    surface_pts.append(_w([
-                        rx*np.sin(phi)*np.cos(theta),
-                        ry*np.sin(phi)*np.sin(theta),
-                        rz*np.cos(phi),
-                    ]))
-
-    # Fallback: if only mesh geoms, sample on the known analytic ellipsoid
-    if not surface_pts:
+    # Fallback: mesh-less / empty body → sample the known analytic ellipsoid.
+    if pts is None:
+        body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, body_name)
+        if body_id < 0:
+            return None
+        body_pos = data.xpos[body_id].copy()
+        surface_pts: list[np.ndarray] = []
         for key, q in _KNOWN_OBSTACLE_Q.items():
             if key in body_name:
                 for theta in np.linspace(0, 2*np.pi, 8, endpoint=False):
                     for phi in np.linspace(0.3, np.pi - 0.3, 4):
-                        lp = np.array([
+                        surface_pts.append(body_pos + np.array([
                             q[0]*np.sin(phi)*np.cos(theta),
                             q[1]*np.sin(phi)*np.sin(theta),
                             q[2]*np.cos(phi),
-                        ])
-                        surface_pts.append(body_pos + lp)
+                        ]))
                 break
-
-    if not surface_pts:
-        return None
-
-    pts = np.array(surface_pts)
+        if not surface_pts:
+            return None
+        pts = np.array(surface_pts)
 
     # Farthest-point sampling: greedy selection of n_spheres maximally spread points
     if len(pts) > n_spheres:
@@ -201,64 +267,18 @@ def fit_obstacle_ellipsoid(
     body_name: str,
     safety_margin: float = 0.025,
 ) -> tuple[np.ndarray, np.ndarray] | None:
+    """Axis-aligned (center, q_diag) for visualization/back-compat.
+
+    Thin wrapper over fit_obstacle_mvee(): returns the MVEE centre and its
+    principal semi-axes as an axis-aligned size. The CBF itself uses the fully
+    oriented MVEE (center, R, q_diag) via detect_safelibero_obstacle; this 2-tuple
+    exists only for the render hook, which draws a rough translucent blob.
     """
-    Compute the CBF ellipsoid for an obstacle body.
-
-    Always fits the geometric center from non-mesh geom centers so the
-    returned center matches the actual collision geometry (not the body
-    origin, which can differ from the geom center for compound objects).
-
-    q_diag is taken from _KNOWN_OBSTACLE_Q when available (hand-measured,
-    more accurate than auto-fit); otherwise auto-fitted from geom AABB.
-
-    Returns (center_world, q_diag) or None if body not found.
-    """
-    body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, body_name)
-    if body_id < 0:
+    res = fit_obstacle_mvee(model, data, body_name, safety_margin=safety_margin)
+    if res is None:
         return None
-    body_pos = data.xpos[body_id].copy()
-
-    # ── Fit geom center from primitive (non-mesh) geom positions ──────────
-    _MESH = int(mujoco.mjtGeom.mjGEOM_MESH)
-
-    centers: list[np.ndarray] = []
-    half_sizes: list[float]   = []
-
-    for gid in range(model.ngeom):
-        if model.geom_bodyid[gid] != body_id:
-            continue
-        if model.geom_type[gid] == _MESH:
-            continue  # mesh size field is not a bounding box
-        gpos  = data.geom_xpos[gid].copy()
-        gsize = model.geom_size[gid].copy()
-        centers.append(gpos - body_pos)
-        half_sizes.append(float(np.max(gsize[:3])) if np.any(gsize > 0) else 0.02)
-
-    if centers:
-        centers_arr   = np.array(centers)
-        center_offset = (centers_arr.min(axis=0) + centers_arr.max(axis=0)) / 2.0
-        geom_center   = body_pos + center_offset
-    else:
-        geom_center = body_pos.copy()
-
-    # ── q_diag: use pre-measured table if available ────────────────────────
-    for key, q in _KNOWN_OBSTACLE_Q.items():
-        if key in body_name:
-            return geom_center, q + safety_margin
-
-    # ── Auto-fit q_diag from geom AABB ────────────────────────────────────
-    if not centers:
-        return None
-
-    centers_arr = np.array(centers)
-    mins = centers_arr.min(axis=0)
-    maxs = centers_arr.max(axis=0)
-    median_hs = float(np.median(half_sizes))
-
-    half_extents = (maxs - mins) / 2.0 + median_hs
-    q_diag = np.maximum(half_extents + safety_margin, 0.02)
-
-    return geom_center, q_diag
+    center, _R, q_diag = res
+    return center, q_diag
 
 
 # ── Render-context hook ───────────────────────────────────────────────────────
@@ -376,17 +396,19 @@ def push_cbf_geoms(
 
     specs: list = []
 
-    # ── EE sphere ─────────────────────────────────────────────────────────
+    # ── EE ellipsoid (oriented, matches CBF geometry) ─────────────────────
+    # EE_Q_DIAG_DEFAULT already holds semi-axes directly — do NOT take sqrt.
     ee_rgba = _RGBA_EE_ACTIVE if cbf_triggered else _RGBA_EE_SAFE
-    ee_r = 0.06   # matches EE_SPHERE_RADIUS used in the CBF barrier
-    specs.append((_SPHERE, np.array([ee_r, ee_r, ee_r]), ee_center.copy(), np.eye(3), ee_rgba.copy()))
+    ee_size = np.asarray(ee_q, float)   # direct semi-axes [0.040, 0.115, 0.075] m
+    specs.append((_ELLIPSOID, ee_size, ee_center.copy(), R1.copy(), ee_rgba.copy()))
 
     # ── Obstacle geometry ─────────────────────────────────────────────────
     if obstacle_spheres is not None:
         # Sphere decomposition: draw each surface sphere, coloured by proximity
+        ee_r = float(np.mean(ee_size))
         for c_j, r_j in obstacle_spheres:
             dist = float(np.linalg.norm(ee_center - c_j))
-            clearance = dist - (ee_r + r_j)   # positive = safe
+            clearance = dist - (ee_r + r_j)
             if clearance < 0:
                 rgba = _RGBA_OBS_HOT.copy()
             elif clearance < 0.08:
@@ -396,7 +418,7 @@ def push_cbf_geoms(
             specs.append((_SPHERE, np.array([r_j, r_j, r_j]),
                           c_j.copy(), np.eye(3), rgba))
     else:
-        # Fallback: single ellipsoid per obstacle (original behaviour)
+        # Single ellipsoid per obstacle using known dimensions or MuJoCo AABB
         for i, ob in enumerate(obstacles):
             h = h_values[i] if i < len(h_values) else float("inf")
             if h < 0:
@@ -406,14 +428,20 @@ def push_cbf_geoms(
             else:
                 obs_rgba = _RGBA_OBS_SAFE.copy()
 
-            if hasattr(ob, "q_diag") and ob.q_diag is not None:
-                obs_size = ob.q_diag.copy()
-            else:
-                r = getattr(ob, "safety_radius", 0.10)
-                obs_size = np.array([r, r, r])
-
             body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, ob.name)
             obs_mat = data.xmat[body_id].reshape(3, 3).copy() if body_id >= 0 else np.eye(3)
+
+            # Priority: known table → AABB from MuJoCo → safety_radius sphere
+            if ob.name in _KNOWN_OBSTACLE_Q:
+                obs_size = _KNOWN_OBSTACLE_Q[ob.name].copy()
+            else:
+                aabb = fit_obstacle_ellipsoid(model, data, ob.name)
+                if aabb is not None:
+                    _, obs_size = aabb
+                else:
+                    r = getattr(ob, "safety_radius", 0.10)
+                    obs_size = np.array([r, r, r])
+
             specs.append((_ELLIPSOID, obs_size, ob.pos.copy(), obs_mat, obs_rgba))
 
     # ── Arm-link spheres ──────────────────────────────────────────────────

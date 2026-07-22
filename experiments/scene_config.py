@@ -32,6 +32,9 @@ class ObstacleConfig:
     # Actual obstacle ellipsoid semi-axes fitted from MuJoCo collision geoms.
     # When set, the CBF uses these instead of the isotropic safety_radius sphere.
     q_diag: np.ndarray | None = None
+    # Ellipsoid orientation (3x3): columns are the MVEE principal axes that q_diag
+    # is measured along. When None the CBF falls back to the obstacle body frame.
+    q_R: np.ndarray | None = None
 
     def __post_init__(self):
         self.pos = np.asarray(self.pos, dtype=float)

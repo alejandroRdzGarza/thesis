@@ -68,20 +68,39 @@ from experiments.libero_runner import (
     _post_process_vla,
     _preprocess,
     _query_openvla_chunk,
+    _query_pi05_chunk,
+    _init_pi05_client,
     _render_frame,
     _unwrap_sim,
+    _compute_arm_link_constraints,
+    _get_arm_body_ids,
+    _get_arm_dof_indices,
     OPENVLA_URL,
     ObstacleConfig,
     detect_safelibero_obstacle,
     make_libero_env,
 )
-from experiments.cbf_ellipsoid import ee_ellipsoid_center, EE_Q_DIAG_DEFAULT
+from experiments.cbf_ellipsoid import (
+    ee_ellipsoid_center, EE_Q_DIAG_DEFAULT,
+    run_sphere_decomp_cbf, get_ee_spheres, K_CBF,
+)
+from scipy.spatial.transform import Rotation as _SciRot
+
+# MuJoCo primitive geom type IDs (mjtGeom enum values — stable across versions)
+_MJG_SPHERE    = 2
+_MJG_CAPSULE   = 3
+_MJG_ELLIPSOID = 4
+_MJG_CYLINDER  = 5
+_MJG_BOX       = 6
+_MJG_MESH      = 7
 
 try:
     from experiments.cbf_visualizer import install_scene_hook, push_cbf_geoms
+    from experiments.cbf_visualizer import _KNOWN_OBSTACLE_Q as _KNOWN_OB_Q
     _HAS_VIZ = True
 except ImportError:
     _HAS_VIZ = False
+    _KNOWN_OB_Q: dict = {}
 
 _CV2_WINDOW = "collect_obstacle_data"
 
@@ -97,24 +116,241 @@ D_DISCARD  = 0.05  # discard if within 5 cm of obstacle (unreliable zone)
 # Correction helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _ee_r_eff(n_hat_world: np.ndarray, R1: np.ndarray) -> float:
+    """Effective EE ellipsoid radius (meters) in world-frame direction n_hat_world.
+
+    EE_Q_DIAG_DEFAULT already holds semi-axes directly: [0.040, 0.115, 0.075] m
+    (x=gripper-width, y=finger-spread, z=hand-depth). Do NOT take sqrt.
+    """
+    semi_axes = EE_Q_DIAG_DEFAULT                    # [0.040, 0.115, 0.075] m — direct semi-axes
+    n_local   = R1.T @ n_hat_world                   # direction in EE frame
+    n_scaled  = n_local / semi_axes
+    return 1.0 / (float(np.linalg.norm(n_scaled)) + 1e-8)
+
+
 def _cbf_correction(
     ee_pos: np.ndarray,
+    R1: np.ndarray,
     near_ob: "ObstacleConfig",
     nom_xyz: np.ndarray,
     cbf_gamma: float,
     obstacle_safety_radius: float,
 ) -> tuple[np.ndarray, float]:
-    """Return (safe_xyz, h_min) using CBF filter."""
-    delta  = ee_pos - near_ob.pos
-    d      = float(np.linalg.norm(delta)) + 1e-8
-    n_hat  = delta / d
-    h      = d - obstacle_safety_radius
-    hdot   = float(np.dot(n_hat, nom_xyz))
+    """CBF filter with ellipsoidal EE model.
+
+    h = dist(ee_center, ob_center) - r_eff(direction) - obstacle_radius
+    where r_eff is the EE ellipsoid's radius in the direction toward the obstacle.
+    """
+    delta    = ee_pos - near_ob.pos
+    d        = float(np.linalg.norm(delta)) + 1e-8
+    n_hat    = delta / d                             # world frame: obstacle → EE
+    r_eff    = _ee_r_eff(n_hat, R1)                 # EE ellipsoid radius in that dir
+    h        = d - r_eff - obstacle_safety_radius
+    hdot     = float(np.dot(n_hat, nom_xyz))
     safe_xyz = nom_xyz.copy()
     if hdot + cbf_gamma * h < 0:
         correction = -(hdot + cbf_gamma * h) * n_hat
         safe_xyz   = nom_xyz + correction
     return safe_xyz, h
+
+
+# ── Geom-geometry helpers ────────────────────────────────────────────────────
+
+def _geom_surface_dist_and_normal(
+    ee_pos: np.ndarray,
+    geom_id: int,
+    model,
+    data,
+) -> tuple[float, np.ndarray]:
+    """Signed distance (m) from ee_pos to a MuJoCo geom surface, plus outward
+    unit normal (geom → EE) in world frame.  Handles sphere, box, capsule,
+    cylinder; falls back to the stored bounding sphere for mesh / ellipsoid.
+    Negative distance means ee_pos is inside the geom.
+    """
+    gtype = int(model.geom_type[geom_id])
+    gsize = model.geom_size[geom_id]
+    gpos  = data.geom_xpos[geom_id]
+    gmat  = data.geom_xmat[geom_id].reshape(3, 3)
+    p     = gmat.T @ (ee_pos - gpos)   # EE in geom-local frame
+
+    if gtype == _MJG_SPHERE:
+        r   = float(gsize[0])
+        d   = float(np.linalg.norm(p))
+        n_l = p / (d + 1e-8)
+        return d - r, gmat @ n_l
+
+    elif gtype == _MJG_BOX:
+        half = gsize[:3].copy()
+        if np.all(np.abs(p) < half):           # inside — find nearest face
+            margins = half - np.abs(p)
+            face    = int(np.argmin(margins))
+            n_l     = np.zeros(3); n_l[face] = float(np.sign(p[face]))
+            return -float(margins[face]), gmat @ n_l
+        else:
+            closest = np.clip(p, -half, half)
+            diff    = p - closest
+            d       = float(np.linalg.norm(diff))
+            return d, gmat @ (diff / (d + 1e-8))
+
+    elif gtype == _MJG_CAPSULE:
+        r, hh = float(gsize[0]), float(gsize[1])   # radius, half-height (local z)
+        p_z   = float(np.clip(p[2], -hh, hh))
+        diff  = p - np.array([0.0, 0.0, p_z])
+        d     = float(np.linalg.norm(diff))
+        return d - r, gmat @ (diff / (d + 1e-8))
+
+    elif gtype == _MJG_CYLINDER:
+        r, hh = float(gsize[0]), float(gsize[1])
+        xy    = p[:2]
+        d_xy  = float(np.linalg.norm(xy))
+        d_lat = d_xy - r          # neg inside lateral surface
+        d_cap = abs(float(p[2])) - hh    # neg inside cap range
+
+        if d_lat > 0 and d_cap <= 0:     # outside lateral only
+            n_l = np.array([xy[0], xy[1], 0.0]) / (d_xy + 1e-8)
+            return d_lat, gmat @ n_l
+        elif d_lat <= 0 and d_cap > 0:   # outside cap only
+            n_l = np.array([0.0, 0.0, float(np.sign(p[2]))])
+            return d_cap, gmat @ n_l
+        elif d_lat > 0 and d_cap > 0:    # corner region
+            d   = float(np.sqrt(d_lat**2 + d_cap**2))
+            nx  = xy / (d_xy + 1e-8)
+            n_l = np.array([nx[0]*d_lat, nx[1]*d_lat, float(np.sign(p[2]))*d_cap])
+            n_l /= (float(np.linalg.norm(n_l)) + 1e-8)
+            return d, gmat @ n_l
+        else:                             # inside — use closest surface
+            if d_lat > d_cap:
+                n_l = np.array([xy[0], xy[1], 0.0]) / (d_xy + 1e-8)
+                return d_lat, gmat @ n_l
+            else:
+                n_l = np.array([0.0, 0.0, float(np.sign(p[2]))])
+                return d_cap, gmat @ n_l
+
+    else:   # MESH, ELLIPSOID, or unknown — use MuJoCo's stored bounding sphere
+        r   = float(model.geom_rbound[geom_id])
+        d   = float(np.linalg.norm(p))
+        return d - r, gmat @ (p / (d + 1e-8))
+
+
+_MJG_PRIMITIVES = {_MJG_SPHERE, _MJG_CAPSULE, _MJG_ELLIPSOID, _MJG_CYLINDER, _MJG_BOX}
+
+
+def _get_obstacle_geom_ids(model, obstacle_name: str) -> list[int]:
+    """Return PRIMITIVE collision geom IDs for an obstacle body.
+    Mesh geoms are excluded: their bounding sphere (geom_rbound) is often much
+    larger than the actual object and produces wrong CBF distances.
+    """
+    body_id = None
+    for suffix in ("", "_main", "_base", "_body"):
+        try:
+            body_id = int(model.body(f"{obstacle_name}{suffix}").id)
+            break
+        except Exception:
+            continue
+    if body_id is None:
+        return []
+    ids = []
+    for g in range(model.ngeom):
+        if int(model.geom_bodyid[g]) != body_id:
+            continue
+        if int(model.geom_contype[g]) == 0 and int(model.geom_conaffinity[g]) == 0:
+            continue
+        if int(model.geom_type[g]) not in _MJG_PRIMITIVES:
+            continue   # skip MESH and other non-analytic types
+        ids.append(g)
+    return ids
+
+
+def _cbf_correction_geom(
+    ee_pos: np.ndarray,
+    R1: np.ndarray,
+    all_geom_ids: list[int],
+    model,
+    data,
+    nom_xyz: np.ndarray,
+    cbf_gamma: float,
+    safety_margin: float,
+) -> tuple[np.ndarray, float]:
+    """CBF correction using actual obstacle geom shapes + ellipsoidal EE.
+
+    Loops over every collision geom across all obstacles, finds the worst-case
+    (minimum h) geom, and applies the 1-D CBF projection in that direction.
+    """
+    h_min      = float("inf")
+    best_n_hat = np.array([0.0, 0.0, 1.0])
+
+    for gid in all_geom_ids:
+        d_surf, n_world = _geom_surface_dist_and_normal(ee_pos, gid, model, data)
+        # EE ellipsoid radius in the direction toward this geom surface
+        r_eff = _ee_r_eff(-n_world, R1)   # n_world points *away* from geom
+        h = d_surf - r_eff - safety_margin
+        if h < h_min:
+            h_min      = h
+            best_n_hat = n_world
+
+    hdot     = float(np.dot(best_n_hat, nom_xyz))
+    safe_xyz = nom_xyz.copy()
+    if hdot + cbf_gamma * h_min < 0:
+        correction = -(hdot + cbf_gamma * h_min) * best_n_hat
+        safe_xyz   = nom_xyz + correction
+    return safe_xyz, h_min
+
+
+def _known_ellipsoid_barrier(
+    ee_pos: np.ndarray,
+    R1: np.ndarray,
+    obstacles: list,
+    ob_mats: dict,
+    nom_xyz: np.ndarray,
+    cbf_gamma: float,
+    safety_margin: float,
+) -> tuple[np.ndarray, float]:
+    """CBF for mesh-only obstacles using known per-class ellipsoid dimensions.
+
+    ob_mats: {obstacle_name: 3×3 world-frame rotation matrix} captured from
+    MuJoCo at episode start (orientation fixed since obstacles are static).
+    Falls back to EE-ellipsoid + sphere if obstacle not in _KNOWN_OB_Q.
+    """
+    h_min      = float("inf")
+    best_n_hat = np.array([0.0, 0.0, 1.0])
+
+    for ob in obstacles:
+        p = ee_pos - ob.pos            # world-frame EE – obstacle center
+        d = float(np.linalg.norm(p)) + 1e-8
+        n_hat = p / d
+
+        if ob.name in _KNOWN_OB_Q:
+            # Transform p into obstacle body frame, scale by semi-axes
+            ob_mat  = ob_mats.get(ob.name, np.eye(3))
+            semi    = _KNOWN_OB_Q[ob.name]           # [ax, ay, az] in body frame
+            p_local = ob_mat.T @ p
+            scaled  = p_local / semi
+            d_ell   = float(np.linalg.norm(scaled))  # 1.0 on ellipsoid surface
+            # Outward normal in world frame
+            grad_local = p_local / (semi ** 2)
+            n_world    = ob_mat @ grad_local
+            n_world   /= (float(np.linalg.norm(n_world)) + 1e-8)
+            # Distance from obstacle ellipsoid surface in metres (approx)
+            d_surf = (d_ell - 1.0) * float(np.min(semi))
+            r_eff  = _ee_r_eff(-n_world, R1)
+            h      = d_surf - r_eff - safety_margin
+            n_use  = n_world
+        else:
+            # No known shape: EE ellipsoid + sphere obstacle
+            r_eff = _ee_r_eff(n_hat, R1)
+            h     = d - r_eff - getattr(ob, "safety_radius", 0.10) - safety_margin
+            n_use = n_hat
+
+        if h < h_min:
+            h_min      = h
+            best_n_hat = n_use
+
+    hdot     = float(np.dot(best_n_hat, nom_xyz))
+    safe_xyz = nom_xyz.copy()
+    if hdot + cbf_gamma * h_min < 0:
+        correction = -(hdot + cbf_gamma * h_min) * best_n_hat
+        safe_xyz   = nom_xyz + correction
+    return safe_xyz, h_min
 
 
 def _apf_correction(
@@ -199,6 +435,9 @@ def _collect_episode(
     randomize_obstacle: bool = False,
     cbf_near_goal_off: bool = False,
     show: bool = False,
+    vla: str = "openvla",
+    pi05_host: str = "127.0.0.1",
+    dagger_round: int = 0,
 ) -> dict:
     """Run one episode, save DAgger-labelled steps to out_dir/ep_{ep_idx:04d}.npz."""
 
@@ -216,7 +455,8 @@ def _collect_episode(
             obstacle_safety_radius=obstacle_safety_radius,
             k_rep=k_rep, d_influence=d_influence, out_dir=out_dir,
             randomize_obstacle=randomize_obstacle, cbf_near_goal_off=cbf_near_goal_off,
-            show=show,
+            show=show, vla=vla, pi05_host=pi05_host,
+            dagger_round=dagger_round,
         )
     finally:
         sys.stdout = _real_stdout
@@ -228,7 +468,8 @@ def _collect_episode_body(
     env, lang: str, initial_states, ep_idx: int, *,
     openvla_port, replan_steps, horizon, correction, cbf_gamma,
     obstacle_safety_radius, k_rep, d_influence, out_dir, randomize_obstacle,
-    cbf_near_goal_off, show,
+    cbf_near_goal_off, show, vla: str = "openvla", pi05_host: str = "127.0.0.1",
+    dagger_round: int = 0,
 ) -> dict:
     env.reset()
     if initial_states is not None:
@@ -251,16 +492,85 @@ def _collect_episode_body(
         if _det2 is not None:
             obstacles = [_det2]
 
+    # ── MuJoCo model/data (sphere-decomp CBF + arm-link constraints) ─────────
+    model, data = None, None
+    arm_body_ids, arm_dof_idx, ee_body_id = [], [], 0
+    _has_model = False
+    try:
+        model, data = _unwrap_sim(env)
+        arm_body_ids = _get_arm_body_ids(model)
+        arm_dof_idx  = _get_arm_dof_indices(model)
+        ee_body_id   = arm_body_ids[-1] if arm_body_ids else 0
+        _has_model   = True
+    except Exception as _e:
+        print(f"  [warn] MuJoCo model extraction failed: {_e}")
+
     # ── Visualization setup ───────────────────────────────────────────────────
     _viz_hook_ok = False
-    model, data = None, None
-    if show and _HAS_VIZ:
+    if show and _HAS_VIZ and model is not None:
         try:
-            model, data = _unwrap_sim(env)
             _viz_hook_ok = install_scene_hook(env.sim)
             cv2.namedWindow(_CV2_WINDOW, cv2.WINDOW_AUTOSIZE)
         except Exception as _e:
             print(f"  [warn] viz init failed: {_e}")
+
+    # ── Sphere decomposition (once per episode; obstacles are static) ─────────
+    _sphere_decomp = None
+    if correction == "cbf" and _has_model and obstacles:
+        try:
+            from experiments.cbf_visualizer import decompose_obstacle_to_spheres
+            ob0_name = obstacles[0].name
+            for suffix in ("_main", ""):
+                _sphere_decomp = decompose_obstacle_to_spheres(
+                    model, data, f"{ob0_name}{suffix}",
+                    n_spheres=48,
+                    r_sphere=0.015,
+                    safety_margin=0.010,
+                )
+                if _sphere_decomp is not None:
+                    break
+            if _sphere_decomp is not None:
+                print(f"  Sphere decomp: {len(_sphere_decomp)} spheres for '{ob0_name}'")
+            else:
+                print(f"  [warn] Sphere decomp failed — falling back to geom/ellipsoid CBF")
+        except Exception as _sd_e:
+            print(f"  [warn] Sphere decomp import error: {_sd_e}")
+
+    # ── Obstacle geom IDs (for geom-geometry CBF; obstacles are static) ───────
+    # Maps obstacle name → list of collision geom IDs.  Captures actual shape
+    # and current orientation (e.g. book face-down vs. upright) via geom_xmat.
+    _obstacle_geom_ids: dict[str, list[int]] = {}
+    _all_obstacle_geom_ids: list[int] = []
+    _obstacle_ob_mats: dict[str, np.ndarray] = {}   # obstacle body rotation (static)
+    _mesh_only_obstacles: list = []                 # obstacles with no primitive geoms
+
+    if correction == "cbf" and _has_model and obstacles:
+        import mujoco as _mj
+        for _ob in obstacles:
+            # Cache obstacle body rotation for known-ellipsoid path
+            _bid = _mj.mj_name2id(model, _mj.mjtObj.mjOBJ_BODY, _ob.name)
+            for _sfx in ("", "_main", "_base", "_body"):
+                _bid2 = _mj.mj_name2id(model, _mj.mjtObj.mjOBJ_BODY, f"{_ob.name}{_sfx}")
+                if _bid2 >= 0:
+                    _bid = _bid2; break
+            if _bid >= 0:
+                _obstacle_ob_mats[_ob.name] = data.xmat[_bid].reshape(3, 3).copy()
+
+            _gids = _get_obstacle_geom_ids(model, _ob.name)
+            if _gids:
+                _obstacle_geom_ids[_ob.name] = _gids
+                _all_obstacle_geom_ids.extend(_gids)
+                _type_names = {_MJG_SPHERE:"sphere", _MJG_BOX:"box",
+                               _MJG_CAPSULE:"capsule", _MJG_CYLINDER:"cylinder",
+                               _MJG_MESH:"mesh", _MJG_ELLIPSOID:"ellipsoid"}
+                _desc = ", ".join(_type_names.get(int(model.geom_type[g]), "?") for g in _gids)
+                print(f"  Geom CBF: '{_ob.name}' → {len(_gids)} primitive geom(s): [{_desc}]")
+            elif _ob.name in _KNOWN_OB_Q:
+                _mesh_only_obstacles.append(_ob)
+                print(f"  Ellipsoid CBF: '{_ob.name}' → known shape {_KNOWN_OB_Q[_ob.name]}")
+            else:
+                _mesh_only_obstacles.append(_ob)
+                print(f"  [warn] '{_ob.name}': no primitives, no known shape → sphere fallback")
 
     # ── Collision tracking (displacement-based, matches SafeLIBERO metric) ────
     # Baseline is captured AFTER the first physics step so teleport-settling
@@ -290,8 +600,12 @@ def _collect_episode_body(
     _grasp_step   = None         # first step where lift > 2 cm
     _grasp_obj    = None
 
+    _ee_semi = EE_Q_DIAG_DEFAULT   # semi-axes: x=gripper-width, y=finger-spread, z=hand-depth
     print(f"\n  [ep {ep_idx:03d}] obstacle={obstacles[0].name if obstacles else 'none'}"
-          f"  correction={correction.upper()}  lang=\"{lang}\"")
+          f"  correction={correction.upper()}  lang=\"{lang}\""
+          f"\n  EE semi-axes: x={_ee_semi[0]:.3f} y={_ee_semi[1]:.3f} z={_ee_semi[2]:.3f} m"
+          f"  safety_r={obstacle_safety_radius:.3f}m  gamma={cbf_gamma:.1f}"
+          f"  H_SAFE={H_SAFE:.3f}")
 
     vla_cnt = 0
 
@@ -301,7 +615,8 @@ def _collect_episode_body(
     buf_obs_feat = []
     buf_nom_act  = []
     buf_safe_act = []   # APF- or CBF-corrected (= nom_act when label=0)
-    buf_dist     = []   # distance to nearest obstacle
+    buf_dist     = []   # Euclidean distance to nearest obstacle centre
+    buf_h_min    = []   # CBF barrier value h (sphere-to-sphere); inf for non-CBF steps
     buf_corr_mag = []   # correction magnitude (0 if nom)
     buf_label    = []   # 0=nom, 1=safe, -1=discard
 
@@ -314,6 +629,9 @@ def _collect_episode_body(
     _gripper_close_steps = 0
 
     url = f"http://127.0.0.1:{openvla_port}/act"
+
+    if vla == "pi05":
+        _init_pi05_client(pi05_host, openvla_port)
 
     def _quat_to_euler(q):
         """quaternion [x,y,z,w] → roll,pitch,yaw in degrees."""
@@ -338,6 +656,7 @@ def _collect_episode_body(
         ee_pos    = np.array(obs["robot0_eef_pos"], dtype=float)
         ee_quat   = np.array(obs.get("robot0_eef_quat", [0,0,0,1]), dtype=float)
         ee_euler  = _quat_to_euler(ee_quat)
+        _R1       = _SciRot.from_quat(ee_quat).as_matrix()
         gq        = np.array(obs.get("robot0_gripper_qpos", [0.04, 0.04]), dtype=float)
 
         # ── Deferred initial-z capture (after physics settle at step 5) ────────
@@ -379,11 +698,17 @@ def _collect_episode_body(
         if not action_queue:
             try:
                 _t0 = time.perf_counter()
-                raw_chunk  = _query_openvla_chunk(img, wrist_img, state, lang,
-                                                  num_actions=replan_steps, url=url)
+                if vla == "pi05":
+                    raw_chunk = _query_pi05_chunk(img, wrist_img, state, lang,
+                                                  num_actions=replan_steps)
+                    action_queue = list(raw_chunk)
+                    nom_queue    = list(raw_chunk)
+                else:
+                    raw_chunk = _query_openvla_chunk(img, wrist_img, state, lang,
+                                                     num_actions=replan_steps, url=url)
+                    action_queue = [_post_process_vla(a) for a in raw_chunk]
+                    nom_queue    = [_post_process_vla(a) for a in raw_chunk]
                 vla_ms = (time.perf_counter() - _t0) * 1000
-                action_queue = [_post_process_vla(a) for a in raw_chunk]
-                nom_queue    = [_post_process_vla(a) for a in raw_chunk]
                 vla_cnt += 1
                 grip_str = "CLOSE" if action_queue[0][6] > 0 else "open"
                 _gq = obs.get("robot0_gripper_qpos", [0.04, 0.04])
@@ -420,6 +745,8 @@ def _collect_episode_body(
             else:
                 _gripper_close_steps = 0
 
+        _step_h = float("inf")  # CBF barrier value for this step; inf for non-CBF
+
         if correction == "none":
             safe_xyz = nom_xyz.copy()
             dist     = float(np.linalg.norm(ee_pos - near_ob.pos))
@@ -437,35 +764,100 @@ def _collect_episode_body(
                 label = 0
 
         else:  # cbf
-            # h over all obstacles
-            h_min = float("inf")
-            for ob in obstacles:
-                h = float(np.linalg.norm(ee_pos - ob.pos)) - obstacle_safety_radius
-                if h < h_min:
-                    h_min = h
             dist = float(np.linalg.norm(ee_pos - near_ob.pos))
 
+            # ── Compute h_min and worst-case outward normal ───────────────────
+            # Priority: sphere decomp (tightest, shape-accurate) >
+            #           primitive geoms (exact analytic) >
+            #           known ellipsoid (mesh obstacles) >
+            #           sphere fallback
+            h_min      = float("inf")
+            best_n_hat = np.array([0.0, 0.0, 1.0])  # unit normal: obstacle→EE
+
+            if _sphere_decomp is not None:
+                # Each EE sphere vs. every obstacle surface sphere — linear h in metres
+                _ee_sph = get_ee_spheres(ee_pos, _R1)
+                for _ee_c, _ee_r in _ee_sph:
+                    for _ob_c, _ob_r in _sphere_decomp:
+                        _diff = _ee_c - _ob_c
+                        _d    = float(np.linalg.norm(_diff)) + 1e-8
+                        _h    = _d - (_ee_r + _ob_r)
+                        if _h < h_min:
+                            h_min      = _h
+                            best_n_hat = _diff / _d
+
+            elif _all_obstacle_geom_ids and _has_model:
+                for _gid in _all_obstacle_geom_ids:
+                    _d_surf, _n_w = _geom_surface_dist_and_normal(ee_pos, _gid, model, data)
+                    _h = _d_surf - _ee_r_eff(-_n_w, _R1) - obstacle_safety_radius
+                    if _h < h_min:
+                        h_min      = _h
+                        best_n_hat = _n_w
+                for _mob in _mesh_only_obstacles:
+                    if _mob.name in _KNOWN_OB_Q:
+                        _ob_mat = _obstacle_ob_mats.get(_mob.name, np.eye(3))
+                        _semi   = _KNOWN_OB_Q[_mob.name]
+                        _p_l    = _ob_mat.T @ (ee_pos - _mob.pos)
+                        _d_ell  = float(np.linalg.norm(_p_l / _semi))
+                        _d_s    = (_d_ell - 1.0) * float(np.min(_semi))
+                        _g_l    = _p_l / (_semi ** 2)
+                        _n_w2   = _ob_mat @ _g_l; _n_w2 /= float(np.linalg.norm(_n_w2)) + 1e-8
+                        _h      = _d_s - _ee_r_eff(-_n_w2, _R1) - obstacle_safety_radius
+                    else:
+                        _d_ob   = float(np.linalg.norm(ee_pos - _mob.pos)) + 1e-8
+                        _n_w2   = (ee_pos - _mob.pos) / _d_ob
+                        _h      = _d_ob - _ee_r_eff(_n_w2, _R1) - getattr(_mob, "safety_radius", 0.10) - obstacle_safety_radius
+                    if _h < h_min:
+                        h_min = _h; best_n_hat = _n_w2
+
+            else:
+                # Last resort: EE ellipsoid vs. obstacle point / known ellipsoid
+                _ob_list = _mesh_only_obstacles if _mesh_only_obstacles else obstacles
+                for _ob in _ob_list:
+                    if _ob.name in _KNOWN_OB_Q:
+                        _ob_mat = _obstacle_ob_mats.get(_ob.name, np.eye(3))
+                        _semi   = _KNOWN_OB_Q[_ob.name]
+                        _p_l    = _ob_mat.T @ (ee_pos - _ob.pos)
+                        _d_ell  = float(np.linalg.norm(_p_l / _semi))
+                        _d_s    = (_d_ell - 1.0) * float(np.min(_semi))
+                        _g_l    = _p_l / (_semi ** 2)
+                        _n_w    = _ob_mat @ _g_l; _n_w /= float(np.linalg.norm(_n_w)) + 1e-8
+                        _h      = _d_s - _ee_r_eff(-_n_w, _R1) - obstacle_safety_radius
+                    else:
+                        _d_ob = float(np.linalg.norm(ee_pos - _ob.pos)) + 1e-8
+                        _n_w  = (ee_pos - _ob.pos) / _d_ob
+                        _h    = _d_ob - _ee_r_eff(_n_w, _R1) - obstacle_safety_radius
+                    if _h < h_min:
+                        h_min = _h; best_n_hat = _n_w
+
+            # ── Apply 1-D CBF projection ──────────────────────────────────────
             if not _cbf_active:
-                # CBF deactivated near goal — execute nominal, label as nom
                 safe_xyz = nom_xyz.copy()
                 corr_mag = 0.0
                 label    = 0
             else:
-                if h_min < H_SAFE + 0.05:
-                    try:
-                        safe_xyz, _ = _cbf_correction(
-                            ee_pos, near_ob, nom_xyz, cbf_gamma, obstacle_safety_radius)
-                    except Exception:
-                        safe_xyz = nom_xyz.copy()
-                else:
-                    safe_xyz = nom_xyz.copy()
+                safe_xyz = nom_xyz.copy()
+                try:
+                    hdot = float(np.dot(best_n_hat, nom_xyz))
+                    if hdot + cbf_gamma * h_min < 0:
+                        _corr_vec = -(hdot + cbf_gamma * h_min) * best_n_hat
+                        safe_xyz  = nom_xyz + _corr_vec
+                except Exception as _e:
+                    print(f"  [warn] CBF exception: {_e}")
+
                 corr_mag = float(np.linalg.norm(safe_xyz - nom_xyz))
+                _step_h  = h_min  # capture barrier value for this step
                 if h_min < H_DISCARD:
                     label = -1
                 elif h_min <= H_SAFE:
                     label = 1
                 else:
                     label = 0
+
+        # Clamp corrected xyz to the same range as π0.5 nominal outputs so
+        # cbf_act stays in-distribution for fine-tuning (large CBF corrections
+        # near obstacles can push xyz outside [-1, 1]).
+        safe_xyz = np.clip(safe_xyz, -1.0, 1.0)
 
         safe_action = nom_action.copy()
         safe_action[:3] = safe_xyz
@@ -477,10 +869,15 @@ def _collect_episode_body(
         buf_nom_act.append(nom_action[:7].astype(np.float32))
         buf_safe_act.append(safe_action[:7].astype(np.float32))
         buf_dist.append(float(dist))
+        buf_h_min.append(float(_step_h))
         buf_corr_mag.append(float(corr_mag))
         buf_label.append(int(label))
 
-        exec_action = safe_action if label == 1 else nom_action
+        # Always execute the safe action; label only controls training-data recording.
+        # When label==0 (far), safe_xyz==nom_xyz so no behavioral difference.
+        # When label==-1 (h<0, already violated), we MUST apply the correction to
+        # push the EE back out — executing nom_action here caused the collisions.
+        exec_action = safe_action
         _cbf_on = (label == 1)
 
         # ── Near-grasp commit ─────────────────────────────────────────────────
@@ -500,17 +897,18 @@ def _collect_episode_body(
             if _d < _gc_near_dist:
                 _gc_near_dist, _gc_near_key = _d, _gck
         _in_gc_range = (correction != "none"
+                        and vla != "pi05"
                         and _gc_near_key is not None
                         and _gc_near_dist < 0.12
                         and _grasp_step is None)
 
         # ── Pre-open: keep gripper open during far approach ──────────────────
-        # The VLA closes the gripper from step 1 due to distribution shift.
-        # Force it open while EE is still far from any target so it's open
-        # when the near-grasp commit descends onto the object.
+        # OpenVLA closes the gripper from step 1 due to distribution shift.
+        # Not needed for π0.5 which handles gripper timing natively.
         _PRE_OPEN_DIST = 0.15   # m — force open beyond this range
         _pre_open_active = (
-            correction != "none"
+            vla != "pi05"
+            and correction != "none"
             and _gc_near_key is not None
             and _gc_near_dist > _PRE_OPEN_DIST
             and _grasp_step is None
@@ -541,12 +939,21 @@ def _collect_episode_body(
             exec_action = exec_action.copy()
             exec_action[6] = -1.0  # force gripper OPEN
 
+        _h_tag = ""
+        if correction == "cbf":
+            if h_min < 0:
+                _h_tag = f"  h={h_min:.3f}!!! VIOLATED corr={corr_mag:.4f}"
+            elif h_min < H_SAFE:
+                _h_tag = f"  h={h_min:.3f}!  CBF_ON corr={corr_mag:.4f}"
+            else:
+                _h_tag = f"  h={h_min:.3f}"
         print(
             f"  act nom=[{nom_action[0]:+.4f},{nom_action[1]:+.4f},{nom_action[2]:+.4f}"
             f" r={nom_action[3]:+.3f},{nom_action[4]:+.3f},{nom_action[5]:+.3f}"
             f" g={nom_action[6]:+.0f}]"
-            + (f"  CBF→[{safe_action[0]:+.4f},{safe_action[1]:+.4f},{safe_action[2]:+.4f}]"
-               if _cbf_on else "")
+            + _h_tag
+            + (f"  exec=[{exec_action[0]:+.4f},{exec_action[1]:+.4f},{exec_action[2]:+.4f}]"
+               if _cbf_on or (correction == "cbf" and h_min < 0) else "")
             + (f"  GC→z={exec_action[2]:+.4f}" if _in_gc_range else "")
             + (f"  OPN" if _pre_open_active else "")
         )
@@ -588,17 +995,10 @@ def _collect_episode_body(
                     _collision_flag = True
                     print(f"  [{t:03d}] COLLISION: obstacle displaced {_disp:.4f}m")
 
-        # ── Console status every CBF step ─────────────────────────────────────
-        if label == 1:
-            print(f"  [{t:03d}] CBF  h={h_min:.3f}  corr={corr_mag:.4f}m")
-
         # ── cv2 display ───────────────────────────────────────────────────────
         if show and img is not None:
             if _viz_hook_ok and obstacles and model is not None:
                 try:
-                    from scipy.spatial.transform import Rotation as _SR
-                    _eef_q = np.array(obs.get("robot0_eef_quat", [0, 0, 0, 1]), float)
-                    _R1    = _SR.from_quat(_eef_q).as_matrix()
                     _ee_c  = ee_ellipsoid_center(ee_pos, _R1)
                     push_cbf_geoms(
                         env.sim,
@@ -607,8 +1007,8 @@ def _collect_episode_body(
                         h_values=[h_min if correction == "cbf" else dist],
                         arm_body_ids=[], arm_radii={},
                         model=model, data=data,
-                        cbf_triggered=(label == 1),
-                        obstacle_spheres=None, arm_sample_positions=None,
+                        cbf_triggered=(correction == "cbf" and h_min <= H_SAFE),
+                        obstacle_spheres=_sphere_decomp, arm_sample_positions=None,
                     )
                 except Exception:
                     pass
@@ -633,17 +1033,34 @@ def _collect_episode_body(
 
     if n_total > 0:
         out_dir.mkdir(parents=True, exist_ok=True)
+        _h_vals = np.array(buf_h_min, dtype=np.float32)[keep]
+        _finite_h = _h_vals[np.isfinite(_h_vals)]
+        _cbf_steps = int((labels[keep] == 1).sum())
+
         np.savez_compressed(
             out_dir / f"ep_{ep_idx:04d}.npz",
-            img      = np.array(buf_img,      dtype=np.uint8)[keep],
-            wrist    = np.array(buf_wrist,    dtype=np.uint8)[keep],
-            proprio  = np.array(buf_proprio,  dtype=np.float32)[keep],
-            obs_feat = np.array(buf_obs_feat, dtype=np.float32)[keep],
-            nom_act  = np.array(buf_nom_act,  dtype=np.float32)[keep],
-            cbf_act  = np.array(buf_safe_act, dtype=np.float32)[keep],  # key kept for trainer compat
-            dist     = np.array(buf_dist,     dtype=np.float32)[keep],
-            corr_mag = np.array(buf_corr_mag, dtype=np.float32)[keep],
-            label    = labels[keep],
+            # ── Per-step arrays ──────────────────────────────────────────────
+            img        = np.array(buf_img,      dtype=np.uint8)[keep],
+            wrist      = np.array(buf_wrist,    dtype=np.uint8)[keep],
+            proprio    = np.array(buf_proprio,  dtype=np.float32)[keep],
+            obs_feat   = np.array(buf_obs_feat, dtype=np.float32)[keep],
+            nom_act    = np.array(buf_nom_act,  dtype=np.float32)[keep],
+            cbf_act    = np.array(buf_safe_act, dtype=np.float32)[keep],
+            dist       = np.array(buf_dist,     dtype=np.float32)[keep],
+            h_min      = _h_vals,
+            corr_mag   = np.array(buf_corr_mag, dtype=np.float32)[keep],
+            label      = labels[keep],
+            # ── Per-episode scalars ──────────────────────────────────────────
+            lang         = np.array([lang]),
+            success      = np.array([int(_success)]),
+            collision    = np.array([int(_collision_flag)]),
+            grasp_step   = np.array([int(_grasp_step) if _grasp_step is not None else -1]),
+            # DAgger loop metadata — key metrics for the comparison table
+            dagger_round  = np.array([int(dagger_round)]),
+            n_cbf_steps   = np.array([_cbf_steps]),           # CBF activations/episode
+            cbf_rate      = np.array([_cbf_steps / max(n_total, 1)], dtype=np.float32),
+            min_h         = np.array([float(_finite_h.min()) if len(_finite_h) else float("inf")], dtype=np.float32),
+            mean_h        = np.array([float(_finite_h.mean()) if len(_finite_h) else float("inf")], dtype=np.float32),
         )
 
     mean_mag = float(kept_mags[kept_mags > 0].mean()) if (kept_mags > 0).any() else 0.0
@@ -718,91 +1135,181 @@ def _quality_report(totals: dict, all_mags: list[float], correction: str) -> Non
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
 
-def main():
-    parser = argparse.ArgumentParser(description="Collect obstacle-conditioned DAgger data")
-    parser.add_argument("--suite",       default="safelibero_spatial")
-    parser.add_argument("--task",        type=int, default=0)
-    parser.add_argument("--safety-level", default="I")
-    parser.add_argument("--episodes",   type=int, default=60)
-    parser.add_argument("--horizon",    type=int, default=400)
-    parser.add_argument("--replan-steps", type=int, default=8)
-    # Correction mode
-    parser.add_argument("--correction", choices=["cbf", "apf", "none"], default="apf",
-                        help="cbf: reactive CBF filter; apf: smooth APF repulsion (default); none: pure VLA")
-    # APF params
-    parser.add_argument("--k-rep",       type=float, default=2.0,
-                        help="APF gain (dimensionless; default 2.0)")
-    parser.add_argument("--d-influence", type=float, default=0.20,
-                        help="APF influence radius from obstacle SURFACE in metres (default 0.20)")
-    # CBF params
-    parser.add_argument("--cbf-gamma",  type=float, default=1.8)
-    parser.add_argument("--safety-radius", type=float, default=0.10)
-    # Data augmentation
-    parser.add_argument("--randomize-obstacle", action="store_true",
-                        help="Teleport obstacle to a random workspace position each episode")
-    parser.add_argument("--cbf-near-goal-off", action="store_true",
-                        help="Deactivate CBF once gripper starts closing (near grasp target)")
-    # IO / display
-    parser.add_argument("--show", action="store_true",
-                        help="Open MuJoCo viewer window (slower; useful for debugging)")
-    parser.add_argument("--openvla-port", type=int, default=8000)
-    parser.add_argument("--out", default="data/obs_cond_dataset")
-    args = parser.parse_args()
-
+def _run_task(args, task_idx: int) -> tuple[dict, list[float], int, int, int]:
+    """Collect episodes for a single task. Returns (totals, mags, n_success, n_grasped, n_collision)."""
     scene_mode = "rand" if args.randomize_obstacle else "orig"
-    out_dir = Path(args.out) / f"{args.suite}_t{args.task:02d}_L{args.safety_level}_{scene_mode}"
-    print(f"Collecting {args.episodes} episodes → {out_dir}")
-    print(f"  correction={args.correction}  scene={scene_mode}  level={args.safety_level}  "
-          + (f"k_rep={args.k_rep}  d_influence={args.d_influence}"
-             if args.correction == "apf"
-             else f"cbf_gamma={args.cbf_gamma}  safety_radius={args.safety_radius}"))
+    out_dir = Path(args.out) / f"{args.suite}_t{task_idx:02d}_L{args.safety_level}_{scene_mode}"
+    print(f"\n  Output → {out_dir}")
 
     env, lang, initial_states = make_libero_env(
         task_suite=args.suite,
-        task_idx=args.task,
+        task_idx=task_idx,
         safety_level=args.safety_level,
-        has_renderer=False,   # cv2 handles display; MuJoCo windowed renderer hangs
+        has_renderer=False,
         horizon=args.horizon,
     )
 
-    totals    = {"steps": 0, "discarded": 0, "nom": 0, "safe": 0}
-    all_mags: list[float] = []
-    n_success = 0
-    n_grasped = 0
+    totals      = {"steps": 0, "discarded": 0, "nom": 0, "safe": 0}
+    all_mags:     list[float] = []
+    n_success   = 0
+    n_grasped   = 0
     n_collision = 0
 
     for ep in range(args.episodes):
-        stats = _collect_episode(
-            env, lang, initial_states, ep,
-            openvla_port=args.openvla_port,
-            replan_steps=args.replan_steps,
-            horizon=args.horizon,
-            correction=args.correction,
-            cbf_gamma=args.cbf_gamma,
-            obstacle_safety_radius=args.safety_radius,
-            k_rep=args.k_rep,
-            d_influence=args.d_influence,
-            out_dir=out_dir,
-            randomize_obstacle=args.randomize_obstacle,
-            cbf_near_goal_off=args.cbf_near_goal_off,
-            show=args.show,
-        )
+        # Resume: skip episodes whose .npz already exists from a previous run.
+        _ep_npz = out_dir / f"ep_{ep:04d}.npz"
+        if _ep_npz.exists():
+            print(f"  ep {ep:03d}: already exists, skipping")
+            continue
+
+        try:
+            stats = _collect_episode(
+                env, lang, initial_states, ep,
+                openvla_port=args.openvla_port,
+                replan_steps=args.replan_steps,
+                horizon=args.horizon,
+                correction=args.correction,
+                cbf_gamma=args.cbf_gamma,
+                obstacle_safety_radius=args.safety_radius,
+                k_rep=args.k_rep,
+                d_influence=args.d_influence,
+                out_dir=out_dir,
+                randomize_obstacle=args.randomize_obstacle,
+                cbf_near_goal_off=args.cbf_near_goal_off,
+                show=args.show,
+                vla=args.vla,
+                pi05_host=args.pi05_host,
+                dagger_round=args.dagger_round,
+            )
+        except KeyboardInterrupt:
+            raise  # let Ctrl-C propagate to kill the whole run
+        except Exception as _ep_err:
+            print(f"\n  [ERROR] ep {ep:03d} crashed: {_ep_err} — skipping and continuing\n")
+            import traceback; traceback.print_exc()
+            continue
+
         for k in ("steps", "discarded", "nom", "safe"):
             totals[k] += stats[k]
         all_mags.extend(stats["corr_mags"])
-        if stats.get("success"):    n_success   += 1
-        if stats.get("grasp_step") is not None: n_grasped += 1
-        if stats.get("collision"):  n_collision += 1
+        if stats.get("success"):                    n_success   += 1
+        if stats.get("grasp_step") is not None:     n_grasped   += 1
+        if stats.get("collision"):                  n_collision += 1
 
     n = args.episodes
     print(f"\n{'='*55}")
-    print(f"EPISODE OUTCOMES ({n} episodes)")
+    print(f"TASK {task_idx} OUTCOMES ({n} episodes)")
     print(f"  TSR        : {n_success}/{n} ({100*n_success/n:.0f}%)")
     print(f"  Grasped    : {n_grasped}/{n} ({100*n_grasped/n:.0f}%)")
     print(f"  Collisions : {n_collision}/{n} ({100*n_collision/n:.0f}%)")
     print(f"{'='*55}")
     _quality_report(totals, all_mags, args.correction)
-    print(f"Dataset saved to {out_dir}/")
+    print(f"  Data saved → {out_dir}/")
+
+    try:
+        env.close()
+    except Exception:
+        pass
+
+    return totals, all_mags, n_success, n_grasped, n_collision
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Collect obstacle-conditioned DAgger data")
+    parser.add_argument("--suite",        default="safelibero_spatial")
+    parser.add_argument("--task",         type=int, default=0,
+                        help="Task index (ignored when --all-tasks is set)")
+    parser.add_argument("--all-tasks",    action="store_true",
+                        help="Run ALL tasks in the suite sequentially (for overnight collection)")
+    parser.add_argument("--safety-level", default="I")
+    parser.add_argument("--episodes",    type=int, default=60)
+    parser.add_argument("--horizon",     type=int, default=400)
+    parser.add_argument("--replan-steps", type=int, default=8)
+    # Correction mode
+    parser.add_argument("--correction", choices=["cbf", "apf", "none"], default="apf",
+                        help="cbf: reactive CBF filter; apf: smooth APF repulsion (default); none: pure VLA")
+    # APF params
+    parser.add_argument("--k-rep",       type=float, default=2.0)
+    parser.add_argument("--d-influence", type=float, default=0.20,
+                        help="APF influence radius from obstacle SURFACE in metres (default 0.20)")
+    # CBF params
+    parser.add_argument("--cbf-gamma",     type=float, default=1.8)
+    parser.add_argument("--safety-radius", type=float, default=0.10)
+    # Data augmentation
+    parser.add_argument("--randomize-obstacle", action="store_true")
+    parser.add_argument("--cbf-near-goal-off",  action="store_true")
+    # IO / display
+    parser.add_argument("--show",        action="store_true")
+    parser.add_argument("--vla",         choices=["openvla", "pi05"], default="openvla")
+    parser.add_argument("--openvla-port", type=int, default=8000)
+    parser.add_argument("--pi05-host",   default="127.0.0.1")
+    parser.add_argument("--out",         default="data/obs_cond_dataset")
+    # Iterative DAgger loop metadata
+    parser.add_argument("--dagger-round", type=int, default=0,
+                        help="DAgger round index (0=base VLA, 1=first fine-tune, ...). "
+                             "Saved per episode so rounds can be separated or combined.")
+    args = parser.parse_args()
+
+    # Determine which tasks to run
+    if args.all_tasks:
+        from libero.libero import benchmark as _lb
+        _bd   = _lb.get_benchmark_dict()
+        _is_s = args.suite.startswith("safelibero_")
+        _so   = _bd[args.suite](safety_level=args.safety_level) if _is_s else _bd[args.suite]()
+        task_indices = list(range(_so.get_num_tasks()))
+    else:
+        task_indices = [args.task]
+
+    scene_mode = "rand" if args.randomize_obstacle else "orig"
+    print(f"{'='*60}")
+    print(f"DAgger data collection")
+    print(f"  suite={args.suite}  tasks={task_indices}  episodes/task={args.episodes}")
+    print(f"  correction={args.correction}  vla={args.vla}  level={args.safety_level}")
+    print(f"  out={args.out}/")
+    print(f"{'='*60}")
+
+    grand = {"steps": 0, "discarded": 0, "nom": 0, "safe": 0}
+    grand_mags:      list[float] = []
+    grand_success    = 0
+    grand_grasped    = 0
+    grand_collision  = 0
+
+    import time as _time
+    _t_start = _time.time()
+
+    for i, task_idx in enumerate(task_indices):
+        print(f"\n{'='*60}")
+        print(f"TASK {task_idx}  ({i+1}/{len(task_indices)})")
+        print(f"{'='*60}")
+        try:
+            totals, mags, ns, ng, nc = _run_task(args, task_idx)
+        except KeyboardInterrupt:
+            raise
+        except Exception as _task_err:
+            print(f"\n  [ERROR] Task {task_idx} crashed: {_task_err} — skipping to next task\n")
+            import traceback; traceback.print_exc()
+            continue
+
+        for k in ("steps", "discarded", "nom", "safe"):
+            grand[k] += totals[k]
+        grand_mags.extend(mags)
+        grand_success   += ns
+        grand_grasped   += ng
+        grand_collision += nc
+
+        elapsed = _time.time() - _t_start
+        remaining = (elapsed / (i + 1)) * (len(task_indices) - i - 1)
+        print(f"\n  Elapsed: {elapsed/3600:.1f}h   Est. remaining: {remaining/3600:.1f}h")
+
+    if len(task_indices) > 1:
+        grand_ep = len(task_indices) * args.episodes
+        print(f"\n{'='*60}")
+        print(f"ALL TASKS COMPLETE — {len(task_indices)} tasks × {args.episodes} episodes")
+        print(f"  TSR        : {grand_success}/{grand_ep} ({100*grand_success/grand_ep:.0f}%)")
+        print(f"  Grasped    : {grand_grasped}/{grand_ep} ({100*grand_grasped/grand_ep:.0f}%)")
+        print(f"  Collisions : {grand_collision}/{grand_ep} ({100*grand_collision/grand_ep:.0f}%)")
+        _quality_report(grand, grand_mags, args.correction)
+        print(f"{'='*60}")
+        print(f"\nDataset saved to {args.out}/")
 
 
 if __name__ == "__main__":
