@@ -69,8 +69,9 @@ def build_policy_fn(pol_lp):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--config", default="pi05_libero",
-                    help="openpi TrainConfig name used to build the model/transforms")
+    ap.add_argument("--config", default="pi05_libero_cbf",
+                    help="openpi TrainConfig (LoRA) used to build the model/transforms; "
+                         "partial load handles a base checkpoint at round 0")
     ap.add_argument("--checkpoint", required=True,
                     help="checkpoint dir (contains params/ + assets/) — base or LoRA-updated")
     ap.add_argument("--suite", default="safelibero_object",
@@ -95,19 +96,19 @@ def main():
     args = ap.parse_args()
 
     # Imports deferred so --help works without JAX / LIBERO installed.
-    import pathlib
-
-    from openpi.policies import policy_config as _pc
     from openpi.policies.policy_logprob import PolicyWithLogprob
     from openpi.training import config as _config
 
     from experiments.libero_runner import make_libero_env
+    from experiments.load_policy import create_policy_partial
     from experiments.rl_rollout import run_collection
     from experiments.safe_reward import RewardConfig
 
     print(f"Loading policy: config={args.config}  checkpoint={args.checkpoint}")
     train_cfg = _config.get_config(args.config)
-    policy = _pc.create_trained_policy(train_cfg, pathlib.Path(args.checkpoint))
+    # Partial load so a base checkpoint initializes the LoRA config at round 0 and a saved
+    # LoRA checkpoint loads at round N (both behave correctly; base gives lora_b=0).
+    policy = create_policy_partial(train_cfg, args.checkpoint)
     pol_lp = PolicyWithLogprob(
         policy, num_steps=args.num_steps, noise_level=args.noise_level,
         sde_type=args.sde_type, seed=args.seed,

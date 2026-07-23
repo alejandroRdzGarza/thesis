@@ -100,16 +100,18 @@ def main():
     import jax
     import optax
 
-    from openpi.policies import policy_config as _pc
     from openpi.training import config as _config
     from openpi.training import flow_grpo
 
+    from experiments.load_policy import create_policy_partial
     from experiments.policy_trace import load_episode_trace
 
     train_cfg = _config.get_config(args.config)
     trainable_filter = train_cfg.trainable_filter
     print(f"Loading policy: config={args.config}  checkpoint={args.checkpoint}")
-    policy = _pc.create_trained_policy(train_cfg, pathlib.Path(args.checkpoint))
+    # Partial load: a BASE checkpoint initializes the LoRA config (missing lora params filled
+    # fresh, lora_b=0 → identical to base); a saved LoRA checkpoint loads fully.
+    policy = create_policy_partial(train_cfg, args.checkpoint)
     model = policy._model
 
     # Flatten all rollout queries in the round into (obs, chain, logp_old, advantage).

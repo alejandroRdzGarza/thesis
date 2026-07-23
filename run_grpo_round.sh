@@ -15,7 +15,7 @@
 set -euo pipefail
 
 CONFIG=${CONFIG:-pi05_libero_cbf}        # TrainConfig (LoRA freeze filter) for training
-ROLLOUT_CONFIG=${ROLLOUT_CONFIG:-pi05_libero}  # config used to BUILD the sampler policy
+ROLLOUT_CONFIG=${ROLLOUT_CONFIG:-pi05_libero_cbf}  # LoRA config; partial load handles base ckpt at round 0
 CKPT=${CKPT:?set CKPT to the current-policy checkpoint dir (params/ + assets/)}
 SUITE=${SUITE:-safelibero_object}
 LEVEL=${LEVEL:-II}
