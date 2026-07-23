@@ -12,12 +12,13 @@ Flow-SDE GRPO support for making π0.5 collision-safe via on-policy RL (HOOK A +
 | File | Change | Purpose |
 |------|--------|---------|
 | `src/openpi/models/flow_sde.py` | **new** | Validated Flow-GRPO SDE step / sample / logp-recompute + `grpo_surrogate` (JAX) |
-| `src/openpi/models/pi0.py` | +57 | `Pi0.sample_actions_with_logprob` (HOOK A) — stochastic sampler with per-step logp; `noise_level=0` reproduces the ODE sampler |
+| `src/openpi/models/pi0.py` | edits | `sample_actions_with_logprob` (HOOK A, stochastic sampler + per-step logp), `_build_flow_velocity_fn` (shared closure), `compute_chain_logp` (HOOK C, recompute logp of a recorded chain — on-policy ratio ≡ 1) |
 | `src/openpi/policies/policy_logprob.py` | **new** | `PolicyWithLogprob` (HOOK B) — wraps a trained Policy to sample with logp; env-ready action via output transform, chain+logp in model space |
+| `src/openpi/training/flow_grpo.py` | **new** | `flow_grpo_loss` (clipped surrogate) + `grpo_train_step` (grads only on `trainable_filter` = LoRA action head) |
 | `src/openpi/training/config.py` | +33 | `pi05_libero_cbf` TrainConfig — LoRA action head + frozen VLM backbone via `get_freeze_filter()` |
 
-The two **new** files are also copied verbatim under `models/` and `policies/` here for
-quick reference without applying the patch.
+The three **new** files are also copied verbatim under `models/`, `policies/`, `training/`
+here for quick reference without applying the patch.
 
 ## Base commit
 The patch is `git diff a68ede1..HEAD` in the openpi checkout, where `a68ede1` is the last

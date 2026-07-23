@@ -136,10 +136,10 @@ index 0000000..8419c0f
 +    return jnp.minimum(ratio * advantage,
 +                       jnp.clip(ratio, 1.0 - clip, 1.0 + clip) * advantage)
 diff --git a/src/openpi/models/pi0.py b/src/openpi/models/pi0.py
-index ae7c459..f777a2f 100644
+index ae7c459..b9a5eb4 100644
 --- a/src/openpi/models/pi0.py
 +++ b/src/openpi/models/pi0.py
-@@ -277,3 +277,60 @@ class Pi0(_model.BaseModel):
+@@ -277,3 +277,96 @@ class Pi0(_model.BaseModel):
  
          x_0, _ = jax.lax.while_loop(cond, step, (noise, 1.0))
          return x_0
@@ -174,15 +174,26 @@ index ae7c459..f777a2f 100644
 +        if noise is None:
 +            noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))
 +
-+        # Fill the KV cache with a prefix forward pass (identical to sample_actions).
++        velocity_fn = self._build_flow_velocity_fn(observation)
++        sigmas = _fsde.make_sigmas(num_steps)
++        out = _fsde.flow_sde_sample(velocity_fn, noise, sigmas, noise_level, rng, sde_type=sde_type)
++        return out["action"], out["chain"], out["step_logp"]
++
++    def _build_flow_velocity_fn(self, observation: _model.Observation):
++        """Shared velocity closure for the flow-SDE sampler and logp recompute.
++
++        Fills the KV cache with a prefix forward pass (identical to sample_actions),
++        then returns velocity_fn(x_t, time) = the model's action-head output — the body
++        of the deterministic `step` minus the Euler update. `observation` must already
++        be preprocessed (preprocess_observation).
++        """
++        batch_size = observation.state.shape[0]
 +        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
 +        prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
 +        positions = jnp.cumsum(prefix_mask, axis=1) - 1
 +        _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
 +
 +        def velocity_fn(x_t, time):
-+            # The velocity is the model's action-head output at (x_t, time) — this is
-+            # exactly the body of the deterministic `step`, minus the Euler update.
 +            suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
 +                observation, x_t, jnp.broadcast_to(time, batch_size)
 +            )
@@ -197,9 +208,34 @@ index ae7c459..f777a2f 100644
 +            assert prefix_out is None
 +            return self.action_out_proj(suffix_out[:, -self.action_horizon :])
 +
++        return velocity_fn
++
++    def compute_chain_logp(
++        self,
++        observation: _model.Observation,
++        chain: at.Float[at.Array, "s b ah ad"],
++        *,
++        noise_level: float = 0.7,
++        sde_type: str = "cps",
++    ) -> at.Float[at.Array, "num_steps b"]:
++        """Per-step logp of a RECORDED denoising chain under the CURRENT policy. HOOK C.
++
++        This is the training-side counterpart of sample_actions_with_logprob: given the
++        chain the sampling policy produced, recompute each step's Gaussian log-prob under
++        the (updated) model. With the current policy == the sampling policy this exactly
++        reproduces step_logp (on-policy ratio ≡ 1). The GRPO loss forms
++        exp(logp_new - logp_old) from this.
++
++        chain: (num_steps+1, b, ah, ad) — leading axis is the denoising step, matching
++        flow_sde_sample's output. Returns (num_steps, b).
++        """
++        from openpi.models import flow_sde as _fsde
++
++        observation = _model.preprocess_observation(None, observation, train=False)
++        velocity_fn = self._build_flow_velocity_fn(observation)
++        num_steps = chain.shape[0] - 1
 +        sigmas = _fsde.make_sigmas(num_steps)
-+        out = _fsde.flow_sde_sample(velocity_fn, noise, sigmas, noise_level, rng, sde_type=sde_type)
-+        return out["action"], out["chain"], out["step_logp"]
++        return _fsde.flow_sde_recompute_logp(velocity_fn, chain, sigmas, noise_level, sde_type=sde_type)
 diff --git a/src/openpi/policies/policy_logprob.py b/src/openpi/policies/policy_logprob.py
 new file mode 100644
 index 0000000..f5685b2
@@ -357,3 +393,97 @@ index 4ca47e1..aa7f958 100644
      #
      # Fine-tuning Aloha configs.
      #
+diff --git a/src/openpi/training/flow_grpo.py b/src/openpi/training/flow_grpo.py
+new file mode 100644
+index 0000000..f0bd468
+--- /dev/null
++++ b/src/openpi/training/flow_grpo.py
+@@ -0,0 +1,88 @@
++"""flow_grpo.py — flow-SDE GRPO training loss + step for π0.5 (closes the RL loop).
++
++Given a batch of recorded rollout queries (observation, denoising chain, logp_old,
++group advantage), this recomputes logp_new under the current policy (Pi0.compute_chain_logp,
++HOOK C), forms the Flow-GRPO clipped surrogate, and takes a single optimizer step over the
++TRAINABLE (LoRA) params only — the VLM backbone stays frozen via the config's
++trainable_filter (= All(Param, Not(freeze_filter))), matching the teacher's guidance to
++fine-tune only the action head.
++
++Batch convention (step axis leading, batch axis second — matches flow_sde_sample output):
++  observation : Observation, batch size B
++  chain       : (num_steps+1, B, action_horizon, action_dim)  model-native latents
++  logp_old    : (num_steps, B)   per-step logp under the sampling policy
++  advantages  : (B,)             GRPO group-relative advantage per query
++
++Sanity (on-policy at init): current policy == sampling policy ⇒ logp_new == logp_old ⇒
++ratio ≡ 1 ⇒ surrogate == advantage, so loss == -mean(advantages).
++"""
++
++from __future__ import annotations
++
++import flax.nnx as nnx
++import jax.numpy as jnp
++import optax
++
++from openpi.models import flow_sde as _fsde
++from openpi.models import pi0 as _pi0
++from openpi.shared import array_typing as at
++
++
++@at.typecheck
++def flow_grpo_loss(
++    model: _pi0.Pi0,
++    observation,
++    chain: at.Float[at.Array, "s b ah ad"],
++    logp_old: at.Float[at.Array, "num_steps b"],
++    advantages: at.Float[at.Array, "b"],
++    *,
++    noise_level: float = 0.7,
++    sde_type: str = "cps",
++    clip: float = 0.2,
++) -> at.Float[at.Array, ""]:
++    """Flow-GRPO clipped-surrogate loss (scalar, already negated for minimisation)."""
++    logp_new = model.compute_chain_logp(
++        observation, chain, noise_level=noise_level, sde_type=sde_type)   # (num_steps, B)
++    adv = advantages[None, :]                                             # (1, B) broadcast over steps
++    surrogate = _fsde.grpo_surrogate(logp_new, logp_old, adv, clip)       # (num_steps, B)
++    return -jnp.mean(surrogate)
++
++
++def grpo_train_step(
++    model: _pi0.Pi0,
++    tx: optax.GradientTransformation,
++    opt_state,
++    batch: tuple,
++    *,
++    trainable_filter,
++    noise_level: float = 0.7,
++    sde_type: str = "cps",
++    clip: float = 0.2,
++):
++    """One GRPO update over the trainable (LoRA) params. Updates `model` in place.
++
++    `batch` = (observation, chain, logp_old, advantages). `trainable_filter` selects the
++    params that receive gradients (config.trainable_filter). Returns (new_opt_state, info).
++    Mirrors openpi's train_step: grads only on the DiffState-filtered params, optax update,
++    nnx.update in place.
++    """
++    observation, chain, logp_old, advantages = batch
++
++    def loss_fn(m: _pi0.Pi0):
++        return flow_grpo_loss(m, observation, chain, logp_old, advantages,
++                              noise_level=noise_level, sde_type=sde_type, clip=clip)
++
++    diff_state = nnx.DiffState(0, trainable_filter)
++    loss, grads = nnx.value_and_grad(loss_fn, argnums=diff_state)(model)
++
++    params = nnx.state(model, trainable_filter)
++    updates, new_opt_state = tx.update(grads, opt_state, params)
++    new_params = optax.apply_updates(params, updates)
++    nnx.update(model, new_params)
++
++    info = {
++        "loss": loss,
++        "grad_norm": optax.global_norm(grads),
++        "mean_advantage": jnp.mean(advantages),
++    }
++    return new_opt_state, info

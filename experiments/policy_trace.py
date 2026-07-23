@@ -27,12 +27,19 @@ import numpy as np
 
 @dataclass
 class QueryTrace:
-    """One VLA query: an action chunk sampled by the flow-SDE, with its denoising chain."""
+    """One VLA query: an action chunk sampled by the flow-SDE, with its denoising chain.
+
+    For the GRPO update the trainer must recompute logp_new under the current policy, which
+    needs the model INPUT at this query. We store the RAW obs (uint8 images + state + prompt)
+    so the trainer can re-apply the policy's input transform exactly (small on disk; exact).
+    obs is optional — pure-math uses (no env) leave it None.
+    """
     chain: np.ndarray        # (num_steps+1, *action_shape) latent trajectory
     logp_old: np.ndarray     # (num_steps,) per-step logp under the sampling policy
     sigmas: np.ndarray       # (num_steps+1,) time/sigma grid
     noise_level: float
     sde_type: str            # "sde" | "cps"
+    obs: dict | None = None  # {"image":uint8, "wrist_image":uint8, "state":f32, "prompt":str}
 
     def __post_init__(self):
         self.chain = np.asarray(self.chain, dtype=np.float32)
@@ -42,11 +49,12 @@ class QueryTrace:
         assert len(self.logp_old) == len(self.sigmas) - 1, "logp_old must be num_steps"
 
 
-def from_flow_sde_roll(roll: dict) -> QueryTrace:
-    """Build a QueryTrace from a flow_sde.flow_sde_sample() output dict."""
+def from_flow_sde_roll(roll: dict, obs: dict | None = None) -> QueryTrace:
+    """Build a QueryTrace from a flow_sde.flow_sde_sample() output dict (+ optional raw obs)."""
     return QueryTrace(
         chain=np.stack(roll["chain"]), logp_old=roll["step_logp"],
         sigmas=roll["sigmas"], noise_level=roll["noise_level"], sde_type=roll["sde_type"],
+        obs=obs,
     )
 
 
@@ -62,8 +70,7 @@ def save_episode_trace(queries: list[QueryTrace], path: str | Path) -> Path:
         np.savez_compressed(path, n_queries=0)
         return path
     q0 = queries[0]
-    np.savez_compressed(
-        path,
+    fields = dict(
         n_queries=len(queries),
         chain=np.stack([q.chain for q in queries]),        # (Q, S+1, *ashape)
         logp_old=np.stack([q.logp_old for q in queries]),  # (Q, S)
@@ -71,6 +78,16 @@ def save_episode_trace(queries: list[QueryTrace], path: str | Path) -> Path:
         noise_level=q0.noise_level,
         sde_type=q0.sde_type,
     )
+    # Persist the raw model inputs when captured (prompt is constant per episode).
+    if q0.obs is not None:
+        fields["has_obs"] = True
+        fields["obs_image"] = np.stack([q.obs["image"] for q in queries])          # (Q,H,W,3) uint8
+        fields["obs_wrist_image"] = np.stack([q.obs["wrist_image"] for q in queries])
+        fields["obs_state"] = np.stack([np.asarray(q.obs["state"], np.float32) for q in queries])
+        fields["obs_prompt"] = q0.obs.get("prompt", "")
+    else:
+        fields["has_obs"] = False
+    np.savez_compressed(path, **fields)
     return path
 
 
@@ -80,7 +97,15 @@ def load_episode_trace(path: str | Path) -> list[QueryTrace]:
         return []
     chain, logp = d["chain"], d["logp_old"]
     sigmas = d["sigmas"]; nl = float(d["noise_level"]); st = str(d["sde_type"])
-    return [QueryTrace(chain[i], logp[i], sigmas, nl, st) for i in range(len(chain))]
+    has_obs = bool(d["has_obs"]) if "has_obs" in d else False
+    out = []
+    for i in range(len(chain)):
+        obs = None
+        if has_obs:
+            obs = {"image": d["obs_image"][i], "wrist_image": d["obs_wrist_image"][i],
+                   "state": d["obs_state"][i], "prompt": str(d["obs_prompt"])}
+        out.append(QueryTrace(chain[i], logp[i], sigmas, nl, st, obs=obs))
+    return out
 
 
 def grpo_training_tuples(queries: list[QueryTrace], advantage: float):

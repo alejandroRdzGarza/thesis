@@ -53,7 +53,15 @@ def build_policy_fn(pol_lp):
         roll = pol_lp.infer_with_logprob(obs_dict)
         acts = np.asarray(roll["actions"], dtype=np.float64)      # (ah, 7)
         chunk = [acts[i].copy() for i in range(min(num_actions, len(acts)))]
-        return chunk, from_flow_sde_roll(roll)
+        # Store the raw model inputs so the GRPO trainer can recompute logp_new
+        # (re-applies the policy's input transform → Observation → compute_chain_logp).
+        obs_raw = {
+            "image": np.asarray(img_rgb, dtype=np.uint8),
+            "wrist_image": np.asarray(wrist_rgb, dtype=np.uint8),
+            "state": np.asarray(state, dtype=np.float32),
+            "prompt": instruction,
+        }
+        return chunk, from_flow_sde_roll(roll, obs=obs_raw)
 
     return policy_fn
 
