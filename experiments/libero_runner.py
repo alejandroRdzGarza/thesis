@@ -62,25 +62,31 @@ try:
 except ImportError:
     _HAS_LIBERO = False
 
-# ── Patch LIBERO's ObjectState.check_ontop XY threshold ──────────────────────
-# The default is 0.03 m (3 cm), which rejects valid off-centre placements on
-# the plate even when the bowl is clearly sitting on it.  0.06 m (6 cm) is
-# still strict (half the plate radius) but matches physical success better.
-try:
-    from libero.libero.envs.object_states.base_object_states import ObjectState as _LibObjState
+# ── OPT-IN: loosen LIBERO's ObjectState.check_ontop XY threshold ─────────────
+# Standard LIBERO uses a 3 cm XY tolerance for "on" placements (matching AEGIS and the
+# published LIBERO success rates). It can reject valid off-centre placements on the plate.
+# Setting LIBERO_LENIENT_ONTOP=1 relaxes it to 6 cm. This is OFF BY DEFAULT because it
+# changes the AUTHORITATIVE env.check_success() (not just our geo fallback), so enabling it
+# makes TSR non-comparable to AEGIS/standard LIBERO. Only the XY tolerance changes; the
+# z-order and contact conditions match upstream exactly.
+import os as _os
+if _os.environ.get("LIBERO_LENIENT_ONTOP") == "1":
+    try:
+        from libero.libero.envs.object_states.base_object_states import ObjectState as _LibObjState
 
-    def _patched_check_ontop(self, other):
-        this_pos  = self.env.sim.data.body_xpos[self.env.obj_body_id[self.object_name]]
-        other_pos = self.env.sim.data.body_xpos[self.env.obj_body_id[other.object_name]]
-        return (
-            (this_pos[2] <= other_pos[2])
-            and self.check_contact(other)
-            and (np.linalg.norm(this_pos[:2] - other_pos[:2]) < 0.06)
-        )
+        def _patched_check_ontop(self, other):
+            this_pos  = self.env.sim.data.body_xpos[self.env.obj_body_id[self.object_name]]
+            other_pos = self.env.sim.data.body_xpos[self.env.obj_body_id[other.object_name]]
+            return (
+                (this_pos[2] <= other_pos[2])
+                and self.check_contact(other)
+                and (np.linalg.norm(this_pos[:2] - other_pos[:2]) < 0.06)
+            )
 
-    _LibObjState.check_ontop = _patched_check_ontop
-except Exception:
-    pass  # if LIBERO isn't available, the patch is a no-op
+        _LibObjState.check_ontop = _patched_check_ontop
+        print("  [libero_runner] LENIENT check_ontop (6cm) ENABLED — TSR not AEGIS-comparable")
+    except Exception:
+        pass  # if LIBERO isn't available, the patch is a no-op
 
 from experiments.scene_config import ObstacleConfig
 from experiments.metrics import MetricsTracker, StepRecord
@@ -884,6 +890,51 @@ def detect_safelibero_obstacle(env, obs: dict,
     return None
 
 
+def resolve_goal_from_bddl(env, obs: dict | None = None) -> "np.ndarray | None":
+    """Goal position from the task's BDDL goal predicate — authoritative & frame-consistent.
+
+    LIBERO's goal is a predicate like ['in', 'orange_juice_1', 'basket_1_contain_region']
+    or ['on', 'akita_black_bowl_1', 'plate_1']. The TARGET (region/object) is the last token;
+    it defines a MuJoCo SITE placed at the real goal surface (basket interior, cabinet top,
+    stove cook region, plate). Reading that site gives the correct goal in the scene's own
+    frame — unlike a hardcoded position, which breaks across suites (the object suite sits at
+    table z≈0, goal/spatial at z≈0.9).
+
+    Resolution order: region site → target object's obs `_pos` → body xpos → None (caller then
+    relies on env.check_success alone). This is only used for the geo-success fallback and
+    goal-distance logging; env.check_success remains the authoritative success signal.
+    """
+    try:
+        goal_state = env.env.parsed_problem["goal_state"]
+    except Exception:
+        return None
+    if not goal_state:
+        return None
+    target = goal_state[0][-1]                          # region/object name (predicate arg)
+
+    model = data = None
+    if _HAS_MUJOCO:
+        try:
+            model, data = _unwrap_sim(env)
+            sid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, target)
+            if sid >= 0:
+                return data.site_xpos[sid].copy()       # authoritative goal surface
+        except Exception:
+            pass
+
+    base = target
+    for suf in ("_contain_region", "_cook_region", "_top_side", "_top_region", "_region", "_side"):
+        base = base.replace(suf, "")
+    if obs is not None and f"{base}_pos" in obs:
+        return np.array(obs[f"{base}_pos"], dtype=float)
+    if model is not None:
+        for name in (base, f"{base}_main"):
+            bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name)
+            if bid >= 0:
+                return data.xpos[bid].copy()
+    return None
+
+
 def obs_from_libero(env_obs: dict, object_keys: list[str],
                     safety_radius: float = 0.10) -> list[ObstacleConfig]:
     """Build ObstacleConfig list from LIBERO observation keys."""
@@ -1073,6 +1124,14 @@ def run_libero_trial(
     initial_states=None,
     auto_detect_obstacle: bool = False,
     obstacle_safety_radius: float = 0.10,
+    # When True and goal_pos is None, resolve the goal from the BDDL goal predicate's
+    # region site (frame-consistent). Feeds the geo-success fallback + goal-distance
+    # logging/shaping; env.check_success stays authoritative. See resolve_goal_from_bddl.
+    auto_goal: bool = False,
+    # Whether the geo-distance fallback may COUNT as success. Default True (benchmark).
+    # Set False for RL so success is env.check_success ONLY (authoritative, AEGIS-
+    # comparable) while still getting goal-distance reward shaping from auto_goal.
+    use_geo_success: bool = True,
     # VLA backend: "openvla" or "pi05"
     vla: str = "openvla",
     openvla_port: int = 8000,
@@ -1239,6 +1298,15 @@ def run_libero_trial(
         else:
             obstacles = []
             print("  [warn] No obstacle found in workspace — running without CBF obstacles")
+
+    # ── Resolve the task goal from the BDDL predicate (frame-consistent) ──────
+    # Only when not supplied explicitly; used for the geo-success fallback + logging.
+    if goal_pos is None and auto_goal:
+        goal_pos = resolve_goal_from_bddl(env, obs)
+        if goal_pos is not None:
+            print(f"  Goal (from BDDL): {np.round(goal_pos, 3)}")
+        else:
+            print("  [warn] Could not resolve goal from BDDL — geo-success fallback disabled")
 
     # ── Safety-conditioned prompt ─────────────────────────────────────────────
     # Replace the bare task instruction with one that names the obstacle and its
@@ -1709,7 +1777,7 @@ def run_libero_trial(
             # now rests within 10 cm of goal_pos in XY at approximately table
             # height — a physically meaningful "placed on target" criterion.
             geo_success = False
-            if not task_success and goal_pos is not None:
+            if not task_success and goal_pos is not None and use_geo_success:
                 _geo_candidate = _last_grasped_object
                 if _geo_candidate is None:
                     # No confirmed grasp — scan for any non-obstacle object
@@ -1723,7 +1791,10 @@ def run_libero_trial(
                 if _geo_candidate and _geo_candidate in obs:
                     obj_pos_geo = np.array(obs[_geo_candidate], dtype=float)
                     xy_dist_geo = np.linalg.norm(obj_pos_geo[:2] - goal_pos[:2])
-                    z_ok = 0.88 < obj_pos_geo[2] < goal_pos[2] + 0.08
+                    # Frame-relative z gate: the object should rest near the goal SURFACE
+                    # (goal_pos comes from the BDDL region site). A fixed 0.88 assumed the
+                    # world frame and silently failed in the object suite (surface z≈0.07).
+                    z_ok = goal_pos[2] - 0.06 < obj_pos_geo[2] < goal_pos[2] + 0.12
                     # Require the object was actually released (not just the gripper
                     # action momentarily dipping to ≤ 0 between VLA chunks) AND that
                     # at least 8 steps have passed since release so the physics can

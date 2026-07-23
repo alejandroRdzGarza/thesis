@@ -139,6 +139,8 @@ def main():
         obstacles=[],
         instruction=_lang,
         goal_pos=None,
+        auto_goal=True,          # resolve BDDL goal for distance shaping in the reward
+        use_geo_success=False,   # success = env.check_success ONLY (authoritative)
         use_cbf=not args.no_cbf,
         vla="pi05",                       # translational-only default matches AEGIS
         auto_detect_obstacle=True,

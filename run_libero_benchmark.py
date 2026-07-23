@@ -82,7 +82,9 @@ def run_task(suite: str, task_idx: int, use_cbf: bool,
              collect_cbf_data: bool = False,
              use_apf: bool = False,
              apf_k_rep: float = 0.025,
-             apf_d_influence: float = 0.28) -> dict:
+             apf_d_influence: float = 0.28,
+             use_safety_prompt: bool = False,
+             aegis_faithful: bool = True) -> dict:
 
     is_safe = suite.startswith("safelibero_")
     if use_apf:
@@ -91,6 +93,12 @@ def run_task(suite: str, task_idx: int, use_cbf: bool,
         mode = "cbf"
     else:
         mode = "plain"
+    if use_safety_prompt:
+        mode = f"{mode}_sp"
+    # Tag non-faithful (legacy heuristic) CBF runs so results don't get mixed
+    # with the AEGIS-faithful baseline.
+    if use_cbf and not aegis_faithful:
+        mode = f"{mode}_legacy"
     scene_name = f"{suite}_t{task_idx:02d}" + (f"_L{safety_level}" if is_safe else "")
     label  = f"{vla}_{scene_name}_{mode}"
 
@@ -109,7 +117,14 @@ def run_task(suite: str, task_idx: int, use_cbf: bool,
         horizon=horizon,
     )
 
-    goal_pos = TASK_GOAL_POS.get((suite, task_idx), _DEFAULT_GOAL.copy())
+    # SafeLIBERO: resolve the goal per-episode from the BDDL predicate inside the trial
+    # (auto_goal) — the previous hardcoded TASK_GOAL_POS/_DEFAULT_GOAL was wrong for the
+    # object/goal suites (wrong target AND wrong coordinate frame). Standard LIBERO still
+    # needs an explicit goal for success detection.
+    if is_safe:
+        goal_pos = None
+    else:
+        goal_pos = TASK_GOAL_POS.get((suite, task_idx), _DEFAULT_GOAL.copy())
 
     # For SafeLIBERO: obstacles are auto-detected after env.set_init_state().
     # For standard LIBERO: obstacles must be provided here (or left empty).
@@ -126,7 +141,8 @@ def run_task(suite: str, task_idx: int, use_cbf: bool,
                        if collect_dataset else None)
             cbf_ds_path = (str(results_dir / "cbf_dataset" / scene_name / f"ep_{ep:04d}.h5")
                            if collect_cbf_data else None)
-            vid_path = (str(results_dir / "videos" / scene_name / f"ep_{ep:04d}.mp4")
+            # Include mode in the filename so plain and cbf don't overwrite each other.
+            vid_path = (str(results_dir / "videos" / scene_name / f"{mode}_ep_{ep:04d}.mp4")
                         if save_video else None)
 
             ep_log_dir = str(results_dir / "step_logs" / f"{label}_ep{ep:04d}")
@@ -135,6 +151,7 @@ def run_task(suite: str, task_idx: int, use_cbf: bool,
                 obstacles=manual_obstacles,
                 instruction=lang,
                 goal_pos=goal_pos,
+                goal_tolerance=0.15,   # deactivate CBF within 15cm of goal (was 8cm)
                 use_cbf=use_cbf,
                 cbf_gamma=cbf_gamma,
                 scene_name=scene_name,
@@ -150,6 +167,7 @@ def run_task(suite: str, task_idx: int, use_cbf: bool,
                 episode_idx=ep,
                 initial_states=initial_states,
                 auto_detect_obstacle=is_safe,
+                auto_goal=is_safe,     # resolve the goal from the BDDL predicate per episode
                 obstacle_safety_radius=obstacle_safety_radius,
                 replan_steps=replan_steps,
                 horizon=horizon,
@@ -161,6 +179,8 @@ def run_task(suite: str, task_idx: int, use_cbf: bool,
                 use_apf=use_apf,
                 apf_k_rep=apf_k_rep,
                 apf_d_influence=apf_d_influence,
+                use_safety_prompt=use_safety_prompt,
+                aegis_faithful=aegis_faithful,
             )
 
             s = metrics.summary()
@@ -179,6 +199,9 @@ def run_task(suite: str, task_idx: int, use_cbf: bool,
                 "tsr":                  tsr,
                 "ets":                  ets,
                 "collision":            int(s["collision_detected"]),
+                "collision_culprit":    getattr(metrics, "collision_culprit", ""),
+                "collision_robot_caused": int(getattr(metrics, "collision_robot_caused", False)),
+                "obs_touched_by":       getattr(metrics, "obs_touched_by", ""),
                 "cbf_acts":             s["cbf_activations"],
                 "min_dist":             s["min_dist_overall"],
                 "violations":           s["violation_steps"],
@@ -328,7 +351,7 @@ def main():
                    help="APF repulsion gain (dimensionless; correction = k_rep*alpha*||nom||, default 2.0)")
     p.add_argument("--apf-d-influence", type=float, default=0.20,
                    help="APF influence radius from obstacle SURFACE in metres (default 0.20)")
-    p.add_argument("--safety-radius", type=float, default=0.10,
+    p.add_argument("--safety-radius", type=float, default=0.12,
                    help="Safety exclusion radius around auto-detected obstacle (m)")
     p.add_argument("--show-every", type=int, default=0,
                    help="Show live viewer every N episodes (0=off)")
@@ -352,6 +375,14 @@ def main():
                    help="Zero rotational deltas in VLA action (auto: True for pi05, False for openvla)")
     p.add_argument("--no-translational-only", dest="translational_only", action="store_false",
                    help="Disable translational-only restriction even for pi05")
+    p.add_argument("--safety-prompt", action="store_true",
+                   help="Augment the task instruction with a natural language obstacle warning "
+                        "(safety-conditioned prompting — π0.5 backbone conditions on obstacle location)")
+    p.add_argument("--legacy-heuristics", dest="aegis_faithful", action="store_false",
+                   default=True,
+                   help="Restore the local heuristic CBF behaviour (near-goal gate, grasp "
+                        "commit/pull, placement release, sphere decomposition). Default is "
+                        "AEGIS-faithful: CBF every step, single ellipsoid, no heuristics.")
     args = p.parse_args()
 
     if args.list:
@@ -381,31 +412,39 @@ def main():
     all_results = []
     for task_idx in tasks:
         for mode in modes:
-            r = run_task(
-                suite=args.suite,
-                task_idx=task_idx,
-                use_cbf=(mode == "cbf"),
-                use_apf=(mode == "apf"),
-                apf_k_rep=args.apf_k_rep,
-                apf_d_influence=args.apf_d_influence,
-                n_episodes=args.episodes,
-                results_dir=results_dir,
-                safety_level=args.safety_level,
-                cbf_gamma=args.cbf_gamma,
-                obstacle_safety_radius=args.safety_radius,
-                show_every=args.show_every,
-                collect_dataset=args.collect_dataset,
-                save_video=args.save_video,
-                replan_steps=args.replan_steps,
-                horizon=args.horizon,
-                vla=args.vla,
-                openvla_port=args.openvla_port,
-                pi05_host=args.pi05_host,
-                pi05_port=args.pi05_port,
-                translational_only=args.translational_only,
-                collect_cbf_data=args.collect_cbf_data,
-            )
-            all_results.append(r)
+            try:
+                r = run_task(
+                    suite=args.suite,
+                    task_idx=task_idx,
+                    use_cbf=(mode == "cbf"),
+                    use_apf=(mode == "apf"),
+                    apf_k_rep=args.apf_k_rep,
+                    apf_d_influence=args.apf_d_influence,
+                    n_episodes=args.episodes,
+                    results_dir=results_dir,
+                    safety_level=args.safety_level,
+                    cbf_gamma=args.cbf_gamma,
+                    obstacle_safety_radius=args.safety_radius,
+                    show_every=args.show_every,
+                    collect_dataset=args.collect_dataset,
+                    save_video=args.save_video,
+                    replan_steps=args.replan_steps,
+                    horizon=args.horizon,
+                    vla=args.vla,
+                    openvla_port=args.openvla_port,
+                    pi05_host=args.pi05_host,
+                    pi05_port=args.pi05_port,
+                    translational_only=args.translational_only,
+                    collect_cbf_data=args.collect_cbf_data,
+                    use_safety_prompt=args.safety_prompt,
+                    aegis_faithful=args.aegis_faithful,
+                )
+                all_results.append(r)
+            except Exception as e:
+                # One bad task/mode (e.g. LIBERO placement failure) shouldn't kill
+                # the whole sweep — log it and continue with the rest.
+                print(f"\n  [SKIP] task {task_idx} mode {mode} failed: "
+                      f"{type(e).__name__}: {e}\n")
 
     print_table(all_results)
 
