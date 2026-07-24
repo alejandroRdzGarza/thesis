@@ -33,7 +33,9 @@ def create_policy_partial(train_cfg, checkpoint_dir, *, default_prompt: str | No
 
     # Build the (possibly LoRA) model, then merge checkpoint weights, filling any params the
     # checkpoint lacks (the LoRA ones) from the fresh init — openpi CheckpointWeightLoader.
+    print("  [load] building model structure (~1 min) ...", flush=True)
     model = train_cfg.model.create(jax.random.key(0))
+    print("  [load] merging checkpoint weights ...", flush=True)
     graphdef, state = nnx.split(model)
     merged = weight_loaders.CheckpointWeightLoader(
         str(checkpoint_dir / "params")
@@ -46,11 +48,13 @@ def create_policy_partial(train_cfg, checkpoint_dir, *, default_prompt: str | No
     # yet), while the norm stats belong to the base π0.5 CHECKPOINT (under a different asset_id,
     # e.g. physical-intelligence/libero). Locate the norm_stats.json in the checkpoint assets
     # directly so it works regardless of the training config's data repo.
+    print("  [load] loading norm stats ...", flush=True)
     data_config = train_cfg.data.create(train_cfg.assets_dirs, train_cfg.model)
     _ns_matches = list((checkpoint_dir / "assets").rglob("norm_stats.json"))
     if not _ns_matches:
         raise FileNotFoundError(f"No norm_stats.json under {checkpoint_dir / 'assets'}")
     norm_stats = _normalize.load(_ns_matches[0].parent)
+    print("  [load] policy ready.", flush=True)
 
     return _policy.Policy(
         model,

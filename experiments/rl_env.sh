@@ -8,6 +8,7 @@ export BASE=/cs/student/project_msc/2025/rai/jesusr01
 mkdir -p "$BASE/.home"
 
 export MUJOCO_GL=egl                     # headless rendering on compute nodes
+export PYTHONUNBUFFERED=1                 # flush prints immediately (live progress under | tee)
 export HOME="$BASE/.home"                # keep LIBERO/jax caches off the full home mount
 export WANDB_MODE=disabled
 export JAX_COMPILATION_CACHE_DIR="$BASE/.jax_cache"

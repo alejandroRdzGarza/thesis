@@ -114,7 +114,10 @@ def main():
     policy = create_policy_partial(train_cfg, args.checkpoint)
     model = policy._model
 
+    import time as _time
+
     # Flatten all rollout queries in the round into (obs, chain, logp_old, advantage).
+    print(f"  loading traces from {args.round} ...", flush=True)
     rows = read_manifest(args.round)
     queries: list[tuple] = []
     for r in rows:
@@ -123,9 +126,14 @@ def main():
                 raise ValueError(f"trace {r['trace_path']} has no stored obs — re-run rollout "
                                  "with the obs-capturing policy_fn (rl_rollout_local).")
             queries.append((q.obs, q.chain, q.logp_old, r["advantage"]))
-    print(f"  {len(rows)} rollouts → {len(queries)} queries")
     if not queries:
         raise SystemExit("no trace queries found in round")
+
+    n_steps = args.epochs * ((len(queries) + args.minibatch - 1) // args.minibatch)
+    print(f"  {len(rows)} rollouts → {len(queries)} queries  |  {n_steps} GRPO steps "
+          f"(epochs={args.epochs}, minibatch={args.minibatch})", flush=True)
+    print("  NOTE: the FIRST step compiles the full-remat backward (~1-3 min, silent); "
+          "every step after is fast.", flush=True)
 
     tx = optax.adamw(args.lr)
     opt_state = tx.init(nnx.state(model, trainable_filter))
@@ -143,16 +151,22 @@ def main():
             observation = build_observation(policy, obs_list)
             batch = (observation, jax.numpy.asarray(chain),
                      jax.numpy.asarray(logp_old), jax.numpy.asarray(adv))
+            if step == 0:
+                print("  compiling + running first step ...", flush=True)
+            _t0 = _time.monotonic()
             opt_state, info = flow_grpo.grpo_train_step(
                 model, tx, opt_state, batch, trainable_filter=trainable_filter,
                 noise_level=args.noise_level, sde_type=args.sde_type, clip=args.clip)
+            float(info["loss"])   # block until the step actually finishes (for honest timing)
             step += 1
-            print(f"  epoch {epoch} step {step:04d}  loss={float(info['loss']):+.4f}  "
-                  f"|g|={float(info['grad_norm']):.3e}  mean_adv={float(info['mean_advantage']):+.3f}")
+            print(f"  step {step:04d}/{n_steps}  loss={float(info['loss']):+.4f}  "
+                  f"|g|={float(info['grad_norm']):.3e}  mean_adv={float(info['mean_advantage']):+.3f}  "
+                  f"({_time.monotonic() - _t0:.1f}s)", flush=True)
 
     # ── Save updated params as a create_trained_policy-loadable checkpoint ──
     import orbax.checkpoint as ocp
 
+    print("  saving updated checkpoint ...", flush=True)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     params_pure = nnx.state(model, nnx.Param).to_pure_dict()

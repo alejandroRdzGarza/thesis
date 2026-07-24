@@ -8,6 +8,7 @@ mkdir -p "$BASE/.home"
 
 export MUJOCO_GL=egl
 export PYOPENGL_PLATFORM=egl              # mujoco EGL needs PyOpenGL pointed at EGL too (headless)
+export PYTHONUNBUFFERED=1                 # flush prints immediately (so | tee shows live progress)
 export HOME="$BASE/.home"
 export WANDB_MODE=disabled
 export OPENPI_DATA_HOME="$BASE/openpi_cache"          # where openpi downloads the checkpoint
