@@ -26,7 +26,7 @@ def create_policy_partial(train_cfg, checkpoint_dir, *, default_prompt: str | No
     from openpi.models import model as _model
     from openpi.policies import policy as _policy
     from openpi.shared import download
-    from openpi.training import checkpoints as _checkpoints
+    from openpi.shared import normalize as _normalize
     from openpi.training import weight_loaders
 
     checkpoint_dir = pathlib.Path(download.maybe_download(str(checkpoint_dir)))
@@ -41,11 +41,16 @@ def create_policy_partial(train_cfg, checkpoint_dir, *, default_prompt: str | No
     state.replace_by_pure_dict(merged)
     model = nnx.merge(graphdef, state)
 
-    # Transforms — identical to create_trained_policy (norm stats from the checkpoint assets).
+    # Transforms — identical to create_trained_policy, EXCEPT norm stats: the LoRA config's
+    # data asset_id is a placeholder (pi05_libero_cbf_dagger, a DAgger repo that doesn't exist
+    # yet), while the norm stats belong to the base π0.5 CHECKPOINT (under a different asset_id,
+    # e.g. physical-intelligence/libero). Locate the norm_stats.json in the checkpoint assets
+    # directly so it works regardless of the training config's data repo.
     data_config = train_cfg.data.create(train_cfg.assets_dirs, train_cfg.model)
-    if data_config.asset_id is None:
-        raise ValueError("Asset id is required to load norm stats.")
-    norm_stats = _checkpoints.load_norm_stats(checkpoint_dir / "assets", data_config.asset_id)
+    _ns_matches = list((checkpoint_dir / "assets").rglob("norm_stats.json"))
+    if not _ns_matches:
+        raise FileNotFoundError(f"No norm_stats.json under {checkpoint_dir / 'assets'}")
+    norm_stats = _normalize.load(_ns_matches[0].parent)
 
     return _policy.Policy(
         model,
