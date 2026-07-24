@@ -418,10 +418,10 @@ index 4ca47e1..bca9acf 100644
      #
 diff --git a/src/openpi/training/flow_grpo.py b/src/openpi/training/flow_grpo.py
 new file mode 100644
-index 0000000..f0bd468
+index 0000000..1239779
 --- /dev/null
 +++ b/src/openpi/training/flow_grpo.py
-@@ -0,0 +1,88 @@
+@@ -0,0 +1,109 @@
 +"""flow_grpo.py — flow-SDE GRPO training loss + step for π0.5 (closes the RL loop).
 +
 +Given a batch of recorded rollout queries (observation, denoising chain, logp_old,
@@ -472,6 +472,27 @@ index 0000000..f0bd468
 +    return -jnp.mean(surrogate)
 +
 +
++# Cache of JIT-compiled loss+grad fns, keyed by static config. Compiling the forward+backward
++# into one fused program (instead of eager op-by-op dispatch) is a 10-100x speedup and is
++# ESSENTIAL for a 3B model — eager training is impractically slow (a single minibatch-8 step
++# can take tens of minutes). The optimizer update stays outside JIT (cheap; LoRA params only).
++_GRAD_FN_CACHE: dict = {}
++
++
++def _make_grad_fn(trainable_filter, noise_level, sde_type, clip):
++    """Build a JIT-compiled (loss, grads) fn closing over the static config."""
++
++    @nnx.jit
++    def _loss_and_grad(model, observation, chain, logp_old, advantages):
++        def loss_fn(m):
++            return flow_grpo_loss(m, observation, chain, logp_old, advantages,
++                                  noise_level=noise_level, sde_type=sde_type, clip=clip)
++        diff_state = nnx.DiffState(0, trainable_filter)
++        return nnx.value_and_grad(loss_fn, argnums=diff_state)(model)
++
++    return _loss_and_grad
++
++
 +def grpo_train_step(
 +    model: _pi0.Pi0,
 +    tx: optax.GradientTransformation,
@@ -487,17 +508,17 @@ index 0000000..f0bd468
 +
 +    `batch` = (observation, chain, logp_old, advantages). `trainable_filter` selects the
 +    params that receive gradients (config.trainable_filter). Returns (new_opt_state, info).
-+    Mirrors openpi's train_step: grads only on the DiffState-filtered params, optax update,
-+    nnx.update in place.
++    The loss+grad is JIT-compiled (cached per static config); the first call compiles
++    (~minutes for the full-remat backward), every call after is fast.
 +    """
 +    observation, chain, logp_old, advantages = batch
 +
-+    def loss_fn(m: _pi0.Pi0):
-+        return flow_grpo_loss(m, observation, chain, logp_old, advantages,
-+                              noise_level=noise_level, sde_type=sde_type, clip=clip)
-+
-+    diff_state = nnx.DiffState(0, trainable_filter)
-+    loss, grads = nnx.value_and_grad(loss_fn, argnums=diff_state)(model)
++    key = (id(trainable_filter), float(noise_level), str(sde_type), float(clip))
++    grad_fn = _GRAD_FN_CACHE.get(key)
++    if grad_fn is None:
++        grad_fn = _make_grad_fn(trainable_filter, noise_level, sde_type, clip)
++        _GRAD_FN_CACHE[key] = grad_fn
++    loss, grads = grad_fn(model, observation, chain, logp_old, advantages)
 +
 +    params = nnx.state(model, trainable_filter)
 +    updates, new_opt_state = tx.update(grads, opt_state, params)
