@@ -362,20 +362,33 @@ index 0000000..f5685b2
 +            "policy_timing": {"infer_ms": infer_ms},
 +        }
 diff --git a/src/openpi/training/config.py b/src/openpi/training/config.py
-index 4ca47e1..aa7f958 100644
+index 4ca47e1..bca9acf 100644
 --- a/src/openpi/training/config.py
 +++ b/src/openpi/training/config.py
-@@ -761,6 +761,39 @@ _CONFIGS = [
+@@ -21,6 +21,7 @@ import openpi.policies.aloha_policy as aloha_policy
+ import openpi.policies.droid_policy as droid_policy
+ import openpi.policies.libero_policy as libero_policy
+ import openpi.shared.download as _download
++import openpi.shared.nnx_utils as nnx_utils
+ import openpi.shared.normalize as _normalize
+ import openpi.training.droid_rlds_dataset as droid_rlds_dataset
+ import openpi.training.misc.polaris_config as polaris_config
+@@ -761,6 +762,42 @@ _CONFIGS = [
          pytorch_weight_path="/path/to/your/pytorch_weight_path",
          num_train_steps=30_000,
      ),
 +    TrainConfig(
 +        name="pi05_libero_cbf",
++        # Freeze the whole PaliGemma VLM backbone (gemma_2b, no LoRA) and train ONLY the
++        # action expert's LoRA. This matches the teacher's guidance ("only fine-tune the
++        # action part") and RLinf's train_expert_only+lora, and it is what makes the GRPO
++        # backward fit in 24GB: with the backbone frozen, its 2.5B-param prefix forward
++        # (image→SigLIP→LLM) needs NO backward, so none of its activations are stored.
 +        model=pi0_config.Pi0Config(
 +            pi05=True,
 +            action_horizon=10,
 +            discrete_state_input=False,
-+            paligemma_variant="gemma_2b_lora",
++            paligemma_variant="gemma_2b",
 +            action_expert_variant="gemma_300m_lora",
 +        ),
 +        data=LeRobotLiberoDataConfig(
@@ -394,13 +407,11 @@ index 4ca47e1..aa7f958 100644
 +        ema_decay=None,
 +        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_libero/params"),
 +        num_train_steps=10_000,
-+        freeze_filter=pi0_config.Pi0Config(
-+            pi05=True,
-+            action_horizon=10,
-+            discrete_state_input=False,
-+            paligemma_variant="gemma_2b_lora",
-+            action_expert_variant="gemma_300m_lora",
-+        ).get_freeze_filter(),
++        # Freeze everything EXCEPT the action expert's LoRA params (llm_1 + lora), so
++        # trainable_filter = All(Param, Not(freeze_filter)) = action-expert LoRA only.
++        freeze_filter=nnx.Not(
++            nnx.All(nnx_utils.PathRegex(".*llm.*_1.*"), nnx_utils.PathRegex(".*lora.*"))
++        ),
 +    ),
      #
      # Fine-tuning Aloha configs.
