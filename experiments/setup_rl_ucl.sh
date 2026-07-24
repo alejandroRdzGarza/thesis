@@ -26,8 +26,10 @@ export BASE=/cs/student/project_msc/2025/rai/jesusr01
 
 echo "== 1/3  libero runtime deps into openpi/.venv (pinned; keep numpy<2) =="
 cd "$BASE/openpi"
-uv pip install cvxpy opencv-python
-uv pip install "numpy<2" "mujoco==2.3.7" "robosuite==1.4.1" "bddl==3.6.0" "gym==0.25.2" easydict
+# cvxpy MUST be installed under the numpy<2 constraint, else it pulls numpy 2 (or a cvxpy
+# version that needs numpy.lib.array_utils, a numpy-2 module) and breaks the import.
+uv pip install "numpy<2" cvxpy opencv-python \
+  "mujoco==2.3.7" "robosuite==1.4.1" "bddl==3.6.0" "gym==0.25.2" easydict
 uv pip install -e ../libero_repo
 
 echo "== 2/3  create LIBERO config under \$BASE/.home (auto-answer N to dataset prompt) =="
