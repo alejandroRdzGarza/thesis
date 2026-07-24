@@ -129,9 +129,14 @@ def main():
     if not queries:
         raise SystemExit("no trace queries found in round")
 
-    n_steps = args.epochs * ((len(queries) + args.minibatch - 1) // args.minibatch)
+    # Only process FULL minibatches: a trailing partial batch has a different shape, which
+    # forces XLA to recompile the step (a second ~15GB program) whose host-memory compile
+    # spike OOM-kills the process. Dropping the <minibatch remainder keeps one shape.
+    n_full = (len(queries) // args.minibatch) * args.minibatch
+    n_steps = args.epochs * (n_full // args.minibatch)
     print(f"  {len(rows)} rollouts → {len(queries)} queries  |  {n_steps} GRPO steps "
-          f"(epochs={args.epochs}, minibatch={args.minibatch})", flush=True)
+          f"(epochs={args.epochs}, minibatch={args.minibatch}, "
+          f"dropping {len(queries) - n_full} trailing)", flush=True)
     print("  NOTE: the FIRST step compiles the full-remat backward (~1-3 min, silent); "
           "every step after is fast.", flush=True)
 
@@ -142,7 +147,7 @@ def main():
     step = 0
     for epoch in range(args.epochs):
         order = rng.permutation(len(queries))
-        for s in range(0, len(order), args.minibatch):
+        for s in range(0, n_full, args.minibatch):
             idx = order[s:s + args.minibatch]
             obs_list = [queries[i][0] for i in idx]
             chain, logp_old, adv = stack_query_batch(
@@ -166,6 +171,7 @@ def main():
     # ── Save updated params as a create_trained_policy-loadable checkpoint ──
     import orbax.checkpoint as ocp
 
+    del queries          # free the in-memory traces (obs images) before the host-side param pull
     print("  saving updated checkpoint ...", flush=True)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
