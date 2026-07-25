@@ -21,6 +21,7 @@ def create_policy_partial(train_cfg, checkpoint_dir, *, default_prompt: str | No
     """Like create_trained_policy but with a base→LoRA-safe partial weight load."""
     import flax.nnx as nnx
     import jax
+    import numpy as np
 
     import openpi.transforms as _transforms
     from openpi.models import model as _model
@@ -31,28 +32,40 @@ def create_policy_partial(train_cfg, checkpoint_dir, *, default_prompt: str | No
 
     checkpoint_dir = pathlib.Path(download.maybe_download(str(checkpoint_dir)))
 
-    # Build the (possibly LoRA) model, then merge checkpoint weights, filling any params the
-    # checkpoint lacks (the LoRA ones) from the fresh init — openpi CheckpointWeightLoader.
+    # A round checkpoint from flow_grpo_train stores ONLY the trained LoRA adapter (the frozen
+    # backbone never changes, so re-saving it every round is wasteful and OOMs the host). Such a
+    # dir has `lora_params/` + `base.txt` pointing at the original base (backbone + norm stats).
+    # A base/full checkpoint has `params/` instead. Resolve where the backbone comes from:
+    lora_dir = checkpoint_dir / "lora_params"
+    is_lora_ckpt = lora_dir.exists()
+    if is_lora_ckpt:
+        base_dir = pathlib.Path(download.maybe_download((checkpoint_dir / "base.txt").read_text().strip()))
+    else:
+        base_dir = checkpoint_dir
+
+    # Build the (LoRA) model and merge the BASE checkpoint weights, filling missing LoRA params
+    # from the fresh init (openpi CheckpointWeightLoader, missing_regex=".*lora.*").
     print("  [load] building model structure (~1 min) ...", flush=True)
     model = train_cfg.model.create(jax.random.key(0))
-    print("  [load] merging checkpoint weights ...", flush=True)
+    print("  [load] merging base checkpoint weights ...", flush=True)
     graphdef, state = nnx.split(model)
     merged = weight_loaders.CheckpointWeightLoader(
-        str(checkpoint_dir / "params")
+        str(base_dir / "params")
     ).load(state.to_pure_dict())
     state.replace_by_pure_dict(merged)
+    if is_lora_ckpt:
+        print("  [load] overlaying trained LoRA adapter ...", flush=True)
+        lora = _model.restore_params(lora_dir, restore_type=np.ndarray)   # subset: LoRA keys only
+        state.replace_by_pure_dict(lora)
     model = nnx.merge(graphdef, state)
 
-    # Transforms — identical to create_trained_policy, EXCEPT norm stats: the LoRA config's
-    # data asset_id is a placeholder (pi05_libero_cbf_dagger, a DAgger repo that doesn't exist
-    # yet), while the norm stats belong to the base π0.5 CHECKPOINT (under a different asset_id,
-    # e.g. physical-intelligence/libero). Locate the norm_stats.json in the checkpoint assets
-    # directly so it works regardless of the training config's data repo.
+    # Norm stats belong to the base π0.5 CHECKPOINT (the LoRA config's data asset_id is a
+    # placeholder). Locate norm_stats.json in the BASE assets directly.
     print("  [load] loading norm stats ...", flush=True)
     data_config = train_cfg.data.create(train_cfg.assets_dirs, train_cfg.model)
-    _ns_matches = list((checkpoint_dir / "assets").rglob("norm_stats.json"))
+    _ns_matches = list((base_dir / "assets").rglob("norm_stats.json"))
     if not _ns_matches:
-        raise FileNotFoundError(f"No norm_stats.json under {checkpoint_dir / 'assets'}")
+        raise FileNotFoundError(f"No norm_stats.json under {base_dir / 'assets'}")
     norm_stats = _normalize.load(_ns_matches[0].parent)
     print("  [load] policy ready.", flush=True)
 

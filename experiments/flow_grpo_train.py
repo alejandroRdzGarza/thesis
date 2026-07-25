@@ -168,21 +168,32 @@ def main():
                   f"|g|={float(info['grad_norm']):.3e}  mean_adv={float(info['mean_advantage']):+.3f}  "
                   f"({_time.monotonic() - _t0:.1f}s)", flush=True)
 
-    # ── Save updated params as a create_trained_policy-loadable checkpoint ──
+    # ── Save ONLY the trained LoRA adapter (backbone is frozen → don't re-save 12GB) ──
+    # The full-param save pulled the whole 3B model to host RAM and OOM-killed the process.
+    # The adapter is a few MB; we record base.txt pointing at the original base checkpoint so
+    # create_policy_partial reloads = base backbone + this adapter.
+    import gc
     import orbax.checkpoint as ocp
 
-    del queries          # free the in-memory traces (obs images) before the host-side param pull
-    print("  saving updated checkpoint ...", flush=True)
+    del queries
+    gc.collect()
+    print("  saving LoRA adapter (frozen backbone not re-saved) ...", flush=True)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    params_pure = nnx.state(model, nnx.Param).to_pure_dict()
+    lora_pure = nnx.state(model, trainable_filter).to_pure_dict()   # tiny — LoRA params only
+    lora_path = (out / "lora_params").resolve()
+    if lora_path.exists():
+        shutil.rmtree(lora_path)          # clear any leftover tmp from a previously killed save
     with ocp.PyTreeCheckpointer() as ckptr:
-        ckptr.save(str((out / "params").resolve()), {"params": params_pure})
-    # Norm stats live under assets/ — copy from the source checkpoint so the next round loads.
-    src_assets = Path(args.checkpoint) / "assets"
-    if src_assets.exists():
-        shutil.copytree(src_assets, out / "assets", dirs_exist_ok=True)
-    print(f"\nSaved updated policy → {out}  (load next round with --checkpoint {out})")
+        ckptr.save(str(lora_path), {"params": lora_pure})
+    # Point at the ORIGINAL base (backbone + norm stats). If --checkpoint was itself a round
+    # (LoRA) checkpoint, follow its base.txt so the chain always resolves to the true base.
+    _src = Path(args.checkpoint)
+    resolved_base = ((_src / "base.txt").read_text().strip()
+                     if (_src / "base.txt").exists() else str(_src.resolve()))
+    (out / "base.txt").write_text(resolved_base)
+    print(f"\nSaved LoRA adapter → {out}  (backbone from {resolved_base})\n"
+          f"  load next round with --checkpoint {out}")
 
 
 if __name__ == "__main__":
