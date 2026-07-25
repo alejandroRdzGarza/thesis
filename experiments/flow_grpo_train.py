@@ -89,7 +89,8 @@ def main():
     ap.add_argument("--noise-level", type=float, default=0.7)
     ap.add_argument("--sde-type", default="cps", choices=["cps", "sde"])
     ap.add_argument("--clip", type=float, default=0.2, help="GRPO surrogate clip ε")
-    ap.add_argument("--lr", type=float, default=2e-4)
+    ap.add_argument("--lr", type=float, default=1e-5,
+                    help="RL LR — keep small; high LR collapses the policy in one round")
     ap.add_argument("--epochs", type=int, default=1)
     ap.add_argument("--minibatch", type=int, default=8, help="queries per optimizer step")
     args = ap.parse_args()
@@ -113,6 +114,8 @@ def main():
     # fresh, lora_b=0 → identical to base); a saved LoRA checkpoint loads fully.
     policy = create_policy_partial(train_cfg, args.checkpoint)
     model = policy._model
+    import gc as _gc
+    _gc.collect()          # free the ~12GB base-checkpoint host copy before loading traces
 
     import time as _time
 
