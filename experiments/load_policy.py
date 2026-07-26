@@ -59,6 +59,20 @@ def create_policy_partial(train_cfg, checkpoint_dir, *, default_prompt: str | No
         state.replace_by_pure_dict(lora)
     model = nnx.merge(graphdef, state)
 
+    # model.create() inits params at float32 (config.dtype is only the COMPUTE dtype), so the
+    # whole 3.4B model sits in float32 (~13.5GB) and OOMs a 24GB card. Cast the FROZEN params
+    # to bf16 (π0.5 serves in bf16 anyway; matches openpi init_train_state), keeping the tiny
+    # trainable LoRA in float32 for optimizer precision. Frees ~6.7GB → fits 24GB.
+    import jax.numpy as jnp
+    from openpi.shared import nnx_utils
+    print("  [load] casting frozen params to bf16 ...", flush=True)
+    _params = nnx.state(model, nnx.Param)
+    _params = nnx_utils.state_map(
+        _params, train_cfg.freeze_filter,
+        lambda p: p.replace(p.value.astype(jnp.bfloat16)),
+    )
+    nnx.update(model, _params)
+
     # Norm stats belong to the base π0.5 CHECKPOINT (the LoRA config's data asset_id is a
     # placeholder). Locate norm_stats.json in the BASE assets directly.
     print("  [load] loading norm stats ...", flush=True)
