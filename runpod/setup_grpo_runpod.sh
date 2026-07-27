@@ -59,9 +59,10 @@ uv pip install -e .
 echo "### [5/6] LIBERO runtime deps into openpi's .venv (fork itself runs from PYTHONPATH) ###"
 # numpy pinned <2.0: robosuite 1.4.1 + the working UCL/RunPod env need 1.26.x. cvxpy = CBF QP.
 uv pip install \
-    robosuite==1.4.1 bddl==1.0.1 mujoco==3.2.3 \
+    robosuite==1.4.1 bddl==1.0.1 mujoco==3.2.3 future \
     easydict cloudpickle lxml h5py imageio imageio-ffmpeg PyYAML \
     "numpy==1.26.4" cvxpy
+# ^ 'future' is an undeclared runtime dep of bddl (bddl.backend_abc imports future.utils).
 
 echo "### [6/6] verify the whole stack imports + SafeLIBERO suites register ###"
 export MUJOCO_GL=egl PYOPENGL_PLATFORM=egl
