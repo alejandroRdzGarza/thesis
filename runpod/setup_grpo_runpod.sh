@@ -58,11 +58,15 @@ uv pip install -e .
 
 echo "### [5/6] LIBERO runtime deps into openpi's .venv (fork itself runs from PYTHONPATH) ###"
 # numpy pinned <2.0: robosuite 1.4.1 + the working UCL/RunPod env need 1.26.x. cvxpy = CBF QP.
+# This is the COMPLETE set of third-party modules the LIBERO env-creation import chain pulls
+# (libero.libero.benchmark + libero.libero.envs): bddl, cloudpickle, easydict, gym, h5py,
+# imageio, matplotlib, mujoco, numpy, robosuite, termcolor, torch, tqdm, yaml. torch comes from
+# openpi's own sync. gym pinned 0.25.2 (LIBERO breaks on gym 0.26+/gymnasium). 'future' is an
+# undeclared runtime dep of bddl. numpy pinned <2.0 for robosuite 1.4.1. cvxpy = the CBF QP.
 uv pip install \
-    robosuite==1.4.1 bddl==1.0.1 mujoco==3.2.3 future \
+    robosuite==1.4.1 bddl==1.0.1 mujoco==3.2.3 "gym==0.25.2" future \
     easydict cloudpickle lxml h5py imageio imageio-ffmpeg PyYAML \
-    "numpy==1.26.4" cvxpy
-# ^ 'future' is an undeclared runtime dep of bddl (bddl.backend_abc imports future.utils).
+    matplotlib termcolor tqdm "numpy==1.26.4" cvxpy
 
 echo "### [6/6] verify the whole stack imports + SafeLIBERO suites register ###"
 export MUJOCO_GL=egl PYOPENGL_PLATFORM=egl
