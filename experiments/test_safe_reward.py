@@ -45,10 +45,10 @@ check("unattributed collision treated as direct (robot_caused mode)", r_un.direc
 # 5. CBF activation penalty scales with rate and clamps
 r_cbf = compute_episode_reward(goal_reached=False, collision_detected=False,
                                cbf_activation_rate=0.5, cfg=cfg)
-check("cbf penalty = -w_cbf*rate", abs(r_cbf.cbf + 0.25) < 1e-9)
+check("cbf penalty = -w_cbf*rate", abs(r_cbf.cbf + 0.5 * cfg.w_cbf_rate) < 1e-9)
 r_clamp = compute_episode_reward(goal_reached=False, collision_detected=False,
                                  cbf_activation_rate=5.0, cfg=cfg)
-check("cbf rate clamped to 1.0", abs(r_clamp.cbf + 0.5) < 1e-9)
+check("cbf rate clamped to 1.0", abs(r_clamp.cbf + 1.0 * cfg.w_cbf_rate) < 1e-9)
 
 # 6. Partial credit: grasp + near goal beats nothing
 r_grasp = compute_episode_reward(goal_reached=False, collision_detected=False,

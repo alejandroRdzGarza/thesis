@@ -47,7 +47,8 @@ class RewardConfig:
     # learns to avoid the task entirely to dodge collisions. Clean success (1.8) still
     # dominates collided success (0.8), so the gradient favours *safe* completion.
     w_direct_collision: float = 1.0
-    w_cbf_rate: float = 0.5
+    w_cbf_rate: float = 1.5   # was 0.5 — too weak vs w_success to move the safety signal;
+    #                           bumped so low-CBF rollouts get a clearly higher group advantage
     w_progress: float = 0.3
     # Partial credit (fraction of w_progress) for grasping the target at all.
     grasp_credit: float = 0.4

@@ -28,7 +28,7 @@ NUM_STEPS=${NUM_STEPS:-10}
 NOISE_LEVEL=${NOISE_LEVEL:-0.7}
 SDE_TYPE=${SDE_TYPE:-cps}
 CLIP=${CLIP:-0.2}
-LR=${LR:-1e-5}          # RL fine-tuning is fragile — high LR collapses the policy in one round
+LR=${LR:-5e-5}          # 1e-5 was a no-op (policy didn't move); 2e-4 collapsed it. 5e-5 = middle.
 EPOCHS=${EPOCHS:-1}
 MINIBATCH=${MINIBATCH:-8}
 ROUND=${ROUND:-0}
@@ -73,7 +73,7 @@ if [[ "$EVAL" == "1" ]]; then
     $PY -m experiments.rl_rollout_local \
         --config "$ROLLOUT_CONFIG" --checkpoint "$NEXT_CKPT" \
         --suite "$SUITE" --level "$LEVEL" --task "$TASK" \
-        --episodes $EPISODES --K 1 \
+        --episodes $EPISODES --K 4 \
         --horizon "$HORIZON" --replan "$REPLAN" \
         --num-steps "$NUM_STEPS" --noise-level 0 --sde-type "$SDE_TYPE" \
         --no-cbf --out "$EVAL_DIR"
