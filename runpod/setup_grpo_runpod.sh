@@ -39,6 +39,12 @@ echo "### [2/6] clone the three repos ###"
 # rl_env_runpod.sh expects the fork at $BASE/libero_repo; symlink it to the vlsa-aegis subdir.
 ln -sfn "$LIBERO_ROOT" "$BASE/libero_repo"
 
+# PyTorch 2.6 flipped torch.load's default to weights_only=True, which rejects LIBERO's
+# numpy-pickled init-state files. Patch the fork's single torch.load (trusted data). Idempotent.
+_bm="$LIBERO_ROOT/libero/libero/benchmark/__init__.py"
+grep -q "weights_only=False" "$_bm" 2>/dev/null || \
+    sed -i 's/torch\.load(init_states_path)/torch.load(init_states_path, weights_only=False)/' "$_bm"
+
 echo "### [3/6] openpi -> base commit + flow-SDE GRPO patch (HOOK A/B/C, LoRA config) ###"
 cd "$OPENPI"
 if [ ! -f src/openpi/models/flow_sde.py ]; then
