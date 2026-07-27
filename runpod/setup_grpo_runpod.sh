@@ -66,6 +66,11 @@ uv pip install \
 echo "### [6/6] verify the whole stack imports + SafeLIBERO suites register ###"
 export MUJOCO_GL=egl PYOPENGL_PLATFORM=egl
 export PYTHONPATH="$THESIS:$LIBERO_ROOT"
+# The SafeLIBERO fork's libero/__init__.py prompts interactively on first import to create
+# ~/.safelibero/config.yaml — that EOFs under a script. Answer "N" once to write the default
+# config (points at the fork's bundled bddl_files/init_files). Idempotent: no prompt if it exists.
+echo "  initializing LIBERO config (auto-answering the dataset-path prompt) ..."
+printf 'N\n' | "$OPENPI/.venv/bin/python" -c "import libero.libero" || true
 "$OPENPI/.venv/bin/python" - <<'PY'
 import jax; print("  jax devices:", jax.devices())
 import openpi.models.flow_sde, openpi.policies.policy_logprob, openpi.training.flow_grpo
