@@ -158,6 +158,7 @@ def collect_group(
     out_dir: str | Path,
     reward_cfg: RewardConfig = RewardConfig(),
     shield_prob: float = 1.0,
+    save_traj: bool = True,
 ) -> list[Rollout]:
     """Run K rollouts of one initial state, saving each trajectory + its reward.
 
@@ -166,6 +167,10 @@ def collect_group(
     the remainder run UNSHIELDED so the policy's raw actions actually hit the obstacle and
     the collision penalty enters the reward (the fix for shielded-only masking). Each
     rollout's per-rollout `use_cbf` overrides whatever is in run_kwargs.
+
+    `save_traj`: also write the per-rollout .h5 trajectory (obs/action). The GRPO trainer
+    only consumes the .npz policy trace, so the .h5 is dead weight for on-policy GRPO and is
+    disabled by default from rl_rollout_local (it was blowing the disk quota).
     """
     from experiments.libero_runner import run_libero_trial
     from experiments.policy_trace import save_episode_trace
@@ -175,12 +180,13 @@ def collect_group(
     rollouts: list[Rollout] = []
     for k in range(K):
         use_shield = schedule[k]
-        traj_path = str(out_dir / f"g{group_id:04d}" / f"rollout_{k:02d}.h5")
+        traj_path = (str(out_dir / f"g{group_id:04d}" / f"rollout_{k:02d}.h5")
+                     if save_traj else "")
         metrics = run_libero_trial(
             env=env,
             episode_idx=episode_idx,
-            collect_cbf_data=True,
-            cbf_dataset_path=traj_path,
+            collect_cbf_data=save_traj,
+            cbf_dataset_path=(traj_path or None),
             **{**run_kwargs, "use_cbf": use_shield},
         )
         rb = reward_from_metrics(metrics, reward_cfg)
@@ -207,13 +213,14 @@ def run_collection(
     temperature: float = 1.0,
     positive_only: bool = False,
     shield_prob: float = 1.0,
+    save_traj: bool = True,
 ) -> dict:
     """One RWFM collection round over several initial states → manifest + summary.
 
     `make_env_fn()` returns (env, initial_states); each group index selects one
     initial state. `shield_prob` is the fraction of each group's K rollouts run under
-    the CBF shield (the rest unshielded — see collect_group). Writes `manifest.csv`
-    and `round_summary.json` under out_dir.
+    the CBF shield (the rest unshielded — see collect_group). `save_traj` toggles the
+    (GRPO-unused) .h5 trajectory dump. Writes `manifest.csv` and `round_summary.json`.
     """
     out_dir = Path(out_dir)
     env, init_states = make_env_fn()
@@ -224,7 +231,7 @@ def run_collection(
     try:
         for gid, ep_idx in enumerate(group_episode_indices):
             group = collect_group(env, gid, ep_idx, K, run_kwargs, out_dir, reward_cfg,
-                                  shield_prob=shield_prob)
+                                  shield_prob=shield_prob, save_traj=save_traj)
             score_group(group, temperature=temperature, positive_only=positive_only)
             all_rollouts.extend(group)
     finally:

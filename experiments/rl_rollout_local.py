@@ -170,6 +170,7 @@ def main():
         reward_cfg=RewardConfig(),
         temperature=args.temperature,
         shield_prob=shield_prob,
+        save_traj=False,          # GRPO uses only the .npz trace; skip the big .h5 (disk quota)
     )
     print(f"\nRound complete → {args.out}")
     print(f"summary: {summary}")
