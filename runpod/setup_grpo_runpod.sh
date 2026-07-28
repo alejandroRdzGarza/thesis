@@ -109,9 +109,9 @@ echo
 echo "=================================================================="
 echo " Setup complete — everything on /workspace (survives pod restart)."
 echo
-echo " Next (in tmux):"
+echo " Next (in tmux) — pick a fresh OUT dir per experiment (e.g. results_grpo_v3):"
+echo "   tmux new -s grpo"
 echo "   source $THESIS/experiments/rl_env_runpod.sh"
 echo "   cd $THESIS"
-echo "   # The base pi05_libero checkpoint (~10GB) auto-downloads on round 0."
-echo "   BASE_CKPT=\$CKPT N_ROUNDS=6 OUT=results_grpo_v2 ./run_grpo_training.sh 2>&1 | tee grpo_v2.log"
+echo "   BASE_CKPT=\$CKPT N_ROUNDS=6 OUT=results_grpo_v3 ./run_grpo_training.sh 2>&1 | tee grpo_v3.log"
 echo "=================================================================="
