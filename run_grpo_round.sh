@@ -34,6 +34,12 @@ MINIBATCH=${MINIBATCH:-8}
 ROUND=${ROUND:-0}
 OUT=${OUT:-results_grpo}
 EVAL=${EVAL:-1}                          # 1 = run the no-CBF headline eval after training
+# Fraction of each group's K rollouts run WITH the shield; the rest run UNSHIELDED so real
+# collisions enter the reward (fixes shielded-only masking — Exp 002 → 003). 0.5 = half/half.
+SHIELD_PROB=${SHIELD_PROB:-0.5}
+# Headline eval over more DISTINCT initial states (noise ~±0.12 with only 4) → less noisy trend.
+EVAL_EPISODES=${EVAL_EPISODES:-0 1 2 3 4 5 6 7}
+EVAL_K=${EVAL_K:-2}
 PY=${PY:-python}
 
 export MUJOCO_GL=${MUJOCO_GL:-egl}
@@ -51,11 +57,11 @@ echo "   flow-SDE          : steps=$NUM_STEPS noise=$NOISE_LEVEL type=$SDE_TYPE"
 echo "   rollouts -> $ROLL_DIR ;  next ckpt -> $NEXT_CKPT"
 echo "==================================================================="
 
-echo; echo "### [1/3] rollout collection (CBF-shielded) ###"
+echo; echo "### [1/3] rollout collection (mixed shield_prob=$SHIELD_PROB) ###"
 $PY -m experiments.rl_rollout_local \
     --config "$ROLLOUT_CONFIG" --checkpoint "$CKPT" \
     --suite "$SUITE" --level "$LEVEL" --task "$TASK" \
-    --episodes $EPISODES --K "$K" \
+    --episodes $EPISODES --K "$K" --shield-prob "$SHIELD_PROB" \
     --horizon "$HORIZON" --replan "$REPLAN" \
     --num-steps "$NUM_STEPS" --noise-level "$NOISE_LEVEL" --sde-type "$SDE_TYPE" \
     --out "$ROLL_DIR"
@@ -69,11 +75,11 @@ $PY -m experiments.flow_grpo_train \
 
 if [[ "$EVAL" == "1" ]]; then
     echo; echo "### [3/3] headline eval: NO CBF shield (measure learned safety) ###"
-    # ODE (deterministic) eval of the UPDATED policy — noise_level 0.
+    # ODE (deterministic) eval of the UPDATED policy — noise_level 0, no shield.
     $PY -m experiments.rl_rollout_local \
         --config "$ROLLOUT_CONFIG" --checkpoint "$NEXT_CKPT" \
         --suite "$SUITE" --level "$LEVEL" --task "$TASK" \
-        --episodes $EPISODES --K 4 \
+        --episodes $EVAL_EPISODES --K "$EVAL_K" \
         --horizon "$HORIZON" --replan "$REPLAN" \
         --num-steps "$NUM_STEPS" --noise-level 0 --sde-type "$SDE_TYPE" \
         --no-cbf --out "$EVAL_DIR"

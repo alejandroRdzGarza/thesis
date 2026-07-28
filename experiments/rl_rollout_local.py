@@ -92,7 +92,11 @@ def main():
     # GRPO / reward knobs
     ap.add_argument("--temperature", type=float, default=1.0, help="RWFM weight temperature")
     ap.add_argument("--no-cbf", action="store_true",
-                    help="disable the CBF shield (headline eval: measure learned safety)")
+                    help="disable the CBF shield entirely (headline eval: measure learned safety)")
+    ap.add_argument("--shield-prob", type=float, default=1.0,
+                    help="fraction of each group's K rollouts run WITH the CBF shield; the rest "
+                         "run unshielded so real collisions enter the reward (0.5 = half/half). "
+                         "1.0 = legacy shielded-only. --no-cbf forces 0.")
     args = ap.parse_args()
 
     # Imports deferred so --help works without JAX / LIBERO installed.
@@ -114,8 +118,11 @@ def main():
         sde_type=args.sde_type, seed=args.seed,
     )
     policy_fn = build_policy_fn(pol_lp)
+    # --no-cbf forces a fully unshielded run (eval); otherwise --shield-prob sets the mix.
+    shield_prob = 0.0 if args.no_cbf else args.shield_prob
     print(f"  flow-SDE: num_steps={args.num_steps} noise_level={args.noise_level} "
-          f"sde_type={args.sde_type}  CBF={'off' if args.no_cbf else 'on'}")
+          f"sde_type={args.sde_type}  shield_prob={shield_prob:.2f} "
+          f"({'off' if shield_prob == 0 else ('full' if shield_prob >= 1 else 'mixed')})")
 
     # run_collection builds the env and forwards run_kwargs (incl. the instruction) to
     # every rollout, so resolve the task language once up front, then hand run_collection
@@ -142,7 +149,7 @@ def main():
         goal_pos=None,
         auto_goal=True,          # resolve BDDL goal for distance shaping in the reward
         use_geo_success=False,   # success = env.check_success ONLY (authoritative)
-        use_cbf=not args.no_cbf,
+        use_cbf=shield_prob > 0,          # per-rollout use_cbf is overridden in collect_group
         vla="pi05",                       # translational-only default matches AEGIS
         auto_detect_obstacle=True,
         aegis_faithful=True,
@@ -162,6 +169,7 @@ def main():
         out_dir=args.out,
         reward_cfg=RewardConfig(),
         temperature=args.temperature,
+        shield_prob=shield_prob,
     )
     print(f"\nRound complete → {args.out}")
     print(f"summary: {summary}")
