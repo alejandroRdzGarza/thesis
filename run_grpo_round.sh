@@ -28,7 +28,8 @@ NUM_STEPS=${NUM_STEPS:-10}
 NOISE_LEVEL=${NOISE_LEVEL:-0.7}
 SDE_TYPE=${SDE_TYPE:-cps}
 CLIP=${CLIP:-0.2}
-LR=${LR:-5e-5}          # 1e-5 was a no-op (policy didn't move); 2e-4 collapsed it. 5e-5 = middle.
+LR=${LR:-2e-5}          # 5e-5 was fine with Exp 002's weak signal but DIVERGED the LoRA in 2
+#                         rounds once mixed rollouts made the gradient strong (Exp 003 collapse).
 EPOCHS=${EPOCHS:-1}
 MINIBATCH=${MINIBATCH:-8}
 ROUND=${ROUND:-0}

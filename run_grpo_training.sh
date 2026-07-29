@@ -24,6 +24,12 @@ export EPISODES=${EPISODES:-0 1 2 3}
 export K=${K:-8}
 export HORIZON=${HORIZON:-300}
 export NUM_STEPS=${NUM_STEPS:-10}
+# Shield-annealing curriculum (Exp 004): start mostly shielded so the fresh policy keeps its
+# task skill, then ramp the unshielded fraction up so the collision gradient is introduced
+# gently (a flat 0.5 from round 0 collapsed the policy to inaction in Exp 003). Linear from
+# START (round 0) to END (final round).
+SHIELD_PROB_START=${SHIELD_PROB_START:-0.85}
+SHIELD_PROB_END=${SHIELD_PROB_END:-0.40}
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
@@ -44,7 +50,15 @@ for (( N=0; N<N_ROUNDS; N++ )); do
         echo "!!! round $N input checkpoint missing: $in_ckpt — stopping"; exit 1
     fi
 
-    echo; echo ">>> ROUND $N   input=$in_ckpt   →   output=$out_ckpt"; echo
+    # Linear shield anneal across rounds (curriculum). Single-round runs use START.
+    if (( N_ROUNDS > 1 )); then
+        SHIELD_PROB=$(awk "BEGIN{printf \"%.3f\", $SHIELD_PROB_START + ($SHIELD_PROB_END-$SHIELD_PROB_START)*$N/($N_ROUNDS-1)}")
+    else
+        SHIELD_PROB=$SHIELD_PROB_START
+    fi
+    export SHIELD_PROB
+
+    echo; echo ">>> ROUND $N   input=$in_ckpt   →   output=$out_ckpt   shield_prob=$SHIELD_PROB"; echo
     CKPT="$in_ckpt" ROUND="$N" bash "$HERE/run_grpo_round.sh" 2>&1 | tee "round${N}.log"
 done
 

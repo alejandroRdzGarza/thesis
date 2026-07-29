@@ -11,8 +11,66 @@ dropping across RL rounds while collision-rate-without-shield drops and task suc
 
 ---
 
-## Exp 003 — Mixed shielded/unshielded rollouts (`results_grpo_v3`)
+## Exp 004 — Shield-anneal curriculum + lower lr (`results_grpo_v4`)
 **Date:** 2026-07-28   ·   **Status:** 🟡 implemented, queued to run
+
+**Hypothesis.** Exp 003 collapsed because the strong mixed-reward gradient at lr 5e-5 diverged
+the LoRA and the collision penalty flooded a fresh policy (94% unshielded collisions) into the
+inaction attractor. Introducing the collision gradient *gently* (curriculum) with *smaller
+steps* (lower lr) should let the policy learn avoidance without losing task competence.
+
+**Change (vs Exp 003).** (1) **lr 5e-5 → 2e-5** (Exp 003 diverged in 2 rounds). (2) **Shield-
+anneal curriculum:** `shield_prob` starts 0.85 (round 0, mostly shielded — keeps task skill) and
+ramps linearly to 0.40 (final round), so unshielded exposure grows as the policy improves.
+`SHIELD_PROB_START/END` in `run_grpo_training.sh`. Everything else = Exp 003.
+
+**What to watch:** `shielded_success_rate` must **stay up** (~0.9) this time — if it holds while
+`unshielded_collision_rate` declines across rounds, we've threaded the needle. If success still
+craters, the RL-from-scalar-reward approach may need a rethink (e.g. shield-as-DAgger-expert, or
+per-step credit) rather than more knob-tuning.
+
+---
+
+## Exp 003 — Mixed shielded/unshielded rollouts (`results_grpo_v3`)
+**Date:** 2026-07-28   ·   **Status:** ❌ policy collapse (reward-hacked to inaction)
+
+**Question.** Does mixing unshielded rollouts (so real collisions enter the reward) give a direct
+safety gradient that drops the unshielded collision rate?
+
+**Config.** = Exp 002 + `shield_prob=0.5` (half each group's rollouts unshielded), lr 5e-5,
+w_cbf 1.5, eval 8 states. Ran on RunPod RTX 4090. 6 rounds.
+
+**Results.**
+
+| Round | shielded success | overall success | unshielded collision | no-CBF collision |
+|---|---|---|---|---|
+| 0 | 0.94 | 0.91 | 1.00 | 0.94 |
+| 1 | 0.94 | 0.81 | 0.94 | 0.88 |
+| 2 | **0.00** | 0.00 | 0.63 | 0.00 |
+| 3 | 0.00 | 0.00 | 0.00 | 0.00 |
+| 4 | 0.00 | 0.00 | 0.00 | 0.06 |
+| 5 | 0.00 | 0.00 | 0.06 | 0.00 |
+
+**Read (honest).** ❌ **Collapse.** Collisions → 0, but **success → 0 too, even with the shield
+on**. The policy didn't learn avoidance — it learned to *do nothing* (the trivial zero-collision
+optimum). The mechanism worked (16/16 shielded/unshielded split; unshielded collisions did enter
+the reward), but the outcome is a reward-hack.
+
+**Root cause (two, collapse pattern disambiguates).** (1) **Divergence:** success died even in the
+*shielded* condition by round 2 — the shield can't cause that, so the LoRA weights diverged.
+Exp 002 was stable at the same lr because its gradient was flat; Exp 003's mixed reward is a much
+stronger, higher-variance signal, so lr 5e-5 overshot. (2) **Collision penalty punishes progress:**
+the goal is near the obstacle, so ~all forward motion collides early; penalizing it suppresses
+goal-directed actions → retreat to inaction. Brackets the failure with Exp 002: too weak → nothing;
+too strong/sudden → collapse.
+
+**Next step → Exp 004.** Lower lr (smaller steps) + shield-anneal curriculum (introduce the
+collision gradient gently, preserving task competence).
+
+---
+
+## Exp 003 setup notes (superseded by results above)
+**Date:** 2026-07-28
 
 **Hypothesis.** If the shield masking is the root cause (Exp 002), then running a *fraction* of
 each group's rollouts **unshielded** — so real collisions enter the reward — will give GRPO a
