@@ -27,6 +27,9 @@ SDE_TYPE=${SDE_TYPE:-cps}
 LR=${LR:-1e-4}          # imitation is stable → higher LR than the RL runs is fine
 EPOCHS=${EPOCHS:-2}
 MINIBATCH=${MINIBATCH:-8}
+# Imitate ONLY successful + collision-free shielded rollouts (automated expert filter). On by
+# default: guards against BC drifting toward the shield's over-cautious failures (Exp 005 erosion).
+SUCCESS_ONLY=${SUCCESS_ONLY:-1}
 ROUND=${ROUND:-0}
 OUT=${OUT:-results_dagger}
 EVAL=${EVAL:-1}
@@ -58,10 +61,11 @@ $PY -m experiments.rl_rollout_local \
     --out "$ROLL_DIR"
 
 echo; echo "### [2/3] BC update (imitate shield-corrected actions) ###"
+_success_flag=""; [[ "$SUCCESS_ONLY" == "1" ]] && _success_flag="--success-only"
 $PY -m experiments.flow_bc_train \
     --config "$CONFIG" --checkpoint "$CKPT" \
     --round "$ROLL_DIR" --out "$NEXT_CKPT" \
-    --lr "$LR" --epochs "$EPOCHS" --minibatch "$MINIBATCH"
+    --lr "$LR" --epochs "$EPOCHS" --minibatch "$MINIBATCH" $_success_flag
 
 if [[ "$EVAL" == "1" ]]; then
     echo; echo "### [3/3] headline eval: NO CBF shield (measure learned safety) ###"

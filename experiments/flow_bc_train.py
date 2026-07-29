@@ -31,6 +31,31 @@ from pathlib import Path
 import numpy as np
 
 
+def _successful_traces(round_dir) -> set | None:
+    """Absolute paths of traces whose rollout SUCCEEDED and stayed collision-free.
+
+    Read from the round's manifest.csv (r_success>0 and robot_caused_collision==0). Returns None
+    if there's no manifest (→ caller keeps all traces). This is the automated "expert filter":
+    imitate only safe, task-completing shielded trajectories, so BC can't drift toward the
+    shield's over-cautious *failures* (the success erosion seen across DAgger rounds in Exp 005).
+    """
+    import csv
+    mpath = Path(round_dir) / "manifest.csv"
+    if not mpath.exists():
+        return None
+    keep = set()
+    with open(mpath) as f:
+        for r in csv.DictReader(f):
+            tp = r.get("trace_path")
+            if not tp:
+                continue
+            succeeded = float(r.get("r_success", 0) or 0) > 0
+            safe = int(r.get("robot_caused_collision", 0) or 0) == 0
+            if succeeded and safe:
+                keep.add(str(Path(tp).resolve()))
+    return keep
+
+
 def _episode_targets(queries, action_horizon: int):
     """Build (obs, env-space target chunk) pairs from one episode's queries.
 
@@ -99,6 +124,10 @@ def main():
     ap.add_argument("--lr", type=float, default=1e-4, help="BC LR (imitation is stable; higher than RL)")
     ap.add_argument("--epochs", type=int, default=2)
     ap.add_argument("--minibatch", type=int, default=8)
+    ap.add_argument("--success-only", action="store_true",
+                    help="imitate ONLY traces whose rollout succeeded AND stayed collision-free "
+                         "(via manifest.csv) — the automated expert filter; guards against BC "
+                         "drifting toward the shield's over-cautious failures (success erosion).")
     ap.add_argument("--dry-run", action="store_true",
                     help="assemble one minibatch, print shapes + one compute_loss, and exit "
                          "(validate the data path before a full run)")
@@ -128,6 +157,18 @@ def main():
     trace_paths = sorted(glob.glob(str(Path(args.round) / "**" / "*_trace.npz"), recursive=True))
     if not trace_paths:
         raise SystemExit(f"no *_trace.npz under {args.round} — run rl_rollout_local --shield-prob 1.0 first")
+    if args.success_only:
+        keep = _successful_traces(args.round)
+        if keep is None:
+            print("  [success-only] no manifest.csv → keeping all traces", flush=True)
+        else:
+            before = len(trace_paths)
+            trace_paths = [tp for tp in trace_paths if str(Path(tp).resolve()) in keep]
+            print(f"  [success-only] kept {len(trace_paths)}/{before} traces "
+                  "(succeeded + collision-free)", flush=True)
+            if not trace_paths:
+                raise SystemExit("no successful+safe traces this round — nothing to imitate "
+                                 "(policy may have regressed; check the round summary).")
     examples: list[tuple] = []
     n_no_shield = 0
     for tp in trace_paths:
