@@ -11,6 +11,35 @@ dropping across RL rounds while collision-rate-without-shield drops and task suc
 
 ---
 
+## Exp 005 — Shield-as-expert DAgger (imitation) (`results_dagger`)
+**Date:** 2026-07-29   ·   **Status:** 🟡 implemented + CPU-tested, ready to run (dry-run first)
+
+**The pivot.** Scalar-reward RL (001–004) can't separate learning-to-avoid from destroying the
+task. So drop the scalar reward: the CBF shield already computes the *correct safe action at
+every step*, so train the LoRA to **imitate** it (dense per-step supervision). Structurally
+can't reward-hack to inaction — the target action does the task safely — and gives the spatial
+credit the scalar reward lacked. The earlier "DAgger R0 fail" was a CBF bug (`_in_gc_range`
+disabled the shield during approach → labels ≈ base actions → no signal); that's fixed, and the
+GRPO runs confirm the shield now genuinely corrects (unshielded collide ~100%, shielded don't).
+
+**Pipeline (per round).** (1) roll out current policy **fully shielded** (`shield_prob=1`),
+recording each executed shield-corrected action (`QueryTrace.shielded_actions`, new). (2) BC the
+LoRA with the model's native flow-matching loss (`Pi0.compute_loss`) to reproduce those actions
+(`flow_bc.py` / `flow_bc_train.py`). (3) roll out no-CBF → measure learned safety. Repeat (DAgger:
+data is collected under the *current* policy's state distribution). `run_dagger_{round,training}.sh`.
+
+**Impl notes.** Shielded actions are env-space → normalized to model space by running them through
+the policy's own input transform (LiberoInputs passes `actions` → Normalize), so targets match
+π0.5 training exactly; padded 7→action_dim with zeros. CPU-tested: trace roundtrip (incl.
+variable-length + back-compat), chunk assembly/tail-pad, patch applies to 15a9616. **GPU-pending:**
+run `flow_bc_train --dry-run` on the pod first (prints Observation/actions shapes + one
+compute_loss) to validate the transform path before a full run.
+
+**What to watch:** no-CBF collision should now actually **fall** across rounds while success holds
+— the outcome all four RL runs failed to produce.
+
+---
+
 ## Exp 004 — Shield-anneal curriculum + lower lr (`results_grpo_v4`)
 **Date:** 2026-07-28   ·   **Status:** ❌ flat on safety (stable but learns nothing)
 

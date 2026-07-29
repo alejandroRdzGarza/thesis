@@ -40,6 +40,11 @@ class QueryTrace:
     noise_level: float
     sde_type: str            # "sde" | "cps"
     obs: dict | None = None  # {"image":uint8, "wrist_image":uint8, "state":f32, "prompt":str}
+    # Shield-as-expert (DAgger, Exp 005): the CBF-corrected actions ACTUALLY executed after
+    # this query — env-space (unnormalized) 7-D actions, one per control step until the next
+    # query (≈ replan_steps of them). This is the imitation target: the trainer flattens these
+    # across queries into a per-step safe-action sequence and BC-trains the LoRA to reproduce it.
+    shielded_actions: np.ndarray | None = None   # (n_exec, action_dim) env-space, or None
 
     def __post_init__(self):
         self.chain = np.asarray(self.chain, dtype=np.float32)
@@ -47,6 +52,8 @@ class QueryTrace:
         self.sigmas = np.asarray(self.sigmas, dtype=np.float32)
         assert self.chain.shape[0] == len(self.sigmas), "chain/sigmas length mismatch"
         assert len(self.logp_old) == len(self.sigmas) - 1, "logp_old must be num_steps"
+        if self.shielded_actions is not None:
+            self.shielded_actions = np.asarray(self.shielded_actions, dtype=np.float32)
 
 
 def from_flow_sde_roll(roll: dict, obs: dict | None = None) -> QueryTrace:
@@ -87,6 +94,19 @@ def save_episode_trace(queries: list[QueryTrace], path: str | Path) -> Path:
         fields["obs_prompt"] = q0.obs.get("prompt", "")
     else:
         fields["has_obs"] = False
+    # Shield-as-expert targets (Exp 005). Per-query executed counts vary at episode end, so pad
+    # to the max length with NaN and store the true lengths (pickle-free; sliced back on load).
+    if q0.shielded_actions is not None:
+        lens = [len(q.shielded_actions) for q in queries]
+        ad = int(queries[0].shielded_actions.shape[-1])
+        padded = np.full((len(queries), max(lens), ad), np.nan, np.float32)
+        for i, q in enumerate(queries):
+            padded[i, :len(q.shielded_actions)] = q.shielded_actions
+        fields["has_shielded"] = True
+        fields["shielded_actions"] = padded
+        fields["shielded_lens"] = np.asarray(lens, np.int32)
+    else:
+        fields["has_shielded"] = False
     np.savez_compressed(path, **fields)
     return path
 
@@ -98,13 +118,17 @@ def load_episode_trace(path: str | Path) -> list[QueryTrace]:
     chain, logp = d["chain"], d["logp_old"]
     sigmas = d["sigmas"]; nl = float(d["noise_level"]); st = str(d["sde_type"])
     has_obs = bool(d["has_obs"]) if "has_obs" in d else False
+    has_shielded = bool(d["has_shielded"]) if "has_shielded" in d else False
     out = []
     for i in range(len(chain)):
         obs = None
         if has_obs:
             obs = {"image": d["obs_image"][i], "wrist_image": d["obs_wrist_image"][i],
                    "state": d["obs_state"][i], "prompt": str(d["obs_prompt"])}
-        out.append(QueryTrace(chain[i], logp[i], sigmas, nl, st, obs=obs))
+        sh = None
+        if has_shielded:
+            sh = d["shielded_actions"][i, : int(d["shielded_lens"][i])]
+        out.append(QueryTrace(chain[i], logp[i], sigmas, nl, st, obs=obs, shielded_actions=sh))
     return out
 
 

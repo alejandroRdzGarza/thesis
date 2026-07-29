@@ -1238,6 +1238,9 @@ def run_libero_trial(
     metrics = MetricsTracker(scene_name, mode, model_name=vla)
     # On-policy GRPO trace buffer (populated only when policy_fn records traces).
     metrics.policy_trace = []
+    # Parallel to policy_trace: the executed shield-corrected actions per query, collected for
+    # shield-as-expert DAgger BC (Exp 005). One sub-list per query, one action per control step.
+    _shielded_bufs: list[list] = []
 
     goal_str = np.round(goal_pos, 3) if goal_pos is not None else "auto"
     print(f"\n  [{scene_name}] ep={episode_idx}  mode={mode.upper()}  "
@@ -1416,6 +1419,7 @@ def run_libero_trial(
                                 a[3:6] = 0.0  # zero rotational deltas — match AEGIS setup
                         if record_policy_trace and _qtrace is not None:
                             metrics.policy_trace.append(_qtrace)
+                            _shielded_bufs.append([])   # start this query's executed-action buffer
                     elif vla == "pi05":
                         raw_chunk = _query_pi05_chunk(img, wrist_img, state,
                                                       _instruction_effective, num_actions=replan_steps)
@@ -1684,6 +1688,11 @@ def run_libero_trial(
                     if cv2.waitKey(1) & 0xFF == ord("q"):
                         break
 
+            # Shield-as-expert BC (Exp 005): record the executed shield-corrected action as this
+            # query's imitation target (env-space, before it hits the OSC controller).
+            if record_policy_trace and _shielded_bufs:
+                _shielded_bufs[-1].append(np.asarray(safe_action, dtype=np.float32).copy())
+
             # ── 6. Step environment ───────────────────────────────────────
             step_out = env.step(safe_action.tolist())
             if len(step_out) == 4:
@@ -1925,6 +1934,12 @@ def run_libero_trial(
 
     if collect_dataset and dataset_path:
         metrics.save_dataset(dataset_path)
+
+    # Attach each query's executed shield-corrected actions to its trace (Exp 005 BC target).
+    if record_policy_trace and _shielded_bufs:
+        for _q, _buf in zip(metrics.policy_trace, _shielded_bufs):
+            if _buf:
+                _q.shielded_actions = np.asarray(_buf, dtype=np.float32)
 
     if collect_cbf_data and cbf_dataset_path:
         metrics.save_hdf5(cbf_dataset_path, instruction=instruction)
