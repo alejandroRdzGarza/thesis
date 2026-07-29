@@ -12,22 +12,38 @@ dropping across RL rounds while collision-rate-without-shield drops and task suc
 ---
 
 ## Exp 004 — Shield-anneal curriculum + lower lr (`results_grpo_v4`)
-**Date:** 2026-07-28   ·   **Status:** 🟡 implemented, queued to run
+**Date:** 2026-07-28   ·   **Status:** ❌ flat on safety (stable but learns nothing)
 
-**Hypothesis.** Exp 003 collapsed because the strong mixed-reward gradient at lr 5e-5 diverged
-the LoRA and the collision penalty flooded a fresh policy (94% unshielded collisions) into the
-inaction attractor. Introducing the collision gradient *gently* (curriculum) with *smaller
-steps* (lower lr) should let the policy learn avoidance without losing task competence.
+**Change (vs Exp 003).** lr 5e-5 → 2e-5; shield-anneal `shield_prob` 0.85 → 0.40 over 6 rounds.
 
-**Change (vs Exp 003).** (1) **lr 5e-5 → 2e-5** (Exp 003 diverged in 2 rounds). (2) **Shield-
-anneal curriculum:** `shield_prob` starts 0.85 (round 0, mostly shielded — keeps task skill) and
-ramps linearly to 0.40 (final round), so unshielded exposure grows as the policy improves.
-`SHIELD_PROB_START/END` in `run_grpo_training.sh`. Everything else = Exp 003.
+**Results.**
 
-**What to watch:** `shielded_success_rate` must **stay up** (~0.9) this time — if it holds while
-`unshielded_collision_rate` declines across rounds, we've threaded the needle. If success still
-craters, the RL-from-scalar-reward approach may need a rethink (e.g. shield-as-DAgger-expert, or
-per-step credit) rather than more knob-tuning.
+| Round | shield_prob | shielded success | unshielded collision | no-CBF collision | shielded CBF-pen |
+|---|---|---|---|---|---|
+| 0 | 0.85 | 0.75 | 1.00 | 0.94 | −0.63 |
+| 1 | 0.76 | 0.88 | 1.00 | 0.94 | −0.55 |
+| 2 | 0.67 | 0.80 | 1.00 | 1.00 | −0.56 |
+| 3 | 0.58 | 0.70 | 1.00 | 0.94 | −0.60 |
+| 4 | 0.49 | 0.69 | 0.88 | 0.94 | −0.62 |
+| 5 | 0.40 | 0.83 | 1.00 | 0.88 | −0.62 |
+
+**Read.** ✅ Collapse fixed — `shielded_success` held ~0.7–0.88, no divergence. ❌ Zero safety
+learning — `unshielded_collision_rate` pinned ~1.0, no-CBF collision flat ~0.94, CBF activation
+flat ~0.4. Stable but flat.
+
+**Decisive cross-run conclusion (001–004).** The only setting that moved the policy's behavior
+(003, lr 5e-5 + mixed) collapsed it to inaction; every setting stable enough to preserve the task
+(002, 004) learns no avoidance. **The learning signal and the destabilizing signal are the same
+knob** — scalar-reward flow-GRPO cannot separate "learn the spatial detour around the obstacle"
+from "erode goal-reaching," because the obstacle lies on the path to the goal and a single scalar
+episode reward gives no per-step spatial credit. This is a **structural limit of scalar-reward RL
+here**, not an untuned hyperparameter — a legitimate negative-result contribution.
+
+**Next → Exp 005 (pivot).** Switch to a **dense per-step signal**: shield-as-expert imitation —
+the CBF already computes the safe action at every step, so train the LoRA to imitate that
+corrected action (DAgger-style). Structurally cannot reward-hack to inaction (the target action
+*does the task safely*) and gives per-step spatial supervision the scalar reward lacked.
+(NB: an earlier DAgger attempt "R0 failed" — check what broke before reusing that framing.)
 
 ---
 
