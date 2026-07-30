@@ -34,7 +34,8 @@ def resolve_pick_and_place(env, obs: dict) -> dict | None:
         return None
     if not goal_state or len(goal_state[0]) < 2:
         return None
-    obj_name = goal_state[0][1]                       # the manipulated object (predicate arg 1)
+    predicate = str(goal_state[0][0]).lower()         # 'on' (surface) | 'in' (container) | ...
+    obj_name = goal_state[0][1]                        # the manipulated object (predicate arg 1)
     obj_key = f"{obj_name}_pos"
     if obs is None or obj_key not in obs:
         return None
@@ -45,6 +46,8 @@ def resolve_pick_and_place(env, obs: dict) -> dict | None:
         "obj_key": obj_key,
         "obj_pos": np.asarray(obs[obj_key][:3], dtype=float),
         "goal_pos": np.asarray(goal_pos, dtype=float),
+        # 'in' → drop into a container (basket); anything else ('on') → set down onto a surface.
+        "place_mode": "in" if predicate == "in" else "on",
     }
 
 
@@ -154,6 +157,8 @@ class ControllerConfig:
     release_hold: int = 5       # control steps to hold open after releasing
     place_xy_tol: float = 0.035 # looser XY tolerance to release over the basket (vs tight transit tol)
     place_timeout: int = 50     # steps: always release by now (carton drops into the basket from above)
+    setdown_reach: float = 0.15 # 'on' mode: how far below the goal surface to drive — physical
+    #                             contact stops the object ON the surface (release on contact)
     # Descent is "until contact": transition when the EE stops making downward progress
     # (bottomed out on the object/surface), which is robust to unknown object heights.
     stall_eps: float = 0.0015   # m of downward progress per step below which we count a stall
@@ -166,6 +171,7 @@ class PickPlaceController:
     cfg: ControllerConfig = field(default_factory=ControllerConfig)
     use_mpc: bool = True
     mpc_cfg: MPCConfig = field(default_factory=MPCConfig)
+    place_mode: str = "in"      # 'in' = drop into a container (basket); 'on' = set down onto a surface
     phase: str = "APPROACH"
     grasp_offset: float | None = None   # EE_z − object_z at grasp: how the carton sits in the gripper
     _timer: int = 0
@@ -251,16 +257,23 @@ class PickPlaceController:
                 self._enter("PLACE")
             return self._goto(ee, tgt, _GRIP_CLOSE), self.phase
 
-        if self.phase == "PLACE":                          # lower the object CENTRE into the basket
+        if self.phase == "PLACE":
             off = self.grasp_offset if self.grasp_offset is not None else 0.0
-            tgt = np.array([goal[0], goal[1], goal[2] + c.place_dz + off])   # EE raised so object_z ~ goal_z+place_dz
             self._timer += 1
             centred = np.linalg.norm(ee[:2] - goal[:2]) < c.place_xy_tol
-            reached = np.linalg.norm(ee - tgt) < c.pos_tol or self._contact(ee[2])
-            # Release when placed, OR by the timeout — dropping over the basket still lands it
-            # (ep3 succeeded with the carton 6 cm above goal). Never hover forever.
-            if (centred and reached) or self._timer >= c.place_timeout:
-                self._enter("RELEASE")
+            if self.place_mode == "on":
+                # Set the object DOWN onto the surface: drive below the goal; physical contact
+                # (object bottom on the surface) stalls the EE → release. Avoids dropping it
+                # through the plate (which caused the contact explosions on spatial/goal).
+                tgt = np.array([goal[0], goal[1], goal[2] - c.setdown_reach])
+                if (centred and self._contact(ee[2])) or self._timer >= 3 * c.place_timeout:
+                    self._enter("RELEASE")
+            else:
+                # Drop into a container from above (basket): release when placed or by timeout.
+                tgt = np.array([goal[0], goal[1], goal[2] + c.place_dz + off])
+                reached = np.linalg.norm(ee - tgt) < c.pos_tol or self._contact(ee[2])
+                if (centred and reached) or self._timer >= c.place_timeout:
+                    self._enter("RELEASE")
             return self._goto(ee, tgt, _GRIP_CLOSE), self.phase
 
         if self.phase == "RELEASE":                        # open + hold
