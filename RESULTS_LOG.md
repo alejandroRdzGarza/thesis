@@ -40,6 +40,29 @@ compute_loss) to validate the transform path before a full run.
 
 ---
 
+## Exp 005b — DAgger + success filter (`results_dagger_succ`)
+**Date:** 2026-07-30   ·   **Status:** ✅ confirmed positive (single task); early-stop required
+
+**Change vs Exp 005:** `--success-only` (imitate only succeeded + collision-free shielded rollouts).
+
+| BC rounds | no-CBF success | no-CBF collision |
+|-----------|---------------|------------------|
+| base | ~0.88 | ~0.94 |
+| 1 | 0.81 | 0.125 |
+| **2** | **0.69** | **0.00** ← keeper (`round2_ckpt`) |
+| 3 | 0.56 | 0.06 |
+| 4 | 0.50 | 0.125 |
+| 5 | 0.44 | 0.00 |
+| 6 | 0.125 | 0.00 |
+
+**Read.** ✅ The filter preserves success far better than unfiltered (round 4: 0.44 vs 0.25) and
+`round2_ckpt` = **0.69 / 0.00** unshielded (base 0.88 / 0.94) — full safety internalization at 78%
+of base success. ⚠️ Filter *slows but doesn't stop* the over-caution erosion (crashes by round 6),
+so **early-stopping at 1–2 rounds is the operating point.** Next: soft advantage-weighted BC to
+flatten the erosion; then a diverse multi-task sample (single-task outlier risk) + ≥20-ep eval.
+
+---
+
 ## Exp 004 — Shield-anneal curriculum + lower lr (`results_grpo_v4`)
 **Date:** 2026-07-28   ·   **Status:** ❌ flat on safety (stable but learns nothing)
 

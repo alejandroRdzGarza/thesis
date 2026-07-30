@@ -64,17 +64,34 @@ approach phase → labels ≈ base actions. That's fixed; the shield now genuine
 - **After one BC round, unshielded collision crashed 0.94 → 0.125** — the safety internalization
   all four RL runs failed to produce. Modest success cost (0.88 → 0.69).
 - Over further rounds the policy **over-imitates the shield's caution** → collision → ~0 but success
-  collapses. Clean monotonic safety/success tradeoff; **the knee (round 0) is the keeper.**
-- **Fix implemented + validating now:** automated **success filter** — imitate only rollouts that
-  succeeded *and* stayed collision-free (read from the manifest, no manual labelling), so BC stays
-  on the success manifold instead of drifting into caution.
+  collapses. Clean monotonic safety/success tradeoff; **the knee (1–2 BC rounds) is the keeper.**
+
+**Exp 005b — with the automated success filter (`results_dagger_succ`):** imitate only rollouts
+that succeeded *and* stayed collision-free (read from the manifest, no manual labelling).
+
+| BC rounds | no-CBF success | no-CBF collision |
+|-----------|---------------|------------------|
+| base | ~0.88 | ~0.94 |
+| 1 | 0.81 | 0.125 |
+| **2** | **0.69** | **0.00** ← keeper (`round2_ckpt`) |
+| 3 | 0.56 | 0.06 |
+| 4–6 | 0.50 → 0.12 | ~0.00 |
+
+- **Confirmed result:** `round2_ckpt` = **0.69 success / 0.00 collision** unshielded (vs base
+  0.88 / 0.94) — the policy *fully* internalized avoidance (0 collisions in 16 unshielded rollouts)
+  at a 0.69/0.88 success retention.
+- The filter **slows but doesn't stop** the erosion (still crashes by round 6) → **early-stopping at
+  1–2 rounds is the operating point.** Next lever: soft advantage-weighted BC to flatten it further.
 
 ---
 
 ## Where we are
-- **Best checkpoint:** `round1_ckpt` (1 BC round): **0.69 success / 0.125 collision** no-CBF, vs base
-  **~0.88 / ~0.94**. First checkpoint that is dramatically safer *without* the shield.
-- **Caveats:** single task; 16-rollout eval (±~0.12 noise); success-filter not yet confirmed.
+- **Best checkpoint:** `results_dagger_succ/round2_ckpt` (2 BC rounds, success-filtered):
+  **0.69 success / 0.00 collision** no-CBF, vs base **~0.88 / ~0.94**. Fully internalized avoidance
+  (0 collisions unshielded) at 78% of base success. Success filter **confirmed** to preserve
+  success (vs unfiltered which crashed to ~0.06).
+- **Caveats:** single task; 16-rollout eval (±~0.12 noise, needs ≥20-ep confirmation); erosion means
+  early-stopping (1–2 rounds) is required.
 
 ## Next steps (proposed)
 1. **Confirm the success filter** (task 0, ~3 rounds): does it hold success while dropping collision?
@@ -94,5 +111,6 @@ approach phase → labels ≈ base actions. That's fixed; the shield now genuine
 
 ## One-line takeaway
 Scalar-reward RL structurally can't teach obstacle-avoidance here (mapped 4 failure modes);
-**imitating the CBF shield as a dense per-step expert does** — cutting unshielded collisions ~7×
-(0.94→0.125) after one round — with a safety/success tradeoff we're now managing via a success filter.
+**imitating the CBF shield as a dense per-step expert does** — driving unshielded collisions from
+**0.94 → 0.00** while retaining **0.69/0.88 success** (2 BC rounds, success-filtered) — i.e. the
+policy learned to be safe on its own, no shield needed. Erosion past round 2 → early-stopping.
