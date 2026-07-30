@@ -1194,7 +1194,9 @@ def run_libero_trial(
     if not _HAS_MUJOCO:
         raise RuntimeError("mujoco not available in this environment")
 
-    if vla == "pi05" and policy_fn is None:
+    # Only spin up the π0.5 websocket client when the VLA server is actually the action source
+    # (not for an in-process policy_fn, and not for the scripted classical controller).
+    if vla == "pi05" and policy_fn is None and controller is None:
         _init_pi05_client(pi05_host, pi05_port)
 
     # Resolve auto defaults: OpenVLA keeps original True behaviour;
