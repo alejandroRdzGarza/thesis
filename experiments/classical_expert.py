@@ -144,10 +144,12 @@ class ControllerConfig:
     kp: float = 20.0            # P-gain; delta = clip(kp·error, ±1). ~1/output_max (OSC ~0.05 m/step).
     pos_tol: float = 0.02       # m, waypoint-reached tolerance
     xy_tol: float = 0.015       # m, tighter XY alignment before descending / placing
-    approach_h: float = 0.12    # m above the object/goal to hover before descending
+    approach_h: float = 0.12    # m above the object to hover before descending
     grasp_dz: float = 0.005     # m above the object centre to aim for (descent is contact-based)
     lift_h: float = 0.18        # m to lift the grasped object before transporting
-    place_dz: float = 0.04      # m above the goal to release
+    goal_clear_h: float = 0.22  # m above the goal to carry the object — high enough that the
+    #                             carton's BOTTOM clears the basket rim before lowering in
+    place_dz: float = 0.02      # extra m above the goal for the object CENTRE when releasing
     grasp_hold: int = 8         # control steps to hold while the gripper closes
     release_hold: int = 5       # control steps to hold open after releasing
     # Descent is "until contact": transition when the EE stops making downward progress
@@ -163,6 +165,7 @@ class PickPlaceController:
     use_mpc: bool = True
     mpc_cfg: MPCConfig = field(default_factory=MPCConfig)
     phase: str = "APPROACH"
+    grasp_offset: float | None = None   # EE_z − object_z at grasp: how the carton sits in the gripper
     _timer: int = 0
     _stall: int = 0
     _last_z: float | None = None
@@ -172,6 +175,7 @@ class PickPlaceController:
 
     def reset(self):
         self.phase = "APPROACH"
+        self.grasp_offset = None
         self._timer = 0
         self._stall = 0
         self._last_z = None
@@ -223,6 +227,7 @@ class PickPlaceController:
         if self.phase == "DESCEND":                       # lower onto the object until contact
             tgt = np.array([obj[0], obj[1], obj[2] + c.grasp_dz])
             if np.linalg.norm(ee - tgt) < c.pos_tol or self._contact(ee[2]):
+                self.grasp_offset = float(ee[2] - obj[2])   # how far above the object centre we grip
                 self._enter("GRASP")
             return self._goto(ee, tgt, _GRIP_OPEN), self.phase
 
@@ -238,15 +243,17 @@ class PickPlaceController:
                 self._enter("TRANSPORT")
             return self._goto(ee, tgt, _GRIP_CLOSE), self.phase
 
-        if self.phase == "TRANSPORT":                      # carry to above the goal (obstacle-avoiding transit)
-            tgt = np.array([goal[0], goal[1], goal[2] + c.approach_h])
+        if self.phase == "TRANSPORT":                      # carry HIGH above the goal so the carton
+            tgt = np.array([goal[0], goal[1], goal[2] + c.goal_clear_h])   # bottom clears the basket rim
             if np.linalg.norm(ee[:2] - goal[:2]) < c.xy_tol and abs(ee[2] - tgt[2]) < c.pos_tol:
                 self._enter("PLACE")
             return self._goto(ee, tgt, _GRIP_CLOSE), self.phase
 
-        if self.phase == "PLACE":                          # lower to the goal surface until contact
-            tgt = np.array([goal[0], goal[1], goal[2] + c.place_dz])
-            if np.linalg.norm(ee - tgt) < c.pos_tol or self._contact(ee[2]):
+        if self.phase == "PLACE":                          # lower the object CENTRE into the basket
+            off = self.grasp_offset if self.grasp_offset is not None else 0.0
+            tgt = np.array([goal[0], goal[1], goal[2] + c.place_dz + off])   # EE raised so object_z ~ goal_z+place_dz
+            centred = np.linalg.norm(ee[:2] - goal[:2]) < c.xy_tol
+            if centred and (np.linalg.norm(ee - tgt) < c.pos_tol or self._contact(ee[2])):
                 self._enter("RELEASE")
             return self._goto(ee, tgt, _GRIP_CLOSE), self.phase
 

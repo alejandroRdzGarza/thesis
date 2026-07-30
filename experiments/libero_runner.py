@@ -1969,6 +1969,27 @@ def run_libero_trial(
     if collect_dataset and dataset_path:
         metrics.save_dataset(dataset_path)
 
+    # ── Classical controller: end-of-episode debug dump (why did placement succeed/fail?) ──
+    if controller is not None and _pp_ctx is not None:
+        _fee = np.array(obs["robot0_eef_pos"], dtype=float)
+        _fobj = np.array(obs.get(_pp_ctx["obj_key"], [np.nan, np.nan, np.nan]), dtype=float)
+        _fg = np.asarray(_pp_ctx["goal_pos"], dtype=float)
+        _obj0 = np.asarray(_pp_ctx["obj_pos"], dtype=float)
+        print("  ── classical debug ──────────────────────────────────────")
+        print(f"    final phase        : {controller.phase}")
+        print(f"    grasp_offset (EE−obj_z at grasp): {getattr(controller, 'grasp_offset', None)}")
+        print(f"    object start  pos  : {np.round(_obj0, 3)}")
+        print(f"    object FINAL  pos  : {np.round(_fobj, 3)}   (moved {np.linalg.norm(_fobj - _obj0):.3f} m)")
+        print(f"    goal (basket) pos  : {np.round(_fg, 3)}")
+        print(f"    object→goal  dist  : {np.linalg.norm(_fobj - _fg):.3f} m   "
+              f"(xy {np.linalg.norm(_fobj[:2] - _fg[:2]):.3f}, z {_fobj[2] - _fg[2]:+.3f})")
+        print(f"    EE final      pos  : {np.round(_fee, 3)}")
+        if obstacles:
+            print(f"    obstacle      pos  : {np.round(np.asarray(obstacles[0].pos), 3)}  "
+                  f"r_safe={getattr(obstacles[0], 'safety_radius', '?')}  "
+                  f"EE→obs {np.linalg.norm(_fee - np.asarray(obstacles[0].pos)):.3f} m")
+        print("  ─────────────────────────────────────────────────────────")
+
     # Attach each query's executed shield-corrected actions to its trace (Exp 005 BC target).
     if record_policy_trace and _shielded_bufs:
         for _q, _buf in zip(metrics.policy_trace, _shielded_bufs):
