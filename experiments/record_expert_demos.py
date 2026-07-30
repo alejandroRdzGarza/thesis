@@ -25,7 +25,11 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", default="pi05_libero_cbf")
-    ap.add_argument("--checkpoint", required=True, help="policy checkpoint (base or a round ckpt)")
+    ap.add_argument("--checkpoint", default=None, help="policy checkpoint (base or a round ckpt); "
+                    "not needed with --classical")
+    ap.add_argument("--classical", action="store_true",
+                    help="use the scripted classical pick-place controller (no VLA) as the action "
+                         "source — the candidate optimal-safe EXPERT. Keep the CBF on (default).")
     ap.add_argument("--suite", default="safelibero_object")
     ap.add_argument("--level", default="II", choices=["I", "II"])
     ap.add_argument("--task", type=int, default=0)
@@ -41,37 +45,48 @@ def main():
     ap.add_argument("--sde-type", default="cps", choices=["cps", "sde"])
     args = ap.parse_args()
 
-    from openpi.policies.policy_logprob import PolicyWithLogprob
-    from openpi.training import config as _config
-
     from experiments.libero_runner import make_libero_env, run_libero_trial
-    from experiments.load_policy import create_policy_partial
-    from experiments.rl_rollout_local import build_policy_fn
 
-    print(f"Loading policy: {args.checkpoint}", flush=True)
-    train_cfg = _config.get_config(args.config)
-    policy = create_policy_partial(train_cfg, args.checkpoint)
-    pol_lp = PolicyWithLogprob(policy, num_steps=args.num_steps, noise_level=args.noise_level,
-                               sde_type=args.sde_type, seed=0)
-    policy_fn = build_policy_fn(pol_lp)
+    policy_fn = None
+    controller = None
+    if args.classical:
+        from experiments.classical_expert import PickPlaceController
+        controller = PickPlaceController()
+        tag = "classical" + ("_nocbf" if args.no_cbf else "_cbf")
+        print("Using scripted classical pick-place controller (no VLA)", flush=True)
+    else:
+        if not args.checkpoint:
+            raise SystemExit("--checkpoint is required unless --classical is set")
+        from openpi.policies.policy_logprob import PolicyWithLogprob
+        from openpi.training import config as _config
+        from experiments.load_policy import create_policy_partial
+        from experiments.rl_rollout_local import build_policy_fn
+        print(f"Loading policy: {args.checkpoint}", flush=True)
+        train_cfg = _config.get_config(args.config)
+        policy = create_policy_partial(train_cfg, args.checkpoint)
+        pol_lp = PolicyWithLogprob(policy, num_steps=args.num_steps, noise_level=args.noise_level,
+                                   sde_type=args.sde_type, seed=0)
+        policy_fn = build_policy_fn(pol_lp)
+        tag = "nocbf" if args.no_cbf else "cbf"
 
     env, lang, init_states = make_libero_env(
         task_suite=args.suite, task_idx=args.task, safety_level=args.level, horizon=args.horizon)
 
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    tag = "nocbf" if args.no_cbf else "cbf"
     print(f"\nRecording {len(args.episodes)} demos ({tag}) → {out}/\n", flush=True)
 
     results = []
     for ep in args.episodes:
         vid = str(out / f"{args.suite}_L{args.level}_t{args.task}_ep{ep}_{tag}.mp4")
+        if controller is not None:
+            controller.reset()
         m = run_libero_trial(
             env=env, episode_idx=ep, instruction=lang, initial_states=init_states,
             obstacles=[], goal_pos=None, auto_goal=True, use_geo_success=False,
             use_cbf=not args.no_cbf, vla="pi05", auto_detect_obstacle=True, aegis_faithful=True,
             replan_steps=args.replan, horizon=args.horizon,
-            policy_fn=policy_fn, record_policy_trace=False,
+            policy_fn=policy_fn, record_policy_trace=False, controller=controller,
             scene_name=f"{args.suite}_L{args.level}_t{args.task}",
             save_video=vid,
         )

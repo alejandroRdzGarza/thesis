@@ -1173,6 +1173,7 @@ def run_libero_trial(
     # are untouched — only the action SOURCE changes.
     policy_fn=None,
     record_policy_trace: bool = False,
+    controller=None,
 ) -> MetricsTracker:
     """Run one LIBERO episode using OpenVLA + optional Cartesian CBF.
 
@@ -1311,6 +1312,21 @@ def run_libero_trial(
         else:
             print("  [warn] Could not resolve goal from BDDL — geo-success fallback disabled")
 
+    # ── Classical scripted expert: resolve pick-and-place context once ─────────
+    # When a `controller` is supplied it replaces the VLA as the action source, driven by
+    # privileged sim poses (object + goal) to produce optimal safe demos. The CBF still filters.
+    _pp_ctx = None
+    if controller is not None:
+        from experiments.classical_expert import resolve_pick_and_place
+        _pp_ctx = resolve_pick_and_place(env, obs)
+        if _pp_ctx is None:
+            raise RuntimeError("classical controller: could not resolve pick-and-place target "
+                               "from the BDDL goal predicate")
+        _pp_ctx["table_z"] = float(_pp_ctx["obj_pos"][2])
+        controller.reset()
+        print(f"  [classical] pick '{_pp_ctx['obj_key'].replace('_pos','')}' "
+              f"@ {np.round(_pp_ctx['obj_pos'],3)} → goal {np.round(_pp_ctx['goal_pos'],3)}")
+
     # ── Safety-conditioned prompt ─────────────────────────────────────────────
     # Replace the bare task instruction with one that names the obstacle and its
     # spatial position relative to the robot, so π0.5 can plan around it.
@@ -1406,7 +1422,20 @@ def run_libero_trial(
             if not action_queue:
                 try:
                     _t0 = _time.perf_counter()
-                    if policy_fn is not None:
+                    if controller is not None:
+                        # Classical scripted expert: one action per step (queue length 1 → the
+                        # controller is re-queried every control step for closed-loop behaviour).
+                        _ee_now = np.array(obs["robot0_eef_pos"], dtype=float)
+                        _obj_now = np.array(obs.get(_pp_ctx["obj_key"], _pp_ctx["obj_pos"]),
+                                            dtype=float)
+                        _nominal, _cphase = controller.act(
+                            _ee_now, _obj_now, _pp_ctx["goal_pos"], table_z=_pp_ctx["table_z"])
+                        action_queue = [_nominal.copy()]
+                        vla_cnt += 1
+                        if vla_cnt % 10 == 1:
+                            print(f"  [{t:03d}] [classical] phase={_cphase}  "
+                                  f"EE=[{_ee_now[0]:.3f},{_ee_now[1]:.3f},{_ee_now[2]:.3f}]")
+                    elif policy_fn is not None:
                         # Co-located in-process policy (Option B): returns env-ready
                         # 7-D actions + the flow-SDE QueryTrace for this chunk.
                         raw_chunk, _qtrace = policy_fn(
@@ -1441,24 +1470,25 @@ def run_libero_trial(
                                                          url=_ovla_url,
                                                          obstacle_feat=_obs_feat)
                         action_queue = [_post_process_vla(a) for a in raw_chunk]
-                    vla_ms = (_time.perf_counter() - _t0) * 1000
-                    vla_raw      = raw_chunk[0].copy()
-                    vla_cnt     += 1
-                    ee_now = np.array(obs["robot0_eef_pos"])
-                    grip_str = "CLOSE" if action_queue[0][6] > 0 else "open"
-                    # CBF margin from previous step (actual constraint distance)
-                    cbf_margin_str = (f"  cbf_margin={_prev_min_d:.3f}m"
-                                      if _prev_min_d < float("inf") else "")
-                    # Nearest scene object (for target tracking)
-                    obj_dist_str = ""
-                    if _obj_pos_keys:
-                        dists = {k: np.linalg.norm(np.array(obs[k]) - ee_now)
-                                 for k in _obj_pos_keys if k in obs}
-                        near_k = min(dists, key=dists.get)
-                        obj_dist_str = f"  nearest={near_k.replace('_pos','')}({dists[near_k]:.3f}m)"
-                    print(f"  [{t:03d}] VLA #{vla_cnt}  grip={grip_str}"
-                          f"  EE=[{ee_now[0]:.3f},{ee_now[1]:.3f},{ee_now[2]:.3f}]"
-                          f"{cbf_margin_str}{obj_dist_str}  ({vla_ms:.0f}ms)")
+                    if controller is None:      # VLA-only logging (raw_chunk/vla_raw not set for controller)
+                        vla_ms = (_time.perf_counter() - _t0) * 1000
+                        vla_raw      = raw_chunk[0].copy()
+                        vla_cnt     += 1
+                        ee_now = np.array(obs["robot0_eef_pos"])
+                        grip_str = "CLOSE" if action_queue[0][6] > 0 else "open"
+                        # CBF margin from previous step (actual constraint distance)
+                        cbf_margin_str = (f"  cbf_margin={_prev_min_d:.3f}m"
+                                          if _prev_min_d < float("inf") else "")
+                        # Nearest scene object (for target tracking)
+                        obj_dist_str = ""
+                        if _obj_pos_keys:
+                            dists = {k: np.linalg.norm(np.array(obs[k]) - ee_now)
+                                     for k in _obj_pos_keys if k in obs}
+                            near_k = min(dists, key=dists.get)
+                            obj_dist_str = f"  nearest={near_k.replace('_pos','')}({dists[near_k]:.3f}m)"
+                        print(f"  [{t:03d}] VLA #{vla_cnt}  grip={grip_str}"
+                              f"  EE=[{ee_now[0]:.3f},{ee_now[1]:.3f},{ee_now[2]:.3f}]"
+                              f"{cbf_margin_str}{obj_dist_str}  ({vla_ms:.0f}ms)")
                 except Exception as e:
                     print(f"  [{t:03d}] VLA query error (holding last action): {e}")
                     action_queue = [_current_action.copy()]
