@@ -53,6 +53,93 @@ _GRIP_OPEN, _GRIP_CLOSE = -1.0, 1.0
 
 
 @dataclass
+class MPCConfig:
+    """Receding-horizon QP that curves the EE around the obstacle (anticipatory, unlike a
+    reactive CBF filter which just stalls at the boundary)."""
+    horizon: int = 20
+    u_max: float = 1.0          # max per-step action (OSC units, [-1,1])
+    step_scale: float = 0.05    # metres moved per unit action (OSC output_max) — MPC plant scale
+    w_u: float = 0.05           # effort weight
+    w_smooth: float = 0.15      # smoothness weight (curved, not jerky, paths)
+    activate_margin: float = 0.06   # enforce keep-out only when the straight path comes this
+    #                                 close to the obstacle safety sphere; else go straight
+    sqp_iters: int = 3          # re-linearize the keep-out around the solution this many times
+    kp_fallback: float = 20.0   # P-control gain used when the path is clear / the QP fails
+
+
+def _keepout_normal(ref_k, c, lateral):
+    """Half-space normal for linearizing ‖P−c‖ ≥ r at ref_k; lateral when ref_k ≈ c."""
+    d = ref_k - c
+    nd = float(np.linalg.norm(d))
+    return lateral if nd < 1e-3 else d / nd
+
+
+def mpc_safe_delta(p, target, obstacle, cfg: MPCConfig) -> np.ndarray:
+    """First EE delta of an optimal horizon path to `target` that stays outside the obstacle
+    safety sphere. Receding-horizon (called every step). Anticipatory: seeds a bent path through
+    a via-point beside the obstacle, then SQP-refines the linearized keep-out — so it curves
+    AROUND instead of stalling at the boundary like a reactive filter. Falls back to P-control
+    when the path is clear or the QP fails (the reactive CBF downstream is the hard-safety net)."""
+    p = np.asarray(p, float); target = np.asarray(target, float)
+    c = np.asarray(obstacle.pos, float)
+    r = float(getattr(obstacle, "safety_radius", 0.10))
+    to = target - p
+    dist_to = float(np.linalg.norm(to))
+    if dist_to > 1e-9:
+        tt = float(np.clip(np.dot(c - p, to) / dist_to**2, 0.0, 1.0))
+        closest = p + tt * to
+    else:
+        tt, closest = 0.0, p.copy()
+    # Path already clear of the obstacle → straight P-control, no QP.
+    if np.linalg.norm(closest - c) > r + cfg.activate_margin:
+        return np.clip(cfg.kp_fallback * (target - p), -1.0, 1.0)
+
+    import cvxpy as cp
+    N = cfg.horizon
+    path_dir = to / (dist_to + 1e-9)
+    lateral = np.cross(path_dir, np.array([0.0, 0.0, 1.0]))
+    ln = np.linalg.norm(lateral)
+    lateral = lateral / ln if ln > 1e-6 else np.array([0.0, 1.0, 0.0])
+    # Seed a BENT reference: p → via (beside the obstacle) → target, so the first linearization
+    # already has lateral normals (a straight ref through the centre is degenerate).
+    via = closest + lateral * (r + cfg.activate_margin)
+
+    def _seed(s):
+        if tt < 1e-6:
+            return p + (target - p) * s
+        return p + (via - p) * (s / tt) if s <= tt else via + (target - via) * ((s - tt) / (1 - tt))
+
+    ref = np.array([_seed((k + 1) / N) for k in range(N)])
+
+    first_u = None
+    for _ in range(cfg.sqp_iters):
+        u = cp.Variable((N, 3))
+        P, acc = [], p
+        for k in range(N):
+            acc = acc + cfg.step_scale * u[k]      # real plant scale (OSC action → metres)
+            P.append(acc)
+        cost, cons = 0, []
+        for k in range(N):
+            cost += cp.sum_squares(P[k] - target) + cfg.w_u * cp.sum_squares(u[k])
+            if k > 0:
+                cost += cfg.w_smooth * cp.sum_squares(u[k] - u[k - 1])
+            cons.append(cp.norm(u[k], "inf") <= cfg.u_max)
+            n = _keepout_normal(ref[k], c, lateral)
+            cons.append(n @ (P[k] - c) >= r)
+        try:
+            cp.Problem(cp.Minimize(cost), cons).solve(solver=cp.OSQP, warm_start=True)
+        except Exception:
+            break
+        if u.value is None or not np.all(np.isfinite(u.value)):
+            break
+        ref = np.array([p + cfg.step_scale * np.sum(u.value[: k + 1], axis=0)
+                        for k in range(N)])        # re-linearize around the executed-scale path
+        first_u = np.clip(np.asarray(u.value[0]).ravel(), -1.0, 1.0)
+
+    return first_u if first_u is not None else np.clip(cfg.kp_fallback * (target - p), -1.0, 1.0)
+
+
+@dataclass
 class ControllerConfig:
     kp: float = 20.0            # P-gain; delta = clip(kp·error, ±1). ~1/output_max (OSC ~0.05 m/step).
     pos_tol: float = 0.02       # m, waypoint-reached tolerance
@@ -73,10 +160,13 @@ class ControllerConfig:
 class PickPlaceController:
     """Phase state machine → 7-D OSC_POSE nominal action. Caller adds CBF safety."""
     cfg: ControllerConfig = field(default_factory=ControllerConfig)
+    use_mpc: bool = True
+    mpc_cfg: MPCConfig = field(default_factory=MPCConfig)
     phase: str = "APPROACH"
     _timer: int = 0
     _stall: int = 0
     _last_z: float | None = None
+    _obstacle: object = None
 
     PHASES = ("APPROACH", "DESCEND", "GRASP", "LIFT", "TRANSPORT", "PLACE", "RELEASE", "DONE")
 
@@ -102,13 +192,22 @@ class PickPlaceController:
         return self._stall >= self.cfg.stall_patience
 
     def _goto(self, ee_pos, target, grip) -> np.ndarray:
-        """P-control EE delta toward `target` (world frame), zero rotation, given gripper cmd."""
-        delta = np.clip(self.cfg.kp * (np.asarray(target) - np.asarray(ee_pos)), -1.0, 1.0)
-        return np.array([delta[0], delta[1], delta[2], 0.0, 0.0, 0.0, grip], dtype=np.float64)
+        """EE delta toward `target` (world frame), zero rotation, given gripper cmd.
 
-    def act(self, ee_pos, obj_pos, goal_pos, *, table_z: float | None = None) -> tuple[np.ndarray, str]:
-        """One control step. `obj_pos` is the live object position (moves once grasped).
-        Returns (action7, phase). Phase 'DONE' means the task should be complete."""
+        Uses MPC-CBF (curves around the obstacle, anticipatory) when an obstacle is known and
+        use_mpc is set; otherwise plain P-control. The runner's reactive CBF is still applied
+        downstream as the hard-safety backstop."""
+        if self.use_mpc and self._obstacle is not None:
+            u = mpc_safe_delta(ee_pos, target, self._obstacle, self.mpc_cfg)
+        else:
+            u = np.clip(self.cfg.kp * (np.asarray(target) - np.asarray(ee_pos)), -1.0, 1.0)
+        return np.array([u[0], u[1], u[2], 0.0, 0.0, 0.0, grip], dtype=np.float64)
+
+    def act(self, ee_pos, obj_pos, goal_pos, *, obstacle=None,
+            table_z: float | None = None) -> tuple[np.ndarray, str]:
+        """One control step. `obj_pos` is the live object position (moves once grasped);
+        `obstacle` (ObstacleConfig) enables MPC-CBF avoidance. Returns (action7, phase)."""
+        self._obstacle = obstacle
         c = self.cfg
         ee = np.asarray(ee_pos, dtype=float)
         obj = np.asarray(obj_pos, dtype=float)

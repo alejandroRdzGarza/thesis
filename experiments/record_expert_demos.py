@@ -30,6 +30,9 @@ def main():
     ap.add_argument("--classical", action="store_true",
                     help="use the scripted classical pick-place controller (no VLA) as the action "
                          "source — the candidate optimal-safe EXPERT. Keep the CBF on (default).")
+    ap.add_argument("--no-mpc", action="store_true",
+                    help="classical controller only: disable MPC-CBF avoidance (reactive P-control "
+                         "+ shield) — for A/B comparison against the anticipatory MPC path")
     ap.add_argument("--suite", default="safelibero_object")
     ap.add_argument("--level", default="II", choices=["I", "II"])
     ap.add_argument("--task", type=int, default=0)
@@ -51,9 +54,10 @@ def main():
     controller = None
     if args.classical:
         from experiments.classical_expert import PickPlaceController
-        controller = PickPlaceController()
-        tag = "classical" + ("_nocbf" if args.no_cbf else "_cbf")
-        print("Using scripted classical pick-place controller (no VLA)", flush=True)
+        controller = PickPlaceController(use_mpc=not args.no_mpc)
+        tag = "classical" + ("_reactive" if args.no_mpc else "_mpc") + ("_nocbf" if args.no_cbf else "_cbf")
+        print(f"Using scripted classical controller (no VLA)  "
+              f"[{'MPC-CBF' if not args.no_mpc else 'reactive'}]", flush=True)
     else:
         if not args.checkpoint:
             raise SystemExit("--checkpoint is required unless --classical is set")

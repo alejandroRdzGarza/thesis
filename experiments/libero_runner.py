@@ -1430,8 +1430,10 @@ def run_libero_trial(
                         _ee_now = np.array(obs["robot0_eef_pos"], dtype=float)
                         _obj_now = np.array(obs.get(_pp_ctx["obj_key"], _pp_ctx["obj_pos"]),
                                             dtype=float)
+                        _active_obs = obstacles[0] if obstacles else None
                         _nominal, _cphase = controller.act(
-                            _ee_now, _obj_now, _pp_ctx["goal_pos"], table_z=_pp_ctx["table_z"])
+                            _ee_now, _obj_now, _pp_ctx["goal_pos"],
+                            obstacle=_active_obs, table_z=_pp_ctx["table_z"])
                         action_queue = [_nominal.copy()]
                         vla_cnt += 1
                         if vla_cnt % 10 == 1:
