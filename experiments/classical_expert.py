@@ -152,6 +152,8 @@ class ControllerConfig:
     place_dz: float = 0.02      # extra m above the goal for the object CENTRE when releasing
     grasp_hold: int = 8         # control steps to hold while the gripper closes
     release_hold: int = 5       # control steps to hold open after releasing
+    place_xy_tol: float = 0.035 # looser XY tolerance to release over the basket (vs tight transit tol)
+    place_timeout: int = 50     # steps: always release by now (carton drops into the basket from above)
     # Descent is "until contact": transition when the EE stops making downward progress
     # (bottomed out on the object/surface), which is robust to unknown object heights.
     stall_eps: float = 0.0015   # m of downward progress per step below which we count a stall
@@ -252,8 +254,12 @@ class PickPlaceController:
         if self.phase == "PLACE":                          # lower the object CENTRE into the basket
             off = self.grasp_offset if self.grasp_offset is not None else 0.0
             tgt = np.array([goal[0], goal[1], goal[2] + c.place_dz + off])   # EE raised so object_z ~ goal_z+place_dz
-            centred = np.linalg.norm(ee[:2] - goal[:2]) < c.xy_tol
-            if centred and (np.linalg.norm(ee - tgt) < c.pos_tol or self._contact(ee[2])):
+            self._timer += 1
+            centred = np.linalg.norm(ee[:2] - goal[:2]) < c.place_xy_tol
+            reached = np.linalg.norm(ee - tgt) < c.pos_tol or self._contact(ee[2])
+            # Release when placed, OR by the timeout — dropping over the basket still lands it
+            # (ep3 succeeded with the carton 6 cm above goal). Never hover forever.
+            if (centred and reached) or self._timer >= c.place_timeout:
                 self._enter("RELEASE")
             return self._goto(ee, tgt, _GRIP_CLOSE), self.phase
 
