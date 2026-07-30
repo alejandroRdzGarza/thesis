@@ -40,6 +40,36 @@ compute_loss) to validate the transform path before a full run.
 
 ---
 
+## Exp 006 — Classical MPC-CBF expert (`sweep_classical`)
+**Date:** 2026-07-30   ·   **Status:** ✅ strong on `object`; needs a place-on-surface mode for spatial/goal
+
+**Why:** Exp 005 "expert" was the co-degrading student+shield (shielded_success spiralled
+0.78→0.28) — no fixed anchor (supervisor's diagnosis). Replaced with a FIXED classical expert:
+scripted pick-place state machine (privileged BDDL object+goal poses) + **MPC-CBF** anticipatory
+obstacle avoidance (receding-horizon QP, curves around; reactive CBF alone deadlocked at the
+boundary) + the reactive CBF as the hard-safety backstop. No VLA → fast, doesn't degrade.
+
+**Full sweep (3 suites × 2 levels × 4 tasks × 4 episodes = 96 rollouts, classical only):**
+
+| suite | success | collision | n |
+|---|---|---|---|
+| **safelibero_object** | **94%** | 3% | 32 |
+| safelibero_goal | 16% | 9% | 32 |
+| safelibero_spatial | 0% | 6% | 32 |
+| overall | 36.5% | 6.2% | 96 |
+
+**Read.** The expert **generalizes across the object suite** (4 objects × 2 levels, ~94%, ~0
+collision) — a fixed high-quality safe teacher, exactly what the pivot needed. spatial/goal fail
+because they're a different task type ("place bowl ON a surface", elevated starts): the carry-high-
+then-drop placement is wrong for setting a bowl down, and bowl grasp needs different heights. Not
+an approach flaw — a per-suite controller mode (place-on-surface + bowl grasp).
+
+**Next:** distill the VLA on the `object`-suite classical demos (BC, `--success-only`) → the core
+sanity check: does the VLA overfit → internalize safety from a *good, fixed* expert (unlike the
+degrading Exp 005 demos)? Then decide whether to add the place-on-surface mode for full-benchmark.
+
+---
+
 ## Exp 005b — DAgger + success filter (`results_dagger_succ`)
 **Date:** 2026-07-30   ·   **Status:** ✅ confirmed positive (single task); early-stop required
 
