@@ -155,6 +155,8 @@ class ControllerConfig:
     place_dz: float = 0.02      # extra m above the goal for the object CENTRE when releasing
     grasp_hold: int = 8         # control steps to hold while the gripper closes
     release_hold: int = 5       # control steps to hold open after releasing
+    descend_xy_lock: float = 0.012  # only lower z once XY error is under this (keeps the grip centred)
+    descend_z_cap: float = 0.30 # cap the per-step descent command so OSC coupling doesn't drift XY
     place_xy_tol: float = 0.035 # looser XY tolerance to release over the basket (vs tight transit tol)
     place_timeout: int = 50     # steps: always release by now (carton drops into the basket from above)
     setdown_reach: float = 0.15 # 'on' mode: how far below the goal surface to drive — physical
@@ -203,6 +205,18 @@ class PickPlaceController:
         self._last_z = ee_z
         return self._stall >= self.cfg.stall_patience
 
+    def _careful_descend(self, ee_pos, target, grip) -> np.ndarray:
+        """Lower onto a target with XY LOCKED: full-gain XY correction, but only descend once
+        centred and at a capped speed — so OSC kinematic coupling can't drift the grip off the
+        object during a fast vertical move (the spatial/goal grasp-miss failure)."""
+        ee = np.asarray(ee_pos, float); target = np.asarray(target, float)
+        dxy = np.clip(self.cfg.kp * (target[:2] - ee[:2]), -1.0, 1.0)
+        if np.linalg.norm(ee[:2] - target[:2]) < self.cfg.descend_xy_lock:
+            dz = float(np.clip(self.cfg.kp * (target[2] - ee[2]), -self.cfg.descend_z_cap, 1.0))
+        else:
+            dz = 0.0                                  # off-centre → re-centre before lowering
+        return np.array([dxy[0], dxy[1], dz, 0.0, 0.0, 0.0, grip], dtype=np.float64)
+
     def _goto(self, ee_pos, target, grip) -> np.ndarray:
         """EE delta toward `target` (world frame), zero rotation, given gripper cmd.
 
@@ -232,12 +246,13 @@ class PickPlaceController:
                 self._enter("DESCEND")
             return self._goto(ee, tgt, _GRIP_OPEN), self.phase
 
-        if self.phase == "DESCEND":                       # lower onto the object until contact
+        if self.phase == "DESCEND":                       # lower onto the object (XY-locked) until contact
             tgt = np.array([obj[0], obj[1], obj[2] + c.grasp_dz])
-            if np.linalg.norm(ee - tgt) < c.pos_tol or self._contact(ee[2]):
+            centred = np.linalg.norm(ee[:2] - obj[:2]) < c.xy_tol
+            if centred and (np.linalg.norm(ee - tgt) < c.pos_tol or self._contact(ee[2])):
                 self.grasp_offset = float(ee[2] - obj[2])   # how far above the object centre we grip
                 self._enter("GRASP")
-            return self._goto(ee, tgt, _GRIP_OPEN), self.phase
+            return self._careful_descend(ee, tgt, _GRIP_OPEN), self.phase
 
         if self.phase == "GRASP":                         # hold + close the gripper
             self._timer += 1
