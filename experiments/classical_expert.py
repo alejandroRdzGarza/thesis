@@ -58,11 +58,15 @@ class ControllerConfig:
     pos_tol: float = 0.02       # m, waypoint-reached tolerance
     xy_tol: float = 0.015       # m, tighter XY alignment before descending / placing
     approach_h: float = 0.12    # m above the object/goal to hover before descending
-    grasp_dz: float = 0.005     # m above the object centre to close the gripper
+    grasp_dz: float = 0.005     # m above the object centre to aim for (descent is contact-based)
     lift_h: float = 0.18        # m to lift the grasped object before transporting
     place_dz: float = 0.04      # m above the goal to release
     grasp_hold: int = 8         # control steps to hold while the gripper closes
     release_hold: int = 5       # control steps to hold open after releasing
+    # Descent is "until contact": transition when the EE stops making downward progress
+    # (bottomed out on the object/surface), which is robust to unknown object heights.
+    stall_eps: float = 0.0015   # m of downward progress per step below which we count a stall
+    stall_patience: int = 12    # consecutive stalled steps → treat as contact / reached
 
 
 @dataclass
@@ -71,12 +75,31 @@ class PickPlaceController:
     cfg: ControllerConfig = field(default_factory=ControllerConfig)
     phase: str = "APPROACH"
     _timer: int = 0
+    _stall: int = 0
+    _last_z: float | None = None
 
     PHASES = ("APPROACH", "DESCEND", "GRASP", "LIFT", "TRANSPORT", "PLACE", "RELEASE", "DONE")
 
     def reset(self):
         self.phase = "APPROACH"
         self._timer = 0
+        self._stall = 0
+        self._last_z = None
+
+    def _enter(self, phase: str):
+        self.phase = phase
+        self._timer = 0
+        self._stall = 0
+        self._last_z = None
+
+    def _contact(self, ee_z: float) -> bool:
+        """True once the EE stops descending (bottomed out) for `stall_patience` steps."""
+        if self._last_z is not None and (self._last_z - ee_z) < self.cfg.stall_eps:
+            self._stall += 1
+        else:
+            self._stall = 0
+        self._last_z = ee_z
+        return self._stall >= self.cfg.stall_patience
 
     def _goto(self, ee_pos, target, grip) -> np.ndarray:
         """P-control EE delta toward `target` (world frame), zero rotation, given gripper cmd."""
@@ -95,43 +118,43 @@ class PickPlaceController:
         if self.phase == "APPROACH":                      # hover above the object, gripper open
             tgt = np.array([obj[0], obj[1], obj[2] + c.approach_h])
             if np.linalg.norm(ee[:2] - obj[:2]) < c.xy_tol and abs(ee[2] - tgt[2]) < c.pos_tol:
-                self.phase = "DESCEND"
+                self._enter("DESCEND")
             return self._goto(ee, tgt, _GRIP_OPEN), self.phase
 
-        if self.phase == "DESCEND":                       # lower onto the object, still open
+        if self.phase == "DESCEND":                       # lower onto the object until contact
             tgt = np.array([obj[0], obj[1], obj[2] + c.grasp_dz])
-            if np.linalg.norm(ee - tgt) < c.pos_tol:
-                self.phase, self._timer = "GRASP", 0
+            if np.linalg.norm(ee - tgt) < c.pos_tol or self._contact(ee[2]):
+                self._enter("GRASP")
             return self._goto(ee, tgt, _GRIP_OPEN), self.phase
 
         if self.phase == "GRASP":                         # hold + close the gripper
             self._timer += 1
             if self._timer >= c.grasp_hold:
-                self.phase = "LIFT"
+                self._enter("LIFT")
             return self._goto(ee, ee, _GRIP_CLOSE), self.phase
 
         if self.phase == "LIFT":                           # raise the grasped object
             tgt = np.array([ee[0], ee[1], base_z + c.lift_h])
             if ee[2] >= base_z + c.lift_h - c.pos_tol:
-                self.phase = "TRANSPORT"
+                self._enter("TRANSPORT")
             return self._goto(ee, tgt, _GRIP_CLOSE), self.phase
 
         if self.phase == "TRANSPORT":                      # carry to above the goal (obstacle-avoiding transit)
             tgt = np.array([goal[0], goal[1], goal[2] + c.approach_h])
             if np.linalg.norm(ee[:2] - goal[:2]) < c.xy_tol and abs(ee[2] - tgt[2]) < c.pos_tol:
-                self.phase = "PLACE"
+                self._enter("PLACE")
             return self._goto(ee, tgt, _GRIP_CLOSE), self.phase
 
-        if self.phase == "PLACE":                          # lower to the goal surface
+        if self.phase == "PLACE":                          # lower to the goal surface until contact
             tgt = np.array([goal[0], goal[1], goal[2] + c.place_dz])
-            if np.linalg.norm(ee - tgt) < c.pos_tol:
-                self.phase, self._timer = "RELEASE", 0
+            if np.linalg.norm(ee - tgt) < c.pos_tol or self._contact(ee[2]):
+                self._enter("RELEASE")
             return self._goto(ee, tgt, _GRIP_CLOSE), self.phase
 
         if self.phase == "RELEASE":                        # open + hold
             self._timer += 1
             if self._timer >= c.release_hold:
-                self.phase = "DONE"
+                self._enter("DONE")
             return self._goto(ee, ee, _GRIP_OPEN), self.phase
 
         # DONE — hold position, gripper open.
