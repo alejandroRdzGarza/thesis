@@ -71,13 +71,16 @@ class _Obs:
 class MPCConfig:
     """Receding-horizon QP that curves the EE around the obstacle (anticipatory, unlike a
     reactive CBF filter which just stalls at the boundary)."""
-    horizon: int = 20
+    horizon: int = 25
     u_max: float = 1.0          # max per-step action (OSC units, [-1,1])
     step_scale: float = 0.05    # metres moved per unit action (OSC output_max) — MPC plant scale
     w_u: float = 0.05           # effort weight
-    w_smooth: float = 0.15      # smoothness weight (curved, not jerky, paths)
-    activate_margin: float = 0.06   # enforce keep-out only when the straight path comes this
-    #                                 close to the obstacle safety sphere; else go straight
+    w_smooth: float = 0.30      # smoothness weight (curved, not jerky, paths)
+    radius_buffer: float = 0.03 # keep this much MORE clearance than the reactive CBF's radius, so
+    #                             the MPC anticipates and the shield rarely fires (smooth, not lurchy).
+    #                             Small — routing too wide swings the arm into other (unmodelled) objects.
+    activate_margin: float = 0.09   # engage the keep-out early (anticipatory) when the straight
+    #                                 path comes this close to the (buffered) obstacle sphere
     sqp_iters: int = 3          # re-linearize the keep-out around the solution this many times
     kp_fallback: float = 20.0   # P-control gain used when the path is clear / the QP fails
 
@@ -97,7 +100,9 @@ def mpc_safe_delta(p, target, obstacle, cfg: MPCConfig) -> np.ndarray:
     when the path is clear or the QP fails (the reactive CBF downstream is the hard-safety net)."""
     p = np.asarray(p, float); target = np.asarray(target, float)
     c = np.asarray(obstacle.pos, float)
-    r = float(getattr(obstacle, "safety_radius", 0.10))
+    # Keep MORE clearance than the reactive CBF's radius so the MPC does the avoidance and the
+    # shield rarely has to correct → smooth anticipatory paths instead of lurchy over-corrections.
+    r = float(getattr(obstacle, "safety_radius", 0.10)) + cfg.radius_buffer
     to = target - p
     dist_to = float(np.linalg.norm(to))
     if dist_to > 1e-9:
