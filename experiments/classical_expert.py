@@ -74,8 +74,8 @@ class MPCConfig:
     horizon: int = 25
     u_max: float = 1.0          # max per-step action (OSC units, [-1,1])
     step_scale: float = 0.05    # metres moved per unit action (OSC output_max) — MPC plant scale
-    w_u: float = 0.05           # effort weight
-    w_smooth: float = 0.30      # smoothness weight (curved, not jerky, paths)
+    w_u: float = 0.015          # effort weight — small so the MPC commands near-max speed (not sluggish)
+    w_smooth: float = 0.22      # smoothness weight (curved, not jerky, paths)
     radius_buffer: float = 0.03 # keep this much MORE clearance than the reactive CBF's radius, so
     #                             the MPC anticipates and the shield rarely fires (smooth, not lurchy).
     #                             Small — routing too wide swings the arm into other (unmodelled) objects.
@@ -181,8 +181,10 @@ class ControllerConfig:
     place_dz: float = 0.02      # extra m above the goal for the object CENTRE when releasing
     grasp_hold: int = 8         # control steps to hold while the gripper closes
     release_hold: int = 5       # control steps to hold open after releasing
-    descend_xy_lock: float = 0.012  # only lower z once XY error is under this (keeps the grip centred)
-    descend_z_cap: float = 0.30 # cap the per-step descent command so OSC coupling doesn't drift XY
+    descend_xy_lock: float = 0.022  # only lower z once XY error is under this (keeps the grip centred);
+    #                                 not too tight or it keeps pausing the descent → crawls
+    descend_z_cap: float = 0.55 # cap the per-step descent command so OSC coupling doesn't drift XY
+    #                             (raised for speed — still capped enough to keep the grip centred)
     carry_margin: float = 0.04  # extra obstacle clearance while transiting with a held object (its
     #                             extent beyond the EE) — not during PLACE (goal may be near the obstacle)
     place_xy_tol: float = 0.035 # looser XY tolerance to release over the basket (vs tight transit tol)
