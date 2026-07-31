@@ -92,42 +92,49 @@ def _keepout_normal(ref_k, c, lateral):
     return lateral if nd < 1e-3 else d / nd
 
 
-def mpc_safe_delta(p, target, obstacle, cfg: MPCConfig) -> np.ndarray:
-    """First EE delta of an optimal horizon path to `target` that stays outside the obstacle
-    safety sphere. Receding-horizon (called every step). Anticipatory: seeds a bent path through
-    a via-point beside the obstacle, then SQP-refines the linearized keep-out — so it curves
-    AROUND instead of stalling at the boundary like a reactive filter. Falls back to P-control
-    when the path is clear or the QP fails (the reactive CBF downstream is the hard-safety net)."""
+def mpc_safe_delta(p, target, obstacles, cfg: MPCConfig) -> np.ndarray:
+    """First EE delta of an optimal horizon path to `target` that stays outside EVERY nearby
+    object's keep-out sphere (MULTI-obstacle). `obstacles` is a list of objects with .pos and
+    .safety_radius. Receding-horizon; anticipatory: seeds a bent path past the most-blocking
+    obstacle, then SQP-refines the linearized keep-out for all active obstacles at once — so the
+    arm curves smoothly through clutter instead of lurching (reactive CBF) or clipping an
+    unmodelled object. Falls back to P-control when the path is clear or the QP fails."""
     p = np.asarray(p, float); target = np.asarray(target, float)
-    c = np.asarray(obstacle.pos, float)
-    # Keep MORE clearance than the reactive CBF's radius so the MPC does the avoidance and the
-    # shield rarely has to correct → smooth anticipatory paths instead of lurchy over-corrections.
-    r = float(getattr(obstacle, "safety_radius", 0.10)) + cfg.radius_buffer
+    if not isinstance(obstacles, (list, tuple)):
+        obstacles = [obstacles]
     to = target - p
     dist_to = float(np.linalg.norm(to))
-    if dist_to > 1e-9:
-        tt = float(np.clip(np.dot(c - p, to) / dist_to**2, 0.0, 1.0))
-        closest = p + tt * to
-    else:
-        tt, closest = 0.0, p.copy()
-    # Path already clear of the obstacle → straight P-control, no QP.
-    if np.linalg.norm(closest - c) > r + cfg.activate_margin:
+    path_dir = to / (dist_to + 1e-9)
+
+    # Which obstacles the straight path comes near → the ones to constrain (keeps the QP small).
+    active = []          # (centre, radius, closest-approach distance)
+    for ob in obstacles:
+        if ob is None:
+            continue
+        c = np.asarray(ob.pos, float)
+        r = float(getattr(ob, "safety_radius", 0.05)) + cfg.radius_buffer
+        tt = float(np.clip(np.dot(c - p, to) / dist_to**2, 0.0, 1.0)) if dist_to > 1e-9 else 0.0
+        d = float(np.linalg.norm((p + tt * to) - c))
+        if d < r + cfg.activate_margin:
+            active.append((c, r, d))
+    if not active:
         return np.clip(cfg.kp_fallback * (target - p), -1.0, 1.0)
 
     import cvxpy as cp
     N = cfg.horizon
-    path_dir = to / (dist_to + 1e-9)
     lateral = np.cross(path_dir, np.array([0.0, 0.0, 1.0]))
     ln = np.linalg.norm(lateral)
     lateral = lateral / ln if ln > 1e-6 else np.array([0.0, 1.0, 0.0])
-    # Seed a BENT reference: p → via (beside the obstacle) → target, so the first linearization
-    # already has lateral normals (a straight ref through the centre is degenerate).
-    via = closest + lateral * (r + cfg.activate_margin)
+    # Seed a bent reference past the MOST-blocking (closest) obstacle so the first linearization
+    # already curves; SQP then refines around all active obstacles.
+    cb, rb, _ = min(active, key=lambda a: a[2])
+    ttb = float(np.clip(np.dot(cb - p, to) / (dist_to**2 + 1e-9), 0.0, 1.0))
+    via = (p + ttb * to) + lateral * (rb + cfg.activate_margin)
 
     def _seed(s):
-        if tt < 1e-6:
+        if ttb < 1e-6:
             return p + (target - p) * s
-        return p + (via - p) * (s / tt) if s <= tt else via + (target - via) * ((s - tt) / (1 - tt))
+        return p + (via - p) * (s / ttb) if s <= ttb else via + (target - via) * ((s - ttb) / (1 - ttb))
 
     ref = np.array([_seed((k + 1) / N) for k in range(N)])
 
@@ -144,8 +151,8 @@ def mpc_safe_delta(p, target, obstacle, cfg: MPCConfig) -> np.ndarray:
             if k > 0:
                 cost += cfg.w_smooth * cp.sum_squares(u[k] - u[k - 1])
             cons.append(cp.norm(u[k], "inf") <= cfg.u_max)
-            n = _keepout_normal(ref[k], c, lateral)
-            cons.append(n @ (P[k] - c) >= r)
+            for (c, r, _d) in active:                # keep clear of EVERY active obstacle
+                cons.append(_keepout_normal(ref[k], c, lateral) @ (P[k] - c) >= r)
         try:
             cp.Problem(cp.Minimize(cost), cons).solve(solver=cp.OSQP, warm_start=True)
         except Exception:
@@ -203,7 +210,7 @@ class PickPlaceController:
     _stall: int = 0
     _last_z: float | None = None
     _descending: bool = True
-    _obstacle: object = None
+    _obstacles: object = None    # list of nearby objects to avoid (multi-obstacle MPC)
 
     PHASES = ("APPROACH", "DESCEND", "GRASP", "LIFT", "TRANSPORT", "PLACE", "RELEASE", "DONE")
 
@@ -262,23 +269,30 @@ class PickPlaceController:
         Uses MPC-CBF (curves around the obstacle, anticipatory) when an obstacle is known and
         use_mpc is set; otherwise plain P-control. The runner's reactive CBF is still applied
         downstream as the hard-safety backstop."""
-        obs = self._obstacle
-        if obs is not None and self.phase in ("LIFT", "TRANSPORT"):
-            # Transiting with a held object → inflate the obstacle so the object (offset from the
-            # EE) clears it en route. NOT during PLACE — the goal itself may be near the obstacle.
-            obs = _Obs(np.asarray(obs.pos, float),
-                       float(getattr(obs, "safety_radius", 0.10)) + self.cfg.carry_margin)
-        if self.use_mpc and obs is not None:
-            u = mpc_safe_delta(ee_pos, target, obs, self.mpc_cfg)
+        obs_list = self._obstacles or []
+        if obs_list and self.phase in ("LIFT", "TRANSPORT"):
+            # Transiting with a held object → inflate every obstacle so the held object (offset
+            # from the EE) clears them en route. NOT during PLACE — the goal may be near an object.
+            obs_list = [_Obs(np.asarray(o.pos, float),
+                             float(getattr(o, "safety_radius", 0.05)) + self.cfg.carry_margin)
+                        for o in obs_list]
+        if self.use_mpc and obs_list:
+            u = mpc_safe_delta(ee_pos, target, obs_list, self.mpc_cfg)
         else:
             u = np.clip(self.cfg.kp * (np.asarray(target) - np.asarray(ee_pos)), -1.0, 1.0)
         return np.array([u[0], u[1], u[2], 0.0, 0.0, 0.0, grip], dtype=np.float64)
 
-    def act(self, ee_pos, obj_pos, goal_pos, *, obstacle=None,
+    def act(self, ee_pos, obj_pos, goal_pos, *, obstacle=None, obstacles=None,
             table_z: float | None = None) -> tuple[np.ndarray, str]:
         """One control step. `obj_pos` is the live object position (moves once grasped);
-        `obstacle` (ObstacleConfig) enables MPC-CBF avoidance. Returns (action7, phase)."""
-        self._obstacle = obstacle
+        `obstacles` (list of objects with .pos/.safety_radius) enables the multi-obstacle MPC.
+        `obstacle` (single) is accepted for back-compat. Returns (action7, phase)."""
+        if obstacles is not None:
+            self._obstacles = list(obstacles)
+        elif obstacle is not None:
+            self._obstacles = [obstacle]
+        else:
+            self._obstacles = []
         c = self.cfg
         ee = np.asarray(ee_pos, dtype=float)
         obj = np.asarray(obj_pos, dtype=float)

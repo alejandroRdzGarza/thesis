@@ -1330,9 +1330,26 @@ def run_libero_trial(
             controller.place_mode = _pp_ctx.get("place_mode", "in")
         if hasattr(controller, "grasp_mode"):
             controller.grasp_mode = _pp_ctx.get("grasp_mode", "top")
+        # Multi-obstacle avoid-list for the MPC: the detected safety obstacle(s) + nearby scene
+        # objects, EXCEPT the target object and the goal-surface object (we must reach those).
+        from experiments.classical_expert import _Obs as _MpcObs
+        _avoid = list(obstacles)                       # ObstacleConfig(s): have .pos + .safety_radius
+        _tgt_key = _pp_ctx["obj_key"]
+        _gp = np.asarray(_pp_ctx["goal_pos"], dtype=float)
+        for _k in _obj_pos_keys:
+            if _k == _tgt_key or _k not in obs:
+                continue
+            _pp = np.asarray(obs[_k][:3], dtype=float)
+            if np.linalg.norm(_pp - _gp) < 0.12:       # the goal-surface object (plate) — don't avoid
+                continue
+            if abs(_pp[0]) > 1.0 or abs(_pp[1]) > 1.0:  # off-table pruned obstacle — ignore
+                continue
+            _avoid.append(_MpcObs(_pp, 0.045))         # clutter object, modest keep-out radius
+        _pp_ctx["avoid"] = _avoid
         print(f"  [classical] pick '{_pp_ctx['obj_key'].replace('_pos','')}' "
               f"@ {np.round(_pp_ctx['obj_pos'],3)} → goal {np.round(_pp_ctx['goal_pos'],3)}  "
-              f"[grasp={_pp_ctx.get('grasp_mode','top')} place={_pp_ctx.get('place_mode','in')}]")
+              f"[grasp={_pp_ctx.get('grasp_mode','top')} place={_pp_ctx.get('place_mode','in')}]  "
+              f"avoid={len(_avoid)} objs")
 
     # ── Safety-conditioned prompt ─────────────────────────────────────────────
     # Replace the bare task instruction with one that names the obstacle and its
@@ -1435,10 +1452,9 @@ def run_libero_trial(
                         _ee_now = np.array(obs["robot0_eef_pos"], dtype=float)
                         _obj_now = np.array(obs.get(_pp_ctx["obj_key"], _pp_ctx["obj_pos"]),
                                             dtype=float)
-                        _active_obs = obstacles[0] if obstacles else None
                         _nominal, _cphase = controller.act(
                             _ee_now, _obj_now, _pp_ctx["goal_pos"],
-                            obstacle=_active_obs, table_z=_pp_ctx["table_z"])
+                            obstacles=_pp_ctx.get("avoid"), table_z=_pp_ctx["table_z"])
                         action_queue = [_nominal.copy()]
                         vla_cnt += 1
                         if vla_cnt % 10 == 1:
