@@ -57,6 +57,16 @@ def resolve_pick_and_place(env, obs: dict) -> dict | None:
 _GRIP_OPEN, _GRIP_CLOSE = -1.0, 1.0
 
 
+class _Obs:
+    """Lightweight obstacle for the MPC (pos + safety_radius), used to pass an INFLATED radius
+    while carrying an object — the MPC only protects the EE, but the held object extends beyond
+    it and would otherwise graze obstacles near the goal."""
+    __slots__ = ("pos", "safety_radius")
+    def __init__(self, pos, safety_radius):
+        self.pos = pos
+        self.safety_radius = safety_radius
+
+
 @dataclass
 class MPCConfig:
     """Receding-horizon QP that curves the EE around the obstacle (anticipatory, unlike a
@@ -161,10 +171,12 @@ class ControllerConfig:
     release_hold: int = 5       # control steps to hold open after releasing
     descend_xy_lock: float = 0.012  # only lower z once XY error is under this (keeps the grip centred)
     descend_z_cap: float = 0.30 # cap the per-step descent command so OSC coupling doesn't drift XY
+    carry_margin: float = 0.04  # extra obstacle clearance while transiting with a held object (its
+    #                             extent beyond the EE) — not during PLACE (goal may be near the obstacle)
     place_xy_tol: float = 0.035 # looser XY tolerance to release over the basket (vs tight transit tol)
     place_timeout: int = 50     # steps: always release by now (carton drops into the basket from above)
-    setdown_reach: float = 0.15 # 'on' mode: how far below the goal surface to drive — physical
-    #                             contact stops the object ON the surface (release on contact)
+    setdown_reach: float = 0.06 # 'on' mode: how far below the goal to aim — gentle, capped descent
+    #                             stops the object ON the surface on contact (bigger slammed the plate)
     # Descent is "until contact": transition when the EE stops making downward progress
     # (bottomed out on the object/surface), which is robust to unknown object heights.
     stall_eps: float = 0.0015   # m of downward progress per step below which we count a stall
@@ -185,6 +197,7 @@ class PickPlaceController:
     _timer: int = 0
     _stall: int = 0
     _last_z: float | None = None
+    _descending: bool = True
     _obstacle: object = None
 
     PHASES = ("APPROACH", "DESCEND", "GRASP", "LIFT", "TRANSPORT", "PLACE", "RELEASE", "DONE")
@@ -196,15 +209,23 @@ class PickPlaceController:
         self._timer = 0
         self._stall = 0
         self._last_z = None
+        self._descending = True
 
     def _enter(self, phase: str):
         self.phase = phase
         self._timer = 0
         self._stall = 0
         self._last_z = None
+        self._descending = True
 
     def _contact(self, ee_z: float) -> bool:
-        """True once the EE stops descending (bottomed out) for `stall_patience` steps."""
+        """True once the EE is COMMANDED down but stops moving (bottomed out) for `stall_patience`
+        steps. Skips steps where we intentionally paused the descent to re-centre (else the pause
+        false-triggers contact and grasps high)."""
+        if not self._descending:
+            self._stall = 0
+            self._last_z = ee_z
+            return False
         if self._last_z is not None and (self._last_z - ee_z) < self.cfg.stall_eps:
             self._stall += 1
         else:
@@ -215,13 +236,19 @@ class PickPlaceController:
     def _careful_descend(self, ee_pos, target, grip) -> np.ndarray:
         """Lower onto a target with XY LOCKED: full-gain XY correction, but only descend once
         centred and at a capped speed — so OSC kinematic coupling can't drift the grip off the
-        object during a fast vertical move (the spatial/goal grasp-miss failure)."""
+        object during a fast vertical move (the spatial/goal grasp-miss failure).
+
+        Sets `self._descending` so the caller's contact detector only counts a REAL physical
+        stall (commanded down but not moving), not our intentional re-centre pauses (which were
+        false-triggering an 11 cm-high grasp on the high-cabinet bowls)."""
         ee = np.asarray(ee_pos, float); target = np.asarray(target, float)
         dxy = np.clip(self.cfg.kp * (target[:2] - ee[:2]), -1.0, 1.0)
         if np.linalg.norm(ee[:2] - target[:2]) < self.cfg.descend_xy_lock:
             dz = float(np.clip(self.cfg.kp * (target[2] - ee[2]), -self.cfg.descend_z_cap, 1.0))
+            self._descending = True
         else:
             dz = 0.0                                  # off-centre → re-centre before lowering
+            self._descending = False
         return np.array([dxy[0], dxy[1], dz, 0.0, 0.0, 0.0, grip], dtype=np.float64)
 
     def _goto(self, ee_pos, target, grip) -> np.ndarray:
@@ -230,8 +257,14 @@ class PickPlaceController:
         Uses MPC-CBF (curves around the obstacle, anticipatory) when an obstacle is known and
         use_mpc is set; otherwise plain P-control. The runner's reactive CBF is still applied
         downstream as the hard-safety backstop."""
-        if self.use_mpc and self._obstacle is not None:
-            u = mpc_safe_delta(ee_pos, target, self._obstacle, self.mpc_cfg)
+        obs = self._obstacle
+        if obs is not None and self.phase in ("LIFT", "TRANSPORT"):
+            # Transiting with a held object → inflate the obstacle so the object (offset from the
+            # EE) clears it en route. NOT during PLACE — the goal itself may be near the obstacle.
+            obs = _Obs(np.asarray(obs.pos, float),
+                       float(getattr(obs, "safety_radius", 0.10)) + self.cfg.carry_margin)
+        if self.use_mpc and obs is not None:
+            u = mpc_safe_delta(ee_pos, target, obs, self.mpc_cfg)
         else:
             u = np.clip(self.cfg.kp * (np.asarray(target) - np.asarray(ee_pos)), -1.0, 1.0)
         return np.array([u[0], u[1], u[2], 0.0, 0.0, 0.0, grip], dtype=np.float64)
@@ -296,12 +329,13 @@ class PickPlaceController:
             ee_goal_xy = goal[:2] + gov[:2]                # EE xy that places the OBJECT over the goal
             centred = np.linalg.norm(ee[:2] - ee_goal_xy) < c.place_xy_tol
             if self.place_mode == "on":
-                # Set the object DOWN onto the surface: drive the EE below; physical contact
-                # (object bottom on the surface) stalls the EE → release. Avoids dropping it
-                # through the plate (which caused the contact explosions on spatial/goal).
+                # Set the object DOWN onto the surface with a GENTLE capped descent, release on
+                # contact (object bottom rests on the surface). A big/fast set-down slammed and
+                # displaced the plate → 'held_object'/'scene_object' collisions on the goal suite.
                 tgt = np.array([ee_goal_xy[0], ee_goal_xy[1], goal[2] + gov[2] - c.setdown_reach])
                 if (centred and self._contact(ee[2])) or self._timer >= 3 * c.place_timeout:
                     self._enter("RELEASE")
+                return self._careful_descend(ee, tgt, _GRIP_CLOSE), self.phase
             else:
                 # Drop into a container from above (basket): place the OBJECT centre at goal+place_dz.
                 tgt = np.array([ee_goal_xy[0], ee_goal_xy[1], goal[2] + c.place_dz + gov[2]])
