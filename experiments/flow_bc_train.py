@@ -295,7 +295,7 @@ def main():
     # Save ONLY the trained LoRA adapter (+ base.txt), like flow_grpo_train.
     import gc
     import orbax.checkpoint as ocp
-    del examples
+    del index, rows_by_trace
     gc.collect()
     print("  saving LoRA adapter (frozen backbone not re-saved) ...", flush=True)
     out = Path(args.out)
