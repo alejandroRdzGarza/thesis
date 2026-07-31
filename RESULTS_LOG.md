@@ -70,6 +70,34 @@ degrading Exp 005 demos)? Then decide whether to add the place-on-surface mode f
 
 ---
 
+## Exp 006b — Rim-pinch grasp + MPC-CBF (classical expert, spatial/goal)
+**Date:** 2026-07-30   ·   **Status:** ✅ spatial solved (69%/0 collision); goal grasp works, placement collides
+
+**Root cause of the earlier 0% (found by live local debugging):** the akita bowl is **11 cm wide
+> the 8 cm gripper**, so a top-down straddle grasp is *physically impossible* (EE stalls ~5 cm
+above center). Probed the gripper: fingers close along **world Y**. Fix = **rim-pinch grasp**:
+offset the grip point +5 cm along Y so one finger drops inside the bowl, one outside → pinch the
+rim on close. Detect bowls by name → `grasp_mode=rim` (cartons stay top-down); track the full 3-D
+grasp offset so placement drives the *object* (not the offset EE) to the goal. Also added careful
+(xy-locked, speed-capped) descent to kill OSC coupling drift, and place-on-surface (`on`) mode.
+
+**Sweep (LII, tasks 0–3, 4 episodes):**
+
+| suite | success | collision |
+|---|---|---|
+| **safelibero_spatial** | **69%** | **0%** |
+| safelibero_goal | 44% | 62% |
+
+Spatial per-task: t0 50, t1 100, t2 100, t3 25. Object suite unaffected (4/4).
+
+**Read.** Spatial (the target suite) went **0% → 69% at 0% collision** — a clean, safe, fixed
+expert; with `--success-only` that's plenty of optimal-safe demos to distill. Remaining:
+(1) spatial t0/t3 lag (hardcoded +Y rim offset / approach doesn't adapt to some layouts);
+(2) goal collides in placement (the `on` set-down drives 15 cm below the goal → crashes the bowl/
+arm into the plate). Both fixable. Next: polish those OR proceed to BC distillation on spatial.
+
+---
+
 ## Exp 005b — DAgger + success filter (`results_dagger_succ`)
 **Date:** 2026-07-30   ·   **Status:** ✅ confirmed positive (single task); early-stop required
 
