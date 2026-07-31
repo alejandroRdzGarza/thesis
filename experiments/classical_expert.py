@@ -48,6 +48,8 @@ def resolve_pick_and_place(env, obs: dict) -> dict | None:
         "goal_pos": np.asarray(goal_pos, dtype=float),
         # 'in' → drop into a container (basket); anything else ('on') → set down onto a surface.
         "place_mode": "in" if predicate == "in" else "on",
+        # Wide bowls don't fit the 8 cm gripper → pinch the rim instead of straddling top-down.
+        "grasp_mode": "rim" if "bowl" in obj_name.lower() else "top",
     }
 
 
@@ -149,6 +151,8 @@ class ControllerConfig:
     xy_tol: float = 0.015       # m, tighter XY alignment before descending / placing
     approach_h: float = 0.12    # m above the object to hover before descending
     grasp_dz: float = 0.005     # m above the object centre to aim for (descent is contact-based)
+    rim_offset: float = 0.05    # rim grasp: offset the grip point along the closing axis (world Y)
+    #                             by ~bowl radius so one finger drops inside, one outside → pinch rim
     lift_h: float = 0.18        # m to lift the grasped object before transporting
     goal_clear_h: float = 0.22  # m above the goal to carry the object — high enough that the
     #                             carton's BOTTOM clears the basket rim before lowering in
@@ -174,8 +178,10 @@ class PickPlaceController:
     use_mpc: bool = True
     mpc_cfg: MPCConfig = field(default_factory=MPCConfig)
     place_mode: str = "in"      # 'in' = drop into a container (basket); 'on' = set down onto a surface
+    grasp_mode: str = "top"     # 'top' = straddle over the object; 'rim' = pinch a wide bowl's rim
     phase: str = "APPROACH"
-    grasp_offset: float | None = None   # EE_z − object_z at grasp: how the carton sits in the gripper
+    grasp_offset: float | None = None       # EE_z − object_z at grasp (scalar, for debug)
+    grasp_offset_vec: object = None          # EE − object at grasp (3-D; carries the rim XY offset)
     _timer: int = 0
     _stall: int = 0
     _last_z: float | None = None
@@ -186,6 +192,7 @@ class PickPlaceController:
     def reset(self):
         self.phase = "APPROACH"
         self.grasp_offset = None
+        self.grasp_offset_vec = None
         self._timer = 0
         self._stall = 0
         self._last_z = None
@@ -240,17 +247,28 @@ class PickPlaceController:
         goal = np.asarray(goal_pos, dtype=float)
         base_z = table_z if table_z is not None else obj[2]
 
-        if self.phase == "APPROACH":                      # hover above the object, gripper open
-            tgt = np.array([obj[0], obj[1], obj[2] + c.approach_h])
-            if np.linalg.norm(ee[:2] - obj[:2]) < c.xy_tol and abs(ee[2] - tgt[2]) < c.pos_tol:
+        # Rim grasp: offset the grip POINT along the gripper's closing axis (world Y) by ~bowl
+        # radius, so one finger drops inside the bowl and one outside → pinch the rim wall on close.
+        gp = obj.copy()
+        if self.grasp_mode == "rim":
+            gp = gp + np.array([0.0, c.rim_offset, 0.0])
+        # After grasp, the object hangs at (EE − grasp_offset_vec); to put it at a target we drive
+        # the EE to target + grasp_offset_vec.
+        gov = (np.asarray(self.grasp_offset_vec, float)
+               if self.grasp_offset_vec is not None else np.zeros(3))
+
+        if self.phase == "APPROACH":                      # hover above the grip point, gripper open
+            tgt = np.array([gp[0], gp[1], gp[2] + c.approach_h])
+            if np.linalg.norm(ee[:2] - gp[:2]) < c.xy_tol and abs(ee[2] - tgt[2]) < c.pos_tol:
                 self._enter("DESCEND")
             return self._goto(ee, tgt, _GRIP_OPEN), self.phase
 
-        if self.phase == "DESCEND":                       # lower onto the object (XY-locked) until contact
-            tgt = np.array([obj[0], obj[1], obj[2] + c.grasp_dz])
-            centred = np.linalg.norm(ee[:2] - obj[:2]) < c.xy_tol
+        if self.phase == "DESCEND":                       # lower onto the grip point (XY-locked) until contact
+            tgt = np.array([gp[0], gp[1], gp[2] + c.grasp_dz])
+            centred = np.linalg.norm(ee[:2] - gp[:2]) < c.xy_tol
             if centred and (np.linalg.norm(ee - tgt) < c.pos_tol or self._contact(ee[2])):
-                self.grasp_offset = float(ee[2] - obj[2])   # how far above the object centre we grip
+                self.grasp_offset_vec = (ee - obj).copy()   # 3-D offset (carries the rim XY offset)
+                self.grasp_offset = float(ee[2] - obj[2])
                 self._enter("GRASP")
             return self._careful_descend(ee, tgt, _GRIP_OPEN), self.phase
 
@@ -266,26 +284,27 @@ class PickPlaceController:
                 self._enter("TRANSPORT")
             return self._goto(ee, tgt, _GRIP_CLOSE), self.phase
 
-        if self.phase == "TRANSPORT":                      # carry HIGH above the goal so the carton
-            tgt = np.array([goal[0], goal[1], goal[2] + c.goal_clear_h])   # bottom clears the basket rim
-            if np.linalg.norm(ee[:2] - goal[:2]) < c.xy_tol and abs(ee[2] - tgt[2]) < c.pos_tol:
+        if self.phase == "TRANSPORT":                      # carry so the OBJECT ends above the goal
+            ee_goal_xy = goal[:2] + gov[:2]                # EE xy that puts the object over the goal
+            tgt = np.array([ee_goal_xy[0], ee_goal_xy[1], goal[2] + c.goal_clear_h])
+            if np.linalg.norm(ee[:2] - ee_goal_xy) < c.xy_tol and abs(ee[2] - tgt[2]) < c.pos_tol:
                 self._enter("PLACE")
             return self._goto(ee, tgt, _GRIP_CLOSE), self.phase
 
         if self.phase == "PLACE":
-            off = self.grasp_offset if self.grasp_offset is not None else 0.0
             self._timer += 1
-            centred = np.linalg.norm(ee[:2] - goal[:2]) < c.place_xy_tol
+            ee_goal_xy = goal[:2] + gov[:2]                # EE xy that places the OBJECT over the goal
+            centred = np.linalg.norm(ee[:2] - ee_goal_xy) < c.place_xy_tol
             if self.place_mode == "on":
-                # Set the object DOWN onto the surface: drive below the goal; physical contact
+                # Set the object DOWN onto the surface: drive the EE below; physical contact
                 # (object bottom on the surface) stalls the EE → release. Avoids dropping it
                 # through the plate (which caused the contact explosions on spatial/goal).
-                tgt = np.array([goal[0], goal[1], goal[2] - c.setdown_reach])
+                tgt = np.array([ee_goal_xy[0], ee_goal_xy[1], goal[2] + gov[2] - c.setdown_reach])
                 if (centred and self._contact(ee[2])) or self._timer >= 3 * c.place_timeout:
                     self._enter("RELEASE")
             else:
-                # Drop into a container from above (basket): release when placed or by timeout.
-                tgt = np.array([goal[0], goal[1], goal[2] + c.place_dz + off])
+                # Drop into a container from above (basket): place the OBJECT centre at goal+place_dz.
+                tgt = np.array([ee_goal_xy[0], ee_goal_xy[1], goal[2] + c.place_dz + gov[2]])
                 reached = np.linalg.norm(ee - tgt) < c.pos_tol or self._contact(ee[2])
                 if (centred and reached) or self._timer >= c.place_timeout:
                     self._enter("RELEASE")

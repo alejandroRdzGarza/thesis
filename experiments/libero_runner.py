@@ -1328,9 +1328,11 @@ def run_libero_trial(
         controller.reset()
         if hasattr(controller, "place_mode"):
             controller.place_mode = _pp_ctx.get("place_mode", "in")
+        if hasattr(controller, "grasp_mode"):
+            controller.grasp_mode = _pp_ctx.get("grasp_mode", "top")
         print(f"  [classical] pick '{_pp_ctx['obj_key'].replace('_pos','')}' "
               f"@ {np.round(_pp_ctx['obj_pos'],3)} → goal {np.round(_pp_ctx['goal_pos'],3)}  "
-              f"[{_pp_ctx.get('place_mode','in')}]")
+              f"[grasp={_pp_ctx.get('grasp_mode','top')} place={_pp_ctx.get('place_mode','in')}]")
 
     # ── Safety-conditioned prompt ─────────────────────────────────────────────
     # Replace the bare task instruction with one that names the obstacle and its
