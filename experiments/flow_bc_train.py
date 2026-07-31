@@ -56,16 +56,23 @@ def _successful_traces(round_dir) -> set | None:
     return keep
 
 
-def _episode_targets(queries, action_horizon: int):
-    """Build (obs, env-space target chunk) pairs from one episode's queries.
+def _usable_queries(queries):
+    """Queries that carry both an obs and executed target actions (BC-trainable)."""
+    return [q for q in queries if q.obs is not None and q.shielded_actions is not None
+            and len(q.shielded_actions) > 0]
 
-    Each query i predicts `action_horizon` actions from its obs; the target is the executed
+
+def _episode_target_chunks(queries, action_horizon: int):
+    """(usable_index, env-space target chunk) pairs from one episode's queries.
+
+    Each usable query i predicts `action_horizon` actions from its obs; the target is the executed
     shield-corrected trajectory starting at that query — i.e. the concatenation of this and
     subsequent queries' shielded_actions, truncated to action_horizon (tail-padded by repeating
-    the last executed action, which near episode end is a settled hold pose).
+    the last executed action, which near episode end is a settled hold pose). Returns only the
+    index into _usable_queries(queries) + the (small) chunk — NOT the image — so the caller can
+    build a memory-light index and stream obs from disk per minibatch.
     """
-    usable = [q for q in queries if q.obs is not None and q.shielded_actions is not None
-              and len(q.shielded_actions) > 0]
+    usable = _usable_queries(queries)
     if not usable:
         return []
     # Per-episode flattened executed sequence + each query's start offset into it.
@@ -75,13 +82,19 @@ def _episode_targets(queries, action_horizon: int):
         offsets.append(o)
         o += len(q.shielded_actions)
     out = []
-    for q, off in zip(usable, offsets):
+    for i, off in enumerate(offsets):
         chunk = seq[off: off + action_horizon]
         if len(chunk) < action_horizon:                       # tail-pad by holding the last action
             pad = np.repeat(chunk[-1:], action_horizon - len(chunk), axis=0)
             chunk = np.concatenate([chunk, pad], axis=0)
-        out.append((q.obs, chunk.astype(np.float32)))
+        out.append((i, chunk.astype(np.float32)))
     return out
+
+
+def _episode_targets(queries, action_horizon: int):
+    """(obs, target chunk) pairs — the in-RAM convenience form (dry-run / small use)."""
+    usable = _usable_queries(queries)
+    return [(usable[i].obs, chunk) for i, chunk in _episode_target_chunks(queries, action_horizon)]
 
 
 def build_bc_batch(policy, obs_list, act_list, action_dim: int):
@@ -184,28 +197,51 @@ def main():
             if not trace_paths:
                 raise SystemExit("no successful+safe traces — nothing to imitate "
                                  "(policy may have regressed; check the round summaries).")
-    examples: list[tuple] = []
+    # Build a memory-LIGHT index only (trace path + per-query target chunk, NO images). Images are
+    # streamed from disk one trace at a time during training, so peak RAM is O(one trace), not
+    # O(dataset) — essential because DAgger grows the dataset every round (all-in-RAM OOM-killed the
+    # host at round 1: ~2.8k 224² images ≈ 0.9 GB decoded at once).
+    index: list[tuple] = []   # (trace_path, usable_idx, chunk)
     n_no_shield = 0
     for tp in trace_paths:
         qs = load_episode_trace(tp)
         if qs and all(q.shielded_actions is None for q in qs):
             n_no_shield += 1
-        examples.extend(_episode_targets(qs, action_horizon))
-    if not examples:
+        for uidx, chunk in _episode_target_chunks(qs, action_horizon):
+            index.append((tp, uidx, chunk))
+        del qs
+        _gc.collect()
+    if not index:
         raise SystemExit(
-            f"no shielded targets found in {args.round} ({n_no_shield} traces had no shielded_actions "
+            f"no shielded targets found in {round_dirs} ({n_no_shield} traces had no shielded_actions "
             "— the rollout must be run with the updated libero_runner that records them).")
-    print(f"  {len(trace_paths)} traces → {len(examples)} BC examples  "
-          f"(action_horizon={action_horizon}, action_dim={action_dim})", flush=True)
+    n_examples = len(index)
+    print(f"  {len(trace_paths)} traces → {n_examples} BC examples  "
+          f"(action_horizon={action_horizon}, action_dim={action_dim})  [streamed from disk]",
+          flush=True)
 
-    n_full = (len(examples) // args.minibatch) * args.minibatch
+    n_full = (n_examples // args.minibatch) * args.minibatch
     rng = np.random.default_rng(0)
     jax_rng = jax.random.key(0)
 
+    # Group example rows by trace so an epoch loads each trace's images exactly once (streaming),
+    # while still shuffling trace order + within-trace rows. build_bc_batch needs the obs, which we
+    # fetch from the currently-loaded trace via its usable_idx.
+    from collections import defaultdict
+    rows_by_trace: dict[str, list[int]] = defaultdict(list)
+    for ri, (tp, _uidx, _chunk) in enumerate(index):
+        rows_by_trace[tp].append(ri)
+    trace_list = list(rows_by_trace.keys())
+
+    def _obs_for_trace(tp):
+        return [q.obs for q in _usable_queries(load_episode_trace(tp))]
+
     if args.dry_run:
-        idx = list(range(min(args.minibatch, len(examples))))
-        obs, acts = build_bc_batch(policy, [examples[i][0] for i in idx],
-                                   [examples[i][1] for i in idx], action_dim)
+        tp0 = trace_list[0]
+        obs_pool = _obs_for_trace(tp0)
+        rows = rows_by_trace[tp0][:args.minibatch]
+        obs, acts = build_bc_batch(policy, [obs_pool[index[i][1]] for i in rows],
+                                   [index[i][2] for i in rows], action_dim)
         print(f"  [dry-run] Observation.state {obs.state.shape}  actions {acts.shape} "
               f"(want (b, {action_horizon}, {action_dim}))", flush=True)
         per = model.compute_loss(jax_rng, obs, acts, train=False)
@@ -216,23 +252,45 @@ def main():
     opt_state = tx.init(nnx.state(model, trainable_filter))
     n_steps = args.epochs * (n_full // args.minibatch)
     print(f"  {n_steps} BC steps (epochs={args.epochs}, minibatch={args.minibatch}, "
-          f"dropping {len(examples) - n_full} trailing). First step compiles (~1-3 min).", flush=True)
+          f"dropping {n_examples - n_full} trailing). First step compiles (~1-3 min).", flush=True)
+
+    def _run_step(nonlocal_rng, obs_list, act_list):
+        obs, acts = build_bc_batch(policy, obs_list, act_list, action_dim)
+        step_rng, nxt = jax.random.split(nonlocal_rng)
+        _t0 = _time.monotonic()
+        os_, info = flow_bc.bc_train_step(
+            model, tx, opt_state, (step_rng, obs, acts), trainable_filter=trainable_filter)
+        return os_, nxt, float(info["loss"]), float(info["grad_norm"]), _time.monotonic() - _t0
 
     step = 0
     for epoch in range(args.epochs):
-        order = rng.permutation(len(examples))
-        for s in range(0, n_full, args.minibatch):
-            idx = order[s:s + args.minibatch]
-            obs, acts = build_bc_batch(policy, [examples[i][0] for i in idx],
-                                       [examples[i][1] for i in idx], action_dim)
-            jax_rng, step_rng = jax.random.split(jax_rng)
-            _t0 = _time.monotonic()
-            opt_state, info = flow_bc.bc_train_step(
-                model, tx, opt_state, (step_rng, obs, acts), trainable_filter=trainable_filter)
-            float(info["loss"])
-            step += 1
-            print(f"  step {step:04d}/{n_steps}  loss={float(info['loss']):.4f}  "
-                  f"|g|={float(info['grad_norm']):.3e}  ({_time.monotonic() - _t0:.1f}s)", flush=True)
+        # Trace-blocked shuffle: shuffle trace order + within-trace rows; carry a minibatch buffer
+        # across trace boundaries so we only drop ONE trailing partial batch per epoch. BC tolerates
+        # this mild (non-global) shuffle; peak RAM stays at one trace's images.
+        t_order = rng.permutation(len(trace_list))
+        buf_obs: list = []
+        buf_act: list = []
+        emitted = 0
+        for tii in t_order:
+            tp = trace_list[tii]
+            obs_pool = _obs_for_trace(tp)
+            rows = rows_by_trace[tp]
+            for li in rng.permutation(len(rows)):
+                ri = rows[li]
+                buf_obs.append(obs_pool[index[ri][1]])
+                buf_act.append(index[ri][2])
+                if len(buf_obs) == args.minibatch:
+                    opt_state, jax_rng, loss, gnorm, dt = _run_step(jax_rng, buf_obs, buf_act)
+                    step += 1; emitted += 1
+                    print(f"  step {step:04d}/{n_steps}  loss={loss:.4f}  "
+                          f"|g|={gnorm:.3e}  ({dt:.1f}s)", flush=True)
+                    buf_obs, buf_act = [], []
+                    if emitted >= n_full // args.minibatch:
+                        break
+            del obs_pool
+            _gc.collect()
+            if emitted >= n_full // args.minibatch:
+                break
 
     # Save ONLY the trained LoRA adapter (+ base.txt), like flow_grpo_train.
     import gc
