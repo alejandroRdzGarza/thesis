@@ -58,6 +58,16 @@ boundary) + the reactive CBF as the hard-safety backstop. No VLA → fast, doesn
 | safelibero_spatial | 0% | 6% | 32 |
 | overall | 36.5% | 6.2% | 96 |
 
+**Exp 006c — trajectory-quality pass (multi-obstacle MPC).** Before distilling, verified the
+*successful* trajectories are actually good (the Exp 005 mistake was trusting metrics over path
+quality). Found: single-obstacle MPC lurched (reactive CBF fought it, **activation ~0.5**) and
+the placement dropped the bowl. Fixes: (1) **multi-obstacle MPC** — feed all nearby scene objects
+into the keep-out QP (not just the one detected obstacle) → smooth anticipatory paths through
+clutter; (2) careful xy-locked descent + rim-pinch grasp for bowls; (3) place-on-surface set-down.
+Result on spatial_t1: **CBF activation 0.52 → 0.17, jerk 0.021 → 0.012, 0 collision**, and it now
+*lowers* the object instead of dropping it (user-confirmed on video). Residual: motion is a bit
+slow (env's compliant OSC at the elevated workspace — env-limited, cosmetic for BC).
+
 **Read.** The expert **generalizes across the object suite** (4 objects × 2 levels, ~94%, ~0
 collision) — a fixed high-quality safe teacher, exactly what the pivot needed. spatial/goal fail
 because they're a different task type ("place bowl ON a surface", elevated starts): the carry-high-
