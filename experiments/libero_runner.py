@@ -1460,6 +1460,20 @@ def run_libero_trial(
                         if vla_cnt % 10 == 1:
                             print(f"  [{t:03d}] [classical] phase={_cphase}  "
                                   f"EE=[{_ee_now[0]:.3f},{_ee_now[1]:.3f},{_ee_now[2]:.3f}]")
+                        # Record a BC demo every replan_steps: obs now + (via _shielded_bufs) the
+                        # executed expert actions until the next capture. Dummy chain (BC ignores it).
+                        if record_policy_trace and (t % replan_steps == 0):
+                            from experiments.policy_trace import QueryTrace as _QT
+                            _obs_raw = {"image": np.asarray(img, np.uint8),
+                                        "wrist_image": np.asarray(wrist_img, np.uint8),
+                                        "state": np.asarray(state, np.float32),
+                                        "prompt": _instruction_effective}
+                            metrics.policy_trace.append(_QT(
+                                chain=np.zeros((2, 1, 1), np.float32),
+                                logp_old=np.zeros(1, np.float32),
+                                sigmas=np.array([1.0, 0.0], np.float32),
+                                noise_level=0.0, sde_type="classical", obs=_obs_raw))
+                            _shielded_bufs.append([])
                     elif policy_fn is not None:
                         # Co-located in-process policy (Option B): returns env-ready
                         # 7-D actions + the flow-SDE QueryTrace for this chunk.
