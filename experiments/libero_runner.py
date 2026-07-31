@@ -1174,6 +1174,7 @@ def run_libero_trial(
     policy_fn=None,
     record_policy_trace: bool = False,
     controller=None,
+    label_controller=None,
 ) -> MetricsTracker:
     """Run one LIBERO episode using OpenVLA + optional Cartesian CBF.
 
@@ -1317,22 +1318,18 @@ def run_libero_trial(
     # ── Classical scripted expert: resolve pick-and-place context once ─────────
     # When a `controller` is supplied it replaces the VLA as the action source, driven by
     # privileged sim poses (object + goal) to produce optimal safe demos. The CBF still filters.
+    # A `controller` DRIVES the arm (classical expert as action source). A `label_controller`
+    # LABELS the VLA's states with the expert action for DAgger (the VLA drives via policy_fn,
+    # the classical expert says what it would do → recorded as the BC target). Both need the same
+    # pick-and-place context + multi-obstacle avoid-list.
     _pp_ctx = None
-    if controller is not None:
-        from experiments.classical_expert import resolve_pick_and_place
+    if controller is not None or label_controller is not None:
+        from experiments.classical_expert import resolve_pick_and_place, _Obs as _MpcObs
         _pp_ctx = resolve_pick_and_place(env, obs)
         if _pp_ctx is None:
             raise RuntimeError("classical controller: could not resolve pick-and-place target "
                                "from the BDDL goal predicate")
         _pp_ctx["table_z"] = float(_pp_ctx["obj_pos"][2])
-        controller.reset()
-        if hasattr(controller, "place_mode"):
-            controller.place_mode = _pp_ctx.get("place_mode", "in")
-        if hasattr(controller, "grasp_mode"):
-            controller.grasp_mode = _pp_ctx.get("grasp_mode", "top")
-        # Multi-obstacle avoid-list for the MPC: the detected safety obstacle(s) + nearby scene
-        # objects, EXCEPT the target object and the goal-surface object (we must reach those).
-        from experiments.classical_expert import _Obs as _MpcObs
         _avoid = list(obstacles)                       # ObstacleConfig(s): have .pos + .safety_radius
         _tgt_key = _pp_ctx["obj_key"]
         _gp = np.asarray(_pp_ctx["goal_pos"], dtype=float)
@@ -1346,10 +1343,19 @@ def run_libero_trial(
                 continue
             _avoid.append(_MpcObs(_pp, 0.045))         # clutter object, modest keep-out radius
         _pp_ctx["avoid"] = _avoid
-        print(f"  [classical] pick '{_pp_ctx['obj_key'].replace('_pos','')}' "
+        for _c in (controller, label_controller):      # configure whichever are in play
+            if _c is None:
+                continue
+            _c.reset()
+            if hasattr(_c, "place_mode"):
+                _c.place_mode = _pp_ctx.get("place_mode", "in")
+            if hasattr(_c, "grasp_mode"):
+                _c.grasp_mode = _pp_ctx.get("grasp_mode", "top")
+        _role = "drive" if controller is not None else "LABEL"
+        print(f"  [classical:{_role}] pick '{_pp_ctx['obj_key'].replace('_pos','')}' "
               f"@ {np.round(_pp_ctx['obj_pos'],3)} → goal {np.round(_pp_ctx['goal_pos'],3)}  "
-              f"[grasp={_pp_ctx.get('grasp_mode','top')} place={_pp_ctx.get('place_mode','in')}]  "
-              f"avoid={len(_avoid)} objs")
+              f"[grasp={_pp_ctx.get('grasp_mode','top')} place={_pp_ctx.get('place_mode','in')}] "
+              f"avoid={len(_avoid)}")
 
     # ── Safety-conditioned prompt ─────────────────────────────────────────────
     # Replace the bare task instruction with one that names the obstacle and its
@@ -1757,10 +1763,21 @@ def run_libero_trial(
                     if cv2.waitKey(1) & 0xFF == ord("q"):
                         break
 
-            # Shield-as-expert BC (Exp 005): record the executed shield-corrected action as this
-            # query's imitation target (env-space, before it hits the OSC controller).
+            # Record this step's imitation TARGET into the current query's buffer:
+            #  • DAgger (label_controller set): the classical EXPERT's action at the VLA's current
+            #    state (the VLA drives via policy_fn; the expert says what it would do) — this is
+            #    the on-policy relabel that fixes covariate shift.
+            #  • otherwise: the executed shield-/classical-corrected action (offline BC / Exp 005).
             if record_policy_trace and _shielded_bufs:
-                _shielded_bufs[-1].append(np.asarray(safe_action, dtype=np.float32).copy())
+                if label_controller is not None and _pp_ctx is not None:
+                    _obj_lbl = np.array(obs.get(_pp_ctx["obj_key"], _pp_ctx["obj_pos"]), dtype=float)
+                    _lbl_action, _ = label_controller.act(
+                        np.array(obs["robot0_eef_pos"], dtype=float), _obj_lbl,
+                        _pp_ctx["goal_pos"], obstacles=_pp_ctx.get("avoid"),
+                        table_z=_pp_ctx["table_z"])
+                    _shielded_bufs[-1].append(np.asarray(_lbl_action, dtype=np.float32).copy())
+                else:
+                    _shielded_bufs[-1].append(np.asarray(safe_action, dtype=np.float32).copy())
 
             # ── 6. Step environment ───────────────────────────────────────
             step_out = env.step(safe_action.tolist())

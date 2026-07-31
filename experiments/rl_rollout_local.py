@@ -97,6 +97,11 @@ def main():
                     help="fraction of each group's K rollouts run WITH the CBF shield; the rest "
                          "run unshielded so real collisions enter the reward (0.5 = half/half). "
                          "1.0 = legacy shielded-only. --no-cbf forces 0.")
+    ap.add_argument("--label-controller", action="store_true",
+                    help="DAgger: the VLA drives, but each state is LABELLED with the classical "
+                         "expert's action (recorded as the BC target). Typically with --no-cbf so "
+                         "the VLA visits its own (failing) state distribution and the expert labels "
+                         "the recovery.")
     args = ap.parse_args()
 
     # Imports deferred so --help works without JAX / LIBERO installed.
@@ -120,6 +125,12 @@ def main():
     policy_fn = build_policy_fn(pol_lp)
     # --no-cbf forces a fully unshielded run (eval); otherwise --shield-prob sets the mix.
     shield_prob = 0.0 if args.no_cbf else args.shield_prob
+    # DAgger: classical expert labels the VLA's states.
+    label_controller = None
+    if args.label_controller:
+        from experiments.classical_expert import PickPlaceController
+        label_controller = PickPlaceController()
+        print("  DAgger mode: VLA drives, classical expert labels each state")
     print(f"  flow-SDE: num_steps={args.num_steps} noise_level={args.noise_level} "
           f"sde_type={args.sde_type}  shield_prob={shield_prob:.2f} "
           f"({'off' if shield_prob == 0 else ('full' if shield_prob >= 1 else 'mixed')})")
@@ -157,6 +168,7 @@ def main():
         horizon=args.horizon,
         policy_fn=policy_fn,
         record_policy_trace=True,
+        label_controller=label_controller,
         scene_name=f"{args.suite}_L{args.level}_t{args.task}",
     )
 

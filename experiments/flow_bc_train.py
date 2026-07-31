@@ -119,7 +119,9 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", default="pi05_libero_cbf")
     ap.add_argument("--checkpoint", required=True, help="current-policy checkpoint dir")
-    ap.add_argument("--round", required=True, help="SHIELDED rollout round dir (*_trace.npz)")
+    ap.add_argument("--round", required=True, nargs="+",
+                    help="one or more round dirs with *_trace.npz (aggregate them — e.g. round-0 "
+                         "offline demos + all DAgger rounds)")
     ap.add_argument("--out", required=True, help="output checkpoint dir for the BC-updated policy")
     ap.add_argument("--lr", type=float, default=1e-4, help="BC LR (imitation is stable; higher than RL)")
     ap.add_argument("--epochs", type=int, default=2)
@@ -153,22 +155,35 @@ def main():
     import gc as _gc
     _gc.collect()
 
-    # Flatten every shielded rollout in the round into (obs, env-space target chunk) examples.
-    trace_paths = sorted(glob.glob(str(Path(args.round) / "**" / "*_trace.npz"), recursive=True))
+    # Flatten every recorded rollout across ALL round dirs into (obs, env-space target chunk)
+    # examples. DAgger aggregates round-0 offline demos + every relabelled DAgger round here.
+    round_dirs = list(args.round)
+    trace_paths = []
+    for rd in round_dirs:
+        trace_paths.extend(glob.glob(str(Path(rd) / "**" / "*_trace.npz"), recursive=True))
+    trace_paths = sorted(set(trace_paths))
     if not trace_paths:
-        raise SystemExit(f"no *_trace.npz under {args.round} — run rl_rollout_local --shield-prob 1.0 first")
+        raise SystemExit(f"no *_trace.npz under {round_dirs} — collect demos / rollouts first")
+    print(f"  aggregating {len(round_dirs)} round dir(s): {round_dirs}", flush=True)
     if args.success_only:
-        keep = _successful_traces(args.round)
-        if keep is None:
-            print("  [success-only] no manifest.csv → keeping all traces", flush=True)
+        # Union the per-round success filters (a trace kept if ITS round's manifest marks it clean).
+        keep = set()
+        any_manifest = False
+        for rd in round_dirs:
+            k = _successful_traces(rd)
+            if k is not None:
+                any_manifest = True
+                keep |= k
+        if not any_manifest:
+            print("  [success-only] no manifest.csv in any round → keeping all traces", flush=True)
         else:
             before = len(trace_paths)
             trace_paths = [tp for tp in trace_paths if str(Path(tp).resolve()) in keep]
             print(f"  [success-only] kept {len(trace_paths)}/{before} traces "
                   "(succeeded + collision-free)", flush=True)
             if not trace_paths:
-                raise SystemExit("no successful+safe traces this round — nothing to imitate "
-                                 "(policy may have regressed; check the round summary).")
+                raise SystemExit("no successful+safe traces — nothing to imitate "
+                                 "(policy may have regressed; check the round summaries).")
     examples: list[tuple] = []
     n_no_shield = 0
     for tp in trace_paths:
