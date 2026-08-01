@@ -193,6 +193,23 @@ class ControllerConfig:
     # (bottomed out on the object/surface), which is robust to unknown object heights.
     stall_eps: float = 0.0015   # m of downward progress per step below which we count a stall
     stall_patience: int = 12    # consecutive stalled steps → treat as contact / reached
+    # ── Reactive (stateless) phase inference: the "phase" is DERIVED from the current observable
+    # state each call, so the same observation always maps to the same action (a Markov oracle —
+    # required for DAgger relabelling, where the STUDENT drives and the expert labels its states).
+    grip_closed: float = 0.04   # gripper finger separation (m) below which it has SECURED an object
+    #                             (open ≈ 0.08; still-closing ≈ 0.06; secured rim ≈ 0.004). Must be
+    #                             tight enough that 'holding' means done-closing, else the arm lifts
+    #                             mid-close and grabs air (matches the machine's lift at grip≈0.03).
+    hold_lift: float = 0.03     # fallback (no gripper signal): object lifted >this above rest height
+    hold_reach: float = 0.10    # object XY within this of the EE to count as held (covers rim offset)
+    hold_z: float = 0.06        # …and object within this Z of the EE — so a MISSED grab (arm rises,
+    #                             object left on the table) is detected as not-holding → retry
+    descend_start_h: float = 0.15  # aligned in XY and EE within this of the grip point → descend/grasp
+    grasp_z_tol: float = 0.02   # EE within grasp_dz+this of the object z → close the gripper (grasp)
+    place_done_xy: float = 0.05  # object within this XY of the goal …
+    place_done_z: float = 0.05   # …and this Z above the goal, and not held → task done (hold, open)
+    release_on_dz: float = 0.015  # 'on': release once the object is within this of the goal surface
+    release_in_dz: float = 0.05   # 'in': release once the object centre is within this above the goal
 
 
 @dataclass
@@ -203,6 +220,8 @@ class PickPlaceController:
     mpc_cfg: MPCConfig = field(default_factory=MPCConfig)
     place_mode: str = "in"      # 'in' = drop into a container (basket); 'on' = set down onto a surface
     grasp_mode: str = "top"     # 'top' = straddle over the object; 'rim' = pinch a wide bowl's rim
+    reactive: bool = True       # True = stateless Markov oracle (phase inferred from observables);
+    #                             False = the legacy latched state machine (kept for A/B comparison)
     phase: str = "APPROACH"
     grasp_offset: float | None = None       # EE_z − object_z at grasp (scalar, for debug)
     grasp_offset_vec: object = None          # EE − object at grasp (3-D; carries the rim XY offset)
@@ -282,17 +301,104 @@ class PickPlaceController:
             u = np.clip(self.cfg.kp * (np.asarray(target) - np.asarray(ee_pos)), -1.0, 1.0)
         return np.array([u[0], u[1], u[2], 0.0, 0.0, 0.0, grip], dtype=np.float64)
 
+    def _holding(self, ee, obj, gripper, base_z) -> bool:
+        """Observable grasp test — a Markov signal of 'currently carrying THIS object', no latched
+        flag. Primary: the gripper has CLOSED (finger separation < grip_closed) AND the object is
+        horizontally at the EE. This avoids the lift chicken-and-egg (the object can't be 'lifted'
+        until we lift it, but we only lift once holding). Fallback if no gripper signal is given:
+        object lifted above its rest height and near the EE."""
+        xy_near = np.linalg.norm(ee[:2] - obj[:2]) < self.cfg.hold_reach
+        if gripper is not None:
+            return xy_near and gripper < self.cfg.grip_closed and abs(ee[2] - obj[2]) < self.cfg.hold_z
+        return xy_near and (obj[2] - base_z) > self.cfg.hold_lift
+
     def act(self, ee_pos, obj_pos, goal_pos, *, obstacle=None, obstacles=None,
-            table_z: float | None = None) -> tuple[np.ndarray, str]:
-        """One control step. `obj_pos` is the live object position (moves once grasped);
-        `obstacles` (list of objects with .pos/.safety_radius) enables the multi-obstacle MPC.
-        `obstacle` (single) is accepted for back-compat. Returns (action7, phase)."""
+            table_z: float | None = None, gripper: float | None = None) -> tuple[np.ndarray, str]:
+        """One control step → (action7, phase). Reactive (default) infers the phase from the current
+        observable state (incl. the gripper finger separation `gripper`) so it's a Markov oracle;
+        `reactive=False` runs the legacy machine (ignores `gripper`)."""
         if obstacles is not None:
             self._obstacles = list(obstacles)
         elif obstacle is not None:
             self._obstacles = [obstacle]
         else:
             self._obstacles = []
+        if self.reactive:
+            return self._act_reactive(ee_pos, obj_pos, goal_pos, table_z, gripper)
+        return self._act_statemachine(ee_pos, obj_pos, goal_pos, table_z)
+
+    def _act_reactive(self, ee_pos, obj_pos, goal_pos, table_z, gripper) -> tuple[np.ndarray, str]:
+        """Stateless pick-place: phase DERIVED from (ee, obj, goal) each call. Same tuned targets
+        and _goto/_careful_descend as the machine, but no latched phase/timer/contact state — so the
+        SAME observation always yields the SAME action (valid DAgger oracle from any student state).
+
+        On the expert's own trajectory the inferred phase tracks the machine's latched phase, so the
+        driver behaves the same; off-trajectory (student-visited states) it stays consistent instead
+        of desyncing — the fix for the DAgger collision blow-up."""
+        c = self.cfg
+        ee = np.asarray(ee_pos, dtype=float)
+        obj = np.asarray(obj_pos, dtype=float)
+        goal = np.asarray(goal_pos, dtype=float)
+        base_z = table_z if table_z is not None else obj[2]
+
+        gp = obj.copy()
+        if self.grasp_mode == "rim":
+            gp = gp + np.array([0.0, c.rim_offset, 0.0])
+        gov = ee - obj                                    # LIVE grasp offset (valid whenever holding)
+        self.grasp_offset_vec = gov.copy()                # keep for the end-of-episode debug dump
+        self.grasp_offset = float(ee[2] - obj[2])
+        holding = self._holding(ee, obj, gripper, base_z)
+
+        # Terminal: object resting at the goal and no longer held → task done (hold, gripper open).
+        if not holding and (np.linalg.norm(obj[:2] - goal[:2]) < c.place_done_xy
+                            and (obj[2] - goal[2]) < c.place_done_z):
+            self.phase = "DONE"
+            return self._goto(ee, ee, _GRIP_OPEN), self.phase
+
+        if not holding:                                   # ── PICK: align, descend, close ──
+            aligned = np.linalg.norm(ee[:2] - gp[:2]) < c.xy_tol
+            if not aligned or ee[2] > gp[2] + c.descend_start_h:
+                self.phase = "APPROACH"                   # hover above the grip point (avoidance on)
+                tgt = np.array([gp[0], gp[1], gp[2] + c.approach_h])
+                return self._goto(ee, tgt, _GRIP_OPEN), self.phase
+            if ee[2] <= gp[2] + c.grasp_dz + c.grasp_z_tol:
+                self.phase = "GRASP"                      # at the grip point → close + hold
+                return self._goto(ee, ee, _GRIP_CLOSE), self.phase
+            self.phase = "DESCEND"                        # centred above → careful XY-locked descent
+            tgt = np.array([gp[0], gp[1], gp[2] + c.grasp_dz])
+            return self._careful_descend(ee, tgt, _GRIP_OPEN), self.phase
+
+        # ── PLACE: object is held ──
+        ee_goal_xy = goal[:2] + gov[:2]                   # EE xy that puts the OBJECT over the goal
+        over_goal = np.linalg.norm(ee[:2] - ee_goal_xy) < c.xy_tol
+        lifted = ee[2] >= base_z + c.lift_h - c.pos_tol   # gate on EE height (reliably reaches target)
+        if not lifted and not over_goal:
+            self.phase = "LIFT"                           # raise straight up first (carry-inflated MPC)
+            tgt = np.array([ee[0], ee[1], base_z + c.lift_h])
+            return self._goto(ee, tgt, _GRIP_CLOSE), self.phase
+        if not over_goal:
+            self.phase = "TRANSPORT"                      # carry so the object ends over the goal
+            tgt = np.array([ee_goal_xy[0], ee_goal_xy[1], goal[2] + c.goal_clear_h])
+            return self._goto(ee, tgt, _GRIP_CLOSE), self.phase
+        # Over the goal → lower and release. Release is triggered by the OBJECT reaching placement
+        # height (observable), not a timer.
+        if self.place_mode == "on":
+            if (obj[2] - goal[2]) <= c.release_on_dz:
+                self.phase = "RELEASE"
+                return self._goto(ee, ee, _GRIP_OPEN), self.phase
+            self.phase = "PLACE"
+            tgt = np.array([ee_goal_xy[0], ee_goal_xy[1], goal[2] + gov[2] - c.setdown_reach])
+            return self._careful_descend(ee, tgt, _GRIP_CLOSE), self.phase
+        else:
+            if (obj[2] - goal[2]) <= c.release_in_dz:
+                self.phase = "RELEASE"
+                return self._goto(ee, ee, _GRIP_OPEN), self.phase
+            self.phase = "PLACE"
+            tgt = np.array([ee_goal_xy[0], ee_goal_xy[1], goal[2] + c.place_dz + gov[2]])
+            return self._goto(ee, tgt, _GRIP_CLOSE), self.phase
+
+    def _act_statemachine(self, ee_pos, obj_pos, goal_pos, table_z) -> tuple[np.ndarray, str]:
+        """Legacy latched-phase state machine (kept for A/B vs the reactive oracle)."""
         c = self.cfg
         ee = np.asarray(ee_pos, dtype=float)
         obj = np.asarray(obj_pos, dtype=float)
@@ -373,32 +479,38 @@ class PickPlaceController:
         return self._goto(ee, ee, _GRIP_OPEN), self.phase
 
 
-# ── CPU self-test: drive a single-integrator EE through all phases (no env) ──────────────────
+# ── CPU self-test: drive a single-integrator EE (with a simulated gripper) through a pick-place ──
 if __name__ == "__main__":
-    rng = np.random.default_rng(0)
     ee = np.array([0.0, 0.0, 0.30])
-    obj = np.array([0.15, 0.10, 0.02])
+    obj0 = np.array([0.15, 0.10, 0.02])
     goal = np.array([-0.10, 0.25, 0.05])
-    ctrl = PickPlaceController(); ctrl.reset()
-    obj_live = obj.copy()
-    grasped = False
+    ctrl = PickPlaceController(reactive=True); ctrl.reset()
+    obj = obj0.copy()
+    grip = 0.08            # finger separation: open ≈ 0.08, closed ≈ 0
+    attached = False
+    grab_off = np.zeros(3)
     seen = []
-    for t in range(600):
-        a, ph = ctrl.act(ee, obj_live if not grasped else ee - np.array([0, 0, 0.005]), goal,
-                         table_z=obj[2])
+    for t in range(800):
+        a, ph = ctrl.act(ee, obj, goal, table_z=obj0[2], gripper=grip)
         if not seen or seen[-1] != ph:
             seen.append(ph)
-        # crude single-integrator plant (OSC ~0.05 m per unit action); grasp attaches the object
+        # single-integrator EE (OSC ~0.05 m per unit action)
         ee = ee + 0.05 * a[:3]
-        if ph == "GRASP":
-            grasped = True
-        if ph == "RELEASE":
-            grasped = False
+        # gripper closes/opens toward the command over a few steps
+        grip = np.clip(grip + (-0.012 if a[6] > 0 else +0.012), 0.0, 0.08)
+        # attach the object once the (closing) gripper is around it; carry it; drop when opened
+        if not attached and grip < ctrl.cfg.grip_closed and np.linalg.norm(ee - obj) < 0.05:
+            attached = True; grab_off = ee - obj
+        if attached:
+            if a[6] > 0:
+                obj = ee - grab_off
+            else:
+                attached = False          # released → object stays where dropped
         if ph == "DONE":
             break
-    reached_goal = np.linalg.norm(ee[:2] - goal[:2]) < 0.05
-    ok = seen == list(PickPlaceController.PHASES) and reached_goal
+    placed = np.linalg.norm(obj[:2] - goal[:2]) < 0.05 and abs(obj[2] - goal[2]) < 0.08
+    ok = "DONE" in seen and placed
     print("phase sequence:", " → ".join(seen))
-    print(f"ended near goal: {reached_goal}  (ee={np.round(ee,3)}, goal={np.round(goal,3)})")
+    print(f"object placed: {placed}  (obj={np.round(obj,3)}, goal={np.round(goal,3)})")
     print("SELF-TEST:", "PASS" if ok else "FAIL")
     raise SystemExit(0 if ok else 1)

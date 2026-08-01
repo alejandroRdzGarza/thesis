@@ -1322,6 +1322,12 @@ def run_libero_trial(
     # LABELS the VLA's states with the expert action for DAgger (the VLA drives via policy_fn,
     # the classical expert says what it would do → recorded as the BC target). Both need the same
     # pick-and-place context + multi-obstacle avoid-list.
+    def _grip_width(_obs):
+        """Panda finger separation (m): open ≈ 0.08, closed-on-object ≈ 0.004–0.05. The reactive
+        classical expert's observable grasp signal."""
+        _q = np.asarray(_obs.get("robot0_gripper_qpos", (0.04, -0.04)), dtype=float)
+        return float(_q[0] - _q[1]) if _q.shape[0] >= 2 else None
+
     _pp_ctx = None
     if controller is not None or label_controller is not None:
         from experiments.classical_expert import resolve_pick_and_place, _Obs as _MpcObs
@@ -1460,7 +1466,8 @@ def run_libero_trial(
                                             dtype=float)
                         _nominal, _cphase = controller.act(
                             _ee_now, _obj_now, _pp_ctx["goal_pos"],
-                            obstacles=_pp_ctx.get("avoid"), table_z=_pp_ctx["table_z"])
+                            obstacles=_pp_ctx.get("avoid"), table_z=_pp_ctx["table_z"],
+                            gripper=_grip_width(obs))
                         action_queue = [_nominal.copy()]
                         vla_cnt += 1
                         if vla_cnt % 10 == 1:
@@ -1774,7 +1781,7 @@ def run_libero_trial(
                     _lbl_action, _ = label_controller.act(
                         np.array(obs["robot0_eef_pos"], dtype=float), _obj_lbl,
                         _pp_ctx["goal_pos"], obstacles=_pp_ctx.get("avoid"),
-                        table_z=_pp_ctx["table_z"])
+                        table_z=_pp_ctx["table_z"], gripper=_grip_width(obs))
                     _shielded_bufs[-1].append(np.asarray(_lbl_action, dtype=np.float32).copy())
                 else:
                     _shielded_bufs[-1].append(np.asarray(safe_action, dtype=np.float32).copy())
