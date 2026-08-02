@@ -1426,6 +1426,46 @@ def run_libero_trial(
     for ob in obstacles:
         _z_states.append(init_z(p1_init, ob.pos))
 
+    # ── DAgger self-safe expert: shield the LABEL ────────────────────────────
+    # The classical expert's nominal action is NOT collision-safe on its own (it only avoids
+    # obstacle POINTS at the EE; the arm/gripper still hit tall obstacles — measured ~60% collision
+    # unshielded). The SELF-SAFE expert we distil is classical + CBF. During a DAgger rollout the
+    # VLA drives UNSHIELDED (use_cbf=False) so it visits its own states, but each label must be the
+    # SAFE action there — so we run the SAME ellipsoid CBF the driver uses on the expert's nominal,
+    # with an independent z-state (the driving shield is off, so no state conflict).
+    _label_z_states: list[np.ndarray] = []
+    if label_controller is not None:
+        for ob in obstacles:
+            _label_z_states.append(init_z(p1_init, ob.pos))
+
+    def _shield_label_action(a7, ee_p, R1):
+        """Ellipsoid-CBF-correct a nominal expert action → the arm-aware self-safe label.
+        Mirrors the driver's aegis-faithful ellipsoid shield (which gives 0 collision); keeps its
+        own z-state. No-op if there is no obstacle geometry."""
+        if not obstacles or not _label_z_states:
+            return a7
+        ob0 = obstacles[0]
+        obs_q = ob0.q_diag if ob0.q_diag is not None else np.array([ob0.safety_radius] * 3)
+        if ob0.q_R is not None:
+            obs_R = ob0.q_R
+        elif _HAS_MUJOCO:
+            _bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, ob0.name)
+            obs_R = data.xmat[_bid].reshape(3, 3).copy() if _bid >= 0 else np.eye(3)
+        else:
+            obs_R = np.eye(3)
+        _ee_q1 = (EE_Q_DIAG_TALL if any(k in instruction.lower() for k in _TALL_OBJECT_KEYS)
+                  else EE_Q_DIAG_DEFAULT)
+        u_safe, z_new, _h, _trig = run_ellipsoid_cbf(
+            ee_pos=ee_p, R1=R1, Q1_diag=_ee_q1,
+            obs_pos=ob0.pos, obs_q=obs_q, z=_label_z_states[0],
+            u_nom=np.asarray(a7[:3], dtype=float), k_cbf=K_CBF, scale=1.0,
+            extra_lin_constraints=[], obs_R=obs_R,
+        )
+        _label_z_states[0] = z_new
+        out = np.asarray(a7, dtype=float).copy()
+        out[:3] = u_safe
+        return out
+
     import time as _time
 
     # OffScreenRenderEnv is a wrapper (self.env holds the real env), so
@@ -1782,6 +1822,9 @@ def run_libero_trial(
                         np.array(obs["robot0_eef_pos"], dtype=float), _obj_lbl,
                         _pp_ctx["goal_pos"], obstacles=_pp_ctx.get("avoid"),
                         table_z=_pp_ctx["table_z"], gripper=_grip_width(obs))
+                    # Self-safe expert = classical nominal + CBF: shield the label so the DAgger
+                    # target is collision-safe (the nominal alone collides ~60% unshielded).
+                    _lbl_action = _shield_label_action(_lbl_action, ee_pos, _R1)
                     _shielded_bufs[-1].append(np.asarray(_lbl_action, dtype=np.float32).copy())
                 else:
                     _shielded_bufs[-1].append(np.asarray(safe_action, dtype=np.float32).copy())
