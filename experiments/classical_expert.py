@@ -386,10 +386,14 @@ class PickPlaceController:
         # ── PLACE: object is held ──
         ee_goal_xy = goal[:2] + gov[:2]                   # EE xy that puts the OBJECT over the goal
         over_goal = np.linalg.norm(ee[:2] - ee_goal_xy) < c.xy_tol
-        lifted = ee[2] >= base_z + c.lift_h - c.pos_tol   # gate on EE height (reliably reaches target)
+        # ELEVATED pick (bowl on a stove/cabinet, base_z high): lift only enough to clear the
+        # surface — a full lift_h would drive the EE near the upward reach limit, and the goal is
+        # usually LOWER anyway (transport descends to it).
+        _lift_h = c.lift_h if base_z < 1.0 else 0.08
+        lifted = ee[2] >= base_z + _lift_h - c.pos_tol    # gate on EE height (reliably reaches target)
         if not lifted and not over_goal:
-            self.phase = "LIFT"                           # raise straight up first (carry-inflated MPC)
-            tgt = np.array([ee[0], ee[1], base_z + c.lift_h])
+            self.phase = "LIFT"                           # raise to clear (carry-inflated MPC)
+            tgt = np.array([ee[0], ee[1], base_z + _lift_h])
             return self._goto(ee, tgt, _GRIP_CLOSE), self.phase
         if not over_goal:
             self.phase = "TRANSPORT"                      # carry so the object ends over the goal

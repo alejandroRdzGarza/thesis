@@ -524,6 +524,44 @@ def _get_arm_dof_indices(model) -> list[int]:
     return dof_indices
 
 
+def _get_arm_qpos_indices(model):
+    """(qpos addresses, joint ranges) for the arm joints — for the IK grasp-orientation solve."""
+    qadr, rng = [], []
+    for jname in _ARM_JOINT_NAMES:
+        jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, jname)
+        if jid >= 0:
+            qadr.append(int(model.jnt_qposadr[jid]))
+            rng.append(model.jnt_range[jid].copy())
+    return qadr, (np.array(rng) if rng else np.zeros((0, 2)))
+
+
+def _ik_grasp_orientation(model, data, target_xyz, arm_qadr, arm_dadr, sid, jnt_rng, iters=200):
+    """Non-destructive damped-least-squares IK: the joint config that places the grip site at
+    `target_xyz`; return its EE ROTATION matrix + whether it converged. Restores qpos afterwards.
+
+    The scripted zero-rotation descent floors ~5 cm high on elevated bowls (cabinet/stove) because
+    OSC_POSE's redundancy resolution can't reach the needed arm posture. Commanding the EE toward
+    THIS orientation lets OSC descend all the way (verified) — and stays in the OSC_POSE action
+    space the VLA also uses, so it's student-reproducible."""
+    saved = data.qpos.copy()
+    for _ in range(iters):
+        err = np.asarray(target_xyz, float) - data.site_xpos[sid]
+        if np.linalg.norm(err) < 1e-3:
+            break
+        jp = np.zeros((3, model.nv))
+        mujoco.mj_jacSite(model, data, jp, np.zeros((3, model.nv)), sid)
+        J = jp[:, arm_dadr]
+        dq = np.clip(J.T @ np.linalg.solve(J @ J.T + 0.05 * np.eye(3), err), -0.05, 0.05)
+        for k, a in enumerate(arm_qadr):
+            data.qpos[a] = np.clip(data.qpos[a] + dq[k], jnt_rng[k, 0], jnt_rng[k, 1])
+        mujoco.mj_forward(model, data)
+    R = data.site_xmat[sid].reshape(3, 3).copy()
+    reach = float(np.linalg.norm(np.asarray(target_xyz, float) - data.site_xpos[sid]))
+    data.qpos[:] = saved
+    mujoco.mj_forward(model, data)
+    return R, reach < 0.01
+
+
 def _unwrap_sim(env):
     sim   = env.sim
     model = getattr(sim, "model", None)
@@ -1349,6 +1387,26 @@ def run_libero_trial(
                 continue
             _avoid.append(_MpcObs(_pp, 0.045))         # clutter object, modest keep-out radius
         _pp_ctx["avoid"] = _avoid
+        # IK grasp ORIENTATION: the wrist tilt that lets OSC_POSE descend to the grip point. A
+        # zero-rotation descent floors ~5cm high on elevated bowls (cabinet/stove); commanding this
+        # orientation reaches all the way, in the OSC_POSE action space the VLA also uses.
+        _pp_ctx["grasp_R"] = None
+        _grip_pt = np.asarray(_pp_ctx["obj_pos"], float).copy()
+        if _pp_ctx.get("grasp_mode") == "rim":
+            _rimoff = getattr(getattr(controller or label_controller, "cfg", None), "rim_offset", 0.05)
+            _grip_pt = _grip_pt + np.array([0.0, _rimoff, 0.0])
+        _grip_pt[2] += 0.005
+        # ONLY for ELEVATED grasps (obj on a stove/cabinet, z > ~1.0): a normal top-down descent
+        # reaches table-height bowls fine, and the wrist tilt REGRESSES them (breaks the table grasp).
+        _elevated = float(_grip_pt[2]) > 1.0
+        _arm_qadr, _jnt_rng = _get_arm_qpos_indices(model)
+        _grip_sid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "gripper0_grip_site")
+        if _elevated and _grip_sid >= 0 and _arm_qadr:
+            _Rg, _ik_ok = _ik_grasp_orientation(model, data, _grip_pt, _arm_qadr, arm_dof_idx,
+                                                _grip_sid, _jnt_rng)
+            _pp_ctx["grasp_R"] = _Rg if _ik_ok else None
+            print(f"  [classical] elevated grasp (z={_grip_pt[2]:.2f}) → IK orientation: "
+                  f"{'solved' if _ik_ok else 'unreachable'}")
         for _c in (controller, label_controller):      # configure whichever are in play
             if _c is None:
                 continue
@@ -1508,6 +1566,14 @@ def run_libero_trial(
                             _ee_now, _obj_now, _pp_ctx["goal_pos"],
                             obstacles=_pp_ctx.get("avoid"), table_z=_pp_ctx["table_z"],
                             gripper=_grip_width(obs))
+                        # Servo the wrist toward the IK grasp orientation during the pick so OSC can
+                        # reach elevated bowls (zero-rotation descent floors ~5cm high).
+                        if _pp_ctx.get("grasp_R") is not None and _cphase in ("DESCEND", "GRASP"):
+                            _Rcur = _SciRot.from_quat(
+                                np.asarray(obs.get("robot0_eef_quat", [0, 0, 0, 1]), float)).as_matrix()
+                            _drot = _SciRot.from_matrix(_pp_ctx["grasp_R"] @ _Rcur.T).as_rotvec()
+                            _nominal = np.asarray(_nominal, float).copy()
+                            _nominal[3:6] = np.clip(4.0 * _drot, -1.0, 1.0)
                         action_queue = [_nominal.copy()]
                         vla_cnt += 1
                         if vla_cnt % 10 == 1:
