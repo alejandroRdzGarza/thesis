@@ -37,8 +37,19 @@ export PYTHONPATH=${PYTHONPATH:-.}
 DEMOS="$OUT/demos"
 DIST_CKPT="$OUT/distilled_ckpt"
 
-# Auto-enumerate the suite's tasks.
-TASKS=$($PY -c "from libero.libero import benchmark as b; d=b.get_benchmark_dict(); s=d['$SUITE'](safety_level='$LEVEL') if '$SUITE'.startswith('safelibero_') else d['$SUITE'](); print(' '.join(str(i) for i in range(s.get_num_tasks())))")
+# Auto-enumerate the suite's tasks. LIBERO prints "[info] using task orders ..." during suite
+# construction; redirect that to devnull and take only the final indices line (tail -n1).
+TASKS=$($PY - "$SUITE" "$LEVEL" <<'PYEOF' | tail -n1
+import sys, os, contextlib
+from libero.libero import benchmark as b
+suite, level = sys.argv[1], sys.argv[2]
+with contextlib.redirect_stdout(open(os.devnull, 'w')):
+    d = b.get_benchmark_dict()
+    s = d[suite](safety_level=level) if suite.startswith('safelibero_') else d[suite]()
+    n = s.get_num_tasks()
+print(' '.join(str(i) for i in range(n)))
+PYEOF
+)
 NTASKS=$(echo "$TASKS" | wc -w | tr -d ' ')
 
 echo "==================================================================="
