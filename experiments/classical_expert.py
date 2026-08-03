@@ -228,6 +228,7 @@ class PickPlaceController:
     _timer: int = 0
     _stall: int = 0
     _last_z: float | None = None
+    _descend_min_z: float | None = None   # lowest EE z reached in the current descent (contact test)
     _descending: bool = True
     _obstacles: object = None    # list of nearby objects to avoid (multi-obstacle MPC)
 
@@ -240,6 +241,7 @@ class PickPlaceController:
         self._timer = 0
         self._stall = 0
         self._last_z = None
+        self._descend_min_z = None
         self._descending = True
 
     def _enter(self, phase: str):
@@ -247,21 +249,22 @@ class PickPlaceController:
         self._timer = 0
         self._stall = 0
         self._last_z = None
+        self._descend_min_z = None
         self._descending = True
 
     def _contact(self, ee_z: float) -> bool:
-        """True once the EE is COMMANDED down but stops moving (bottomed out) for `stall_patience`
-        steps. Skips steps where we intentionally paused the descent to re-centre (else the pause
-        false-triggers contact and grasps high)."""
+        """True once a commanded descent BOTTOMS OUT: the EE stops reaching new lows for
+        `stall_patience` steps. Min-tracking (not consecutive-step) makes it robust to the ±few-mm
+        bounce when the gripper hits the object/shelf. Only counts steps where we're actually
+        descending (self._descending); intentional re-centre pauses neither count nor reset, so a
+        paused descent still detects contact instead of false-triggering high."""
         if not self._descending:
+            return self._stall >= self.cfg.stall_patience
+        if self._descend_min_z is None or ee_z < self._descend_min_z - self.cfg.stall_eps:
+            self._descend_min_z = ee_z         # new low → still making downward progress
             self._stall = 0
-            self._last_z = ee_z
-            return False
-        if self._last_z is not None and (self._last_z - ee_z) < self.cfg.stall_eps:
-            self._stall += 1
         else:
-            self._stall = 0
-        self._last_z = ee_z
+            self._stall += 1                   # no new low → bottoming out
         return self._stall >= self.cfg.stall_patience
 
     def _careful_descend(self, ee_pos, target, grip) -> np.ndarray:
@@ -359,14 +362,24 @@ class PickPlaceController:
             aligned = np.linalg.norm(ee[:2] - gp[:2]) < c.xy_tol
             if not aligned or ee[2] > gp[2] + c.descend_start_h:
                 self.phase = "APPROACH"                   # hover above the grip point (avoidance on)
+                self._stall = 0; self._descend_min_z = None   # reset descent-stall tracking on (re)approach
                 tgt = np.array([gp[0], gp[1], gp[2] + c.approach_h])
                 return self._goto(ee, tgt, _GRIP_OPEN), self.phase
             if ee[2] <= gp[2] + c.grasp_dz + c.grasp_z_tol:
-                self.phase = "GRASP"                      # at the grip point → close + hold
+                self.phase = "GRASP"                      # at the grip height → close + hold
                 return self._goto(ee, ee, _GRIP_CLOSE), self.phase
-            self.phase = "DESCEND"                        # centred above → careful XY-locked descent
+            # Careful XY-locked descent. Grasp on CONTACT too: if commanded down but the EE bottoms
+            # out (elevated bowls — stove/cabinet — where the gripper hits the object/shelf before
+            # the EE frame reaches obj_z), treat the stall as contact and close (the pure geometric
+            # trigger above never fires there). _careful_descend sets _descending so _contact only
+            # counts a real stall, not the intentional re-centre pauses.
             tgt = np.array([gp[0], gp[1], gp[2] + c.grasp_dz])
-            return self._careful_descend(ee, tgt, _GRIP_OPEN), self.phase
+            descend_action = self._careful_descend(ee, tgt, _GRIP_OPEN)
+            if self._contact(ee[2]):
+                self.phase = "GRASP"
+                return self._goto(ee, ee, _GRIP_CLOSE), self.phase
+            self.phase = "DESCEND"
+            return descend_action, self.phase
 
         # ── PLACE: object is held ──
         ee_goal_xy = goal[:2] + gov[:2]                   # EE xy that puts the OBJECT over the goal
