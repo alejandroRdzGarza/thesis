@@ -181,7 +181,9 @@ class ControllerConfig:
     place_dz: float = 0.02      # extra m above the goal for the object CENTRE when releasing
     grasp_hold: int = 8         # control steps to hold while the gripper closes
     release_hold: int = 5       # control steps to hold open after releasing
-    descend_xy_lock: float = 0.012  # only lower z once XY error is under this (keeps the grip centred)
+    descend_xy_lock: float = 0.020  # lower z once XY error is under this. MUST be >= xy_tol (0.015):
+    #                                 if tighter, an extended reach (elevated bowls) that can only
+    #                                 hold XY to ~0.012 oscillates at the boundary and never descends.
     descend_z_cap: float = 0.30 # cap the per-step descent command so OSC coupling doesn't drift XY
     carry_margin: float = 0.04  # extra obstacle clearance while transiting with a held object (its
     #                             extent beyond the EE) — not during PLACE (goal may be near the obstacle)
