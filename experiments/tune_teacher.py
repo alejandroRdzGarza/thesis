@@ -31,20 +31,25 @@ import json
 import time
 from pathlib import Path
 
-# Candidate knob settings, in priority order. Each entry is (where, field, values); the search
-# tries every value for one knob, keeps the best, then moves to the next knob (coordinate descent),
-# so cost is linear in the number of knobs rather than exponential.
-KNOBS: list[tuple[str, str, list]] = [
-    ("grasp", "flip_side", [False, True]),      # pinch the other rim side (overrides the geometric pick)
-    ("cfg", "approach_h", [0.12, 0.09, 0.16]),  # hover height before descending
-    ("cfg", "rim_offset", [0.05, 0.04, 0.06]),  # how far along the rim to pinch
-    ("mpc", "radius_buffer", [0.03, 0.0, 0.05]),  # planner keep-out beyond the CBF radius
-    ("cfg", "descend_z_cap", [0.30, 0.20]),     # descent speed (XY drift vs stalling high)
-    ("cfg", "stall_patience", [12, 16, 20]),    # steps of no progress before calling it contact
-    ("cfg", "lift_h", [0.18, 0.12, 0.08]),      # lift before transporting
-    ("cfg", "goal_clear_h", [0.22, 0.16, 0.12]),  # carry height above the goal
-    ("cfg", "setdown_reach", [0.06, 0.04, 0.08]),  # how far below the goal to press on set-down
-    ("cfg", "place_xy_tol", [0.035, 0.025]),    # centring tolerance before releasing
+# Candidate knobs, in priority order: (where, field, values, phases-it-can-fix).
+#
+# The search is coordinate descent — try every value of one knob, keep the best, move on — so cost
+# is linear in the knob count. It is also PHASE-DIRECTED: only knobs that could plausibly fix the
+# phase the scene is currently dying in are tried, and the failing phase is recomputed after every
+# accepted improvement. That matters because these failures cascade (fix the descent and the scene
+# then fails in transport), and because searching all ten knobs on every scene costs hours of
+# rollouts to mostly re-confirm the default.
+KNOBS: list[tuple[str, str, list, set]] = [
+    ("grasp", "flip_side", [False, True], {"APPROACH", "DESCEND", "GRASP"}),   # pinch the other rim side
+    ("cfg", "approach_h", [0.12, 0.09, 0.16], {"APPROACH", "DESCEND"}),        # hover height
+    ("mpc", "radius_buffer", [0.03, 0.0, 0.05], {"APPROACH", "DESCEND", "TRANSPORT"}),  # planner keep-out
+    ("cfg", "rim_offset", [0.05, 0.04, 0.06], {"DESCEND", "GRASP", "LIFT"}),   # where on the rim to pinch
+    ("cfg", "descend_z_cap", [0.30, 0.20], {"DESCEND", "GRASP"}),              # descent speed
+    ("cfg", "stall_patience", [12, 16, 20], {"DESCEND", "GRASP"}),             # contact patience
+    ("cfg", "lift_h", [0.18, 0.12, 0.08], {"LIFT", "TRANSPORT"}),              # lift before transporting
+    ("cfg", "goal_clear_h", [0.22, 0.16, 0.12], {"TRANSPORT", "PLACE"}),       # carry height
+    ("cfg", "setdown_reach", [0.06, 0.04, 0.08], {"PLACE", "RELEASE", "DONE"}),   # set-down press
+    ("cfg", "place_xy_tol", [0.035, 0.025], {"PLACE", "RELEASE", "DONE"}),     # release centring
 ]
 
 
@@ -52,9 +57,20 @@ def _score(succ: float, coll: float, w_coll: float) -> float:
     return succ - w_coll * coll
 
 
+def _failing_phases(outcomes: list[tuple[bool, str]]) -> set:
+    """Where the FAILED episodes died — the bottleneck the search should attack next.
+
+    Successful episodes are excluded: their terminal phase says nothing about what's broken. A
+    failure that still reached DONE/RELEASE is a placement-precision failure, which the set-down
+    knobs address, so those phases stay in the set."""
+    return {ph for ok, ph in outcomes if not ok and not ph.startswith("ERR:")}
+
+
 def evaluate(env, lang, init_states, episodes, horizon, replan, suite, level, task,
-             candidate: dict) -> tuple[float, float, list[str]]:
-    """Run `episodes` inits under one candidate profile → (success_rate, collision_rate, phases)."""
+             candidate: dict) -> tuple[float, float, list[tuple[bool, str]]]:
+    """Run `episodes` inits under one candidate profile.
+
+    Returns (success_rate, collision_rate, [(success, terminal_phase) per episode])."""
     from experiments.libero_runner import run_libero_trial
     from experiments.classical_expert import PickPlaceController
     import experiments.teacher_profiles as TP
@@ -65,7 +81,7 @@ def evaluate(env, lang, init_states, episodes, horizon, replan, suite, level, ta
     TP.PROFILE_OVERRIDES[key] = candidate
     try:
         succ = coll = 0
-        phases: list[str] = []
+        outcomes: list[tuple[bool, str]] = []
         for ep in episodes:
             ctrl = PickPlaceController()
             if candidate.get("cfg", {}).get("rim_offset") is not None:
@@ -81,12 +97,13 @@ def evaluate(env, lang, init_states, episodes, horizon, replan, suite, level, ta
                         scene_name=f"tune_{suite}_L{level}_t{task}", save_video=None,
                         teacher_suite=suite, teacher_level=level, teacher_task=task)
                 s = m.summary()
-                succ += int(bool(s["goal_reached"])); coll += int(bool(s["collision_detected"]))
-                phases.append(ctrl.phase)
+                ok = bool(s["goal_reached"])
+                succ += int(ok); coll += int(bool(s["collision_detected"]))
+                outcomes.append((ok, ctrl.phase))
             except Exception as e:
-                phases.append(f"ERR:{type(e).__name__}")
+                outcomes.append((False, f"ERR:{type(e).__name__}"))
         n = max(len(episodes), 1)
-        return succ / n, coll / n, phases
+        return succ / n, coll / n, outcomes
     finally:
         if saved is None:
             TP.PROFILE_OVERRIDES.pop(key, None)
@@ -123,9 +140,15 @@ def tune_task(suite: str, level: str, task: int, episodes: list[int], *, horizon
                                   suite, level, task, base_cand)
     best_score = _score(best_s, best_c, w_coll)
     best_cand = base_cand
-    say(f"  auto            success {best_s:>4.0%}  collision {best_c:>4.0%}  score {best_score:+.3f}  {ph}")
+    best_phases = _failing_phases(ph)
+    say(f"  auto            success {best_s:>4.0%}  collision {best_c:>4.0%}  score {best_score:+.3f}"
+        f"  stuck in {sorted(best_phases) or ['—']}")
 
-    for where, field, values in KNOBS:
+    for where, field, values, fixes in KNOBS:
+        if best_s >= 1.0 and best_c <= 0.0:
+            break                                      # perfect on this scene — stop spending rollouts
+        if best_phases and not (fixes & best_phases):
+            continue                                   # this knob can't touch the current bottleneck
         for v in values:
             cand = _with_knob(best_cand, where, field, v)
             if cand == best_cand:
@@ -136,12 +159,11 @@ def tune_task(suite: str, level: str, task: int, episodes: list[int], *, horizon
             mark = ""
             if sc > best_score + 1e-9:
                 best_score, best_s, best_c, best_cand = sc, s, c, cand
-                mark = "  ← best"
+                best_phases = _failing_phases(ph)      # the bottleneck moves — follow it
+                mark = f"  ← best (now stuck in {sorted(best_phases) or ['—']})"
             say(f"  {field}={v!r:<8}  success {s:>4.0%}  collision {c:>4.0%}  score {sc:+.3f}{mark}")
             if best_s >= 1.0 and best_c <= 0.0:
-                break                                  # perfect on this scene — stop spending rollouts
-        if best_s >= 1.0 and best_c <= 0.0:
-            break
+                break
 
     with contextlib.suppress(Exception):
         env.close()
