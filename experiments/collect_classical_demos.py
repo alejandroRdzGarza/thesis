@@ -33,6 +33,11 @@ def main():
     ap.add_argument("--out", default="results_distill/round0")
     ap.add_argument("--horizon", type=int, default=300)
     ap.add_argument("--replan", type=int, default=5)
+    ap.add_argument("--clean-only", action="store_true",
+                    help="only write a trace when the episode SUCCEEDED and stayed collision-free. "
+                         "BC discards the rest anyway (flow_bc_train --success-only), and each "
+                         "trace carries ~60 image pairs — on a full-grid collection this is the "
+                         "difference between ~4 GB and ~10 GB on disk.")
     args = ap.parse_args()
 
     from experiments.libero_runner import make_libero_env, run_libero_trial
@@ -59,14 +64,18 @@ def main():
                 teacher_suite=args.suite, teacher_level=args.level, teacher_task=task)
             s = m.summary()
             ok = bool(s["goal_reached"]); cl = bool(s["collision_detected"])
+            is_clean = ok and not cl
             tp = str((out / f"{args.suite}_L{args.level}_t{task}_ep{ep}_trace.npz").resolve())
-            save_episode_trace(m.policy_trace, tp)
-            rows.append({"trace_path": tp, "r_success": 1.5 if ok else 0.0,
-                         "robot_caused_collision": int(cl),
-                         "suite": args.suite, "task": task, "episode": ep})
-            n += 1; succ += int(ok); coll += int(cl); clean += int(ok and not cl)
+            if is_clean or not args.clean_only:
+                save_episode_trace(m.policy_trace, tp)
+                rows.append({"trace_path": tp, "r_success": 1.5 if ok else 0.0,
+                             "robot_caused_collision": int(cl),
+                             "suite": args.suite, "task": task, "episode": ep})
+            n += 1; succ += int(ok); coll += int(cl); clean += int(is_clean)
             print(f"  {args.suite} L{args.level} t{task} ep{ep}: succ={ok} coll={cl} "
-                  f"queries={len(m.policy_trace)} → {Path(tp).name}", flush=True)
+                  f"queries={len(m.policy_trace)} "
+                  f"{'→ ' + Path(tp).name if (is_clean or not args.clean_only) else '(dropped)'}",
+                  flush=True)
         try:
             env.close()
         except Exception:
