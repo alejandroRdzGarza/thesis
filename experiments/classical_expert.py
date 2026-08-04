@@ -113,9 +113,16 @@ def mpc_safe_delta(p, target, obstacles, cfg: MPCConfig) -> np.ndarray:
             continue
         c = np.asarray(ob.pos, float)
         r = float(getattr(ob, "safety_radius", 0.05)) + cfg.radius_buffer
+        # A keep-out that SWALLOWS the target makes the QP infeasible, and an infeasible QP
+        # stalls the arm on the boundary (the APPROACH freeze). Shrink such a sphere to just
+        # inside the target so the path can still be planned; the reactive CBF downstream is
+        # untouched, so hard safety does not depend on this.
+        d_tgt = float(np.linalg.norm(target - c))
+        if d_tgt < r:
+            r = max(d_tgt - 0.01, 0.0)
         tt = float(np.clip(np.dot(c - p, to) / dist_to**2, 0.0, 1.0)) if dist_to > 1e-9 else 0.0
         d = float(np.linalg.norm((p + tt * to) - c))
-        if d < r + cfg.activate_margin:
+        if r > 1e-6 and d < r + cfg.activate_margin:
             active.append((c, r, d))
     if not active:
         return np.clip(cfg.kp_fallback * (target - p), -1.0, 1.0)
@@ -222,6 +229,9 @@ class PickPlaceController:
     mpc_cfg: MPCConfig = field(default_factory=MPCConfig)
     place_mode: str = "in"      # 'in' = drop into a container (basket); 'on' = set down onto a surface
     grasp_mode: str = "top"     # 'top' = straddle over the object; 'rim' = pinch a wide bowl's rim
+    grasp_offset_xy: object = None   # 3-vector obj→grip point, set per scene by teacher_profiles
+    #                             (which SIDE of a wide bowl to pinch). None → legacy +Y rim_offset.
+    profile_name: str = "default"    # which teacher profile configured this controller (for logs)
     reactive: bool = True       # True = stateless Markov oracle (phase inferred from observables);
     #                             False = the legacy latched state machine (kept for A/B comparison)
     phase: str = "APPROACH"
@@ -235,6 +245,23 @@ class PickPlaceController:
     _obstacles: object = None    # list of nearby objects to avoid (multi-obstacle MPC)
 
     PHASES = ("APPROACH", "DESCEND", "GRASP", "LIFT", "TRANSPORT", "PLACE", "RELEASE", "DONE")
+
+    def grip_point(self, obj_pos) -> np.ndarray:
+        """Where the EE must go to grasp `obj_pos`.
+
+        A wide bowl doesn't fit the 8 cm gripper, so it's pinched by the RIM: the grip point is
+        offset ~a bowl radius along the gripper's closing axis (world Y, since the controller
+        commands zero rotation). WHICH side is a per-scene decision — reaching towards a nearby
+        obstacle makes the barrier refuse the approach — so `grasp_offset_xy` is set by
+        `teacher_profiles.resolve_profile`. Falls back to the legacy +Y offset when unset, and the
+        runner uses this same method for the IK grasp orientation so both agree on the target.
+        """
+        gp = np.asarray(obj_pos, dtype=float).copy()
+        if self.grasp_offset_xy is not None:
+            return gp + np.asarray(self.grasp_offset_xy, dtype=float)
+        if self.grasp_mode == "rim":
+            gp = gp + np.array([0.0, self.cfg.rim_offset, 0.0])
+        return gp
 
     def reset(self):
         self.phase = "APPROACH"
@@ -346,9 +373,7 @@ class PickPlaceController:
         goal = np.asarray(goal_pos, dtype=float)
         base_z = table_z if table_z is not None else obj[2]
 
-        gp = obj.copy()
-        if self.grasp_mode == "rim":
-            gp = gp + np.array([0.0, c.rim_offset, 0.0])
+        gp = self.grip_point(obj)
         gov = ee - obj                                    # LIVE grasp offset (valid whenever holding)
         self.grasp_offset_vec = gov.copy()                # keep for the end-of-episode debug dump
         self.grasp_offset = float(ee[2] - obj[2])
@@ -426,9 +451,7 @@ class PickPlaceController:
 
         # Rim grasp: offset the grip POINT along the gripper's closing axis (world Y) by ~bowl
         # radius, so one finger drops inside the bowl and one outside → pinch the rim wall on close.
-        gp = obj.copy()
-        if self.grasp_mode == "rim":
-            gp = gp + np.array([0.0, c.rim_offset, 0.0])
+        gp = self.grip_point(obj)
         # After grasp, the object hangs at (EE − grasp_offset_vec); to put it at a target we drive
         # the EE to target + grasp_offset_vec.
         gov = (np.asarray(self.grasp_offset_vec, float)

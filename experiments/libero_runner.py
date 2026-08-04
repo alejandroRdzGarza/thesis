@@ -1242,6 +1242,11 @@ def run_libero_trial(
     record_policy_trace: bool = False,
     controller=None,
     label_controller=None,
+    # Task identity, used ONLY to look up a tuned per-task teacher profile
+    # (experiments/teacher_profiles.json). Leave unset for the purely geometry-derived strategy.
+    teacher_suite: str | None = None,
+    teacher_level: str | None = None,
+    teacher_task: int | None = None,
 ) -> MetricsTracker:
     """Run one LIBERO episode using OpenVLA + optional Cartesian CBF.
 
@@ -1416,14 +1421,32 @@ def run_libero_trial(
                 continue
             _avoid.append(_MpcObs(_pp, 0.045))         # clutter object, modest keep-out radius
         _pp_ctx["avoid"] = _avoid
+        # ── Per-scene teacher profile ────────────────────────────────────────
+        # One universal controller config cannot cover every scene (goal LI froze in APPROACH on
+        # 16/16 episodes because the hard-coded +Y rim offset reached TOWARDS the obstacle).
+        # Resolve the strategy from the scene geometry, then apply any tuned per-task override.
+        from experiments.teacher_profiles import SceneFeatures, resolve_profile
+        _feat = SceneFeatures(
+            obj_pos=np.asarray(_pp_ctx["obj_pos"], float),
+            goal_pos=np.asarray(_pp_ctx["goal_pos"], float),
+            place_mode=_pp_ctx.get("place_mode", "in"),
+            grasp_mode=_pp_ctx.get("grasp_mode", "top"),
+            obstacle_pos=(np.asarray(obstacles[0].pos, float) if obstacles else None),
+            obstacle_radius=(float(getattr(obstacles[0], "safety_radius", 0.10)) if obstacles else 0.10),
+            clutter=[(np.asarray(o.pos, float), float(getattr(o, "safety_radius", 0.045)))
+                     for o in _avoid[len(obstacles):]],
+        )
+        _base = controller or label_controller
+        _profile = resolve_profile(_feat, _base.cfg, _base.mpc_cfg,
+                                   suite=teacher_suite, level=teacher_level, task=teacher_task)
+        _pp_ctx["profile"] = _profile
+        print(f"  [teacher] {_profile.describe()}")
         # IK grasp ORIENTATION: the wrist tilt that lets OSC_POSE descend to the grip point. A
         # zero-rotation descent floors ~5cm high on elevated bowls (cabinet/stove); commanding this
         # orientation reaches all the way, in the OSC_POSE action space the VLA also uses.
         _pp_ctx["grasp_R"] = None
-        _grip_pt = np.asarray(_pp_ctx["obj_pos"], float).copy()
-        if _pp_ctx.get("grasp_mode") == "rim":
-            _rimoff = getattr(getattr(controller or label_controller, "cfg", None), "rim_offset", 0.05)
-            _grip_pt = _grip_pt + np.array([0.0, _rimoff, 0.0])
+        # Same grip point the controller will drive to (profile-selected grasp side).
+        _grip_pt = np.asarray(_pp_ctx["obj_pos"], float) + np.asarray(_profile.grasp_offset, float)
         _grip_pt[2] += 0.005
         # ONLY for ELEVATED grasps (obj on a stove/cabinet, z > ~1.0): a normal top-down descent
         # reaches table-height bowls fine, and the wrist tilt REGRESSES them (breaks the table grasp).
@@ -1444,6 +1467,7 @@ def run_libero_trial(
                 _c.place_mode = _pp_ctx.get("place_mode", "in")
             if hasattr(_c, "grasp_mode"):
                 _c.grasp_mode = _pp_ctx.get("grasp_mode", "top")
+            _profile.apply(_c)                          # grasp side + per-scene controller knobs
         _role = "drive" if controller is not None else "LABEL"
         print(f"  [classical:{_role}] pick '{_pp_ctx['obj_key'].replace('_pos','')}' "
               f"@ {np.round(_pp_ctx['obj_pos'],3)} → goal {np.round(_pp_ctx['goal_pos'],3)}  "
@@ -2173,6 +2197,7 @@ def run_libero_trial(
         _fg = np.asarray(_pp_ctx["goal_pos"], dtype=float)
         _obj0 = np.asarray(_pp_ctx["obj_pos"], dtype=float)
         print("  ── classical debug ──────────────────────────────────────")
+        print(f"    teacher profile    : {_pp_ctx['profile'].describe()}")
         print(f"    final phase        : {controller.phase}")
         print(f"    grasp_offset (EE−obj_z at grasp): {getattr(controller, 'grasp_offset', None)}")
         print(f"    object start  pos  : {np.round(_obj0, 3)}")

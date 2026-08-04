@@ -93,6 +93,7 @@ def main():
             policy_fn=policy_fn, record_policy_trace=False, controller=controller,
             scene_name=f"{args.suite}_L{args.level}_t{args.task}",
             save_video=vid,
+            teacher_suite=args.suite, teacher_level=args.level, teacher_task=args.task,
         )
         s = m.summary()
         results.append((ep, bool(s["goal_reached"]), bool(s["collision_detected"]),

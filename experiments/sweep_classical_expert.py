@@ -90,7 +90,8 @@ def main():
                                 obstacles=[], goal_pos=None, auto_goal=True, use_geo_success=False,
                                 use_cbf=True, vla="pi05", auto_detect_obstacle=True, aegis_faithful=True,
                                 replan_steps=args.replan, horizon=args.horizon, controller=controller,
-                                scene_name=tag, save_video=vid)
+                                scene_name=tag, save_video=vid,
+                                teacher_suite=suite, teacher_level=level, teacher_task=task)
                         s = m.summary()
                         ok, cl, ph = bool(s["goal_reached"]), bool(s["collision_detected"]), controller.phase
                     except Exception as e:

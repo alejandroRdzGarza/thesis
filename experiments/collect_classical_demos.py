@@ -53,7 +53,10 @@ def main():
                 obstacles=[], goal_pos=None, auto_goal=True, use_geo_success=False, use_cbf=True,
                 vla="pi05", auto_detect_obstacle=True, aegis_faithful=True, replan_steps=args.replan,
                 horizon=args.horizon, controller=controller, record_policy_trace=True,
-                scene_name=f"{args.suite}_L{args.level}_t{task}")
+                scene_name=f"{args.suite}_L{args.level}_t{task}",
+                # Per-scene teacher: the controller is specialised to this task's geometry
+                # (grasp side, elevation, corridor) plus any tuned override.
+                teacher_suite=args.suite, teacher_level=args.level, teacher_task=task)
             s = m.summary()
             ok = bool(s["goal_reached"]); cl = bool(s["collision_detected"])
             tp = str((out / f"{args.suite}_L{args.level}_t{task}_ep{ep}_trace.npz").resolve())
