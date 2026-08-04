@@ -22,8 +22,9 @@ for suite in $SUITES; do
     if [ -f "$d/manifest.csv" ]; then echo "[skip] $d exists"; continue; fi
     echo "=== collect $suite L$level tasks[$TASKS] ==="
     $PY -m experiments.collect_classical_demos --suite "$suite" --level "$level" \
-        --tasks $TASKS --episodes $EPISODES --horizon "$HORIZON" --out "$d" \
-        2>&1 | grep -E "CLEAN|succ|coll|→" | tail -3
+        --tasks $TASKS --episodes $EPISODES --horizon "$HORIZON" --out "$d"
+    grep -h "CLEAN" "$d"/*.log 2>/dev/null | tail -1
+    [ -f "$d/manifest.csv" ] && echo "  → $(tail -n +2 "$d/manifest.csv" | awk -F, '$2>0 && $3==0' | wc -l | tr -d ' ') CLEAN demos in $d"
   done
 done
 echo; echo "collected → $OUT/  (per suite/level manifests). Clean-demo counts above."
