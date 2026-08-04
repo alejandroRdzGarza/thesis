@@ -386,6 +386,16 @@ class PickPlaceController:
             return self._goto(ee, ee, _GRIP_OPEN), self.phase
 
         if not holding:                                   # ── PICK: align, descend, close ──
+            # MISSED GRASP → reopen and retry. Without this the controller deadlocks: once the
+            # descent bottoms out, `_contact` latches (we command zero motion, so the EE stops
+            # reaching new lows and `_stall` only grows), so every later step re-enters GRASP and
+            # the arm can never descend again. Purely observable — the gripper has finished closing
+            # yet the object isn't with us — so the oracle stays Markov.
+            if gripper is not None and gripper < c.grip_closed:
+                self.phase = "APPROACH"
+                self._stall = 0; self._descend_min_z = None   # let the next descent start fresh
+                tgt = np.array([gp[0], gp[1], gp[2] + c.approach_h])
+                return self._goto(ee, tgt, _GRIP_OPEN), self.phase
             aligned = np.linalg.norm(ee[:2] - gp[:2]) < c.xy_tol
             if not aligned or ee[2] > gp[2] + c.descend_start_h:
                 self.phase = "APPROACH"                   # hover above the grip point (avoidance on)

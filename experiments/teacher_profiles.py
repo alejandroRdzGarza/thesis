@@ -40,6 +40,11 @@ _PROFILE_JSON = Path(__file__).with_name("teacher_profiles.json")
 # SafeLIBERO tables sit at z≈0.90; stove/cabinet surfaces at z≈1.13.
 ELEVATED_Z = 1.00
 
+# Panda finger separation when fully open. An object wider than this (leaving clearance for the
+# finger thickness) cannot be straddled top-down and has to be pinched at an EDGE instead.
+GRIPPER_MAX_OPEN = 0.08
+STRADDLE_MAX_WIDTH = 0.068
+
 
 @dataclass
 class SceneFeatures:
@@ -51,6 +56,15 @@ class SceneFeatures:
     obstacle_pos: np.ndarray | None  # the ACTIVE obstacle (the one scored by CAR), if any
     obstacle_radius: float
     clutter: list = field(default_factory=list)   # other scene objects to route around (pos, r)
+    # Height of the object's TOP above its reported centre, measured from the MuJoCo geoms.
+    # LIBERO reports object poses at the body CENTRE, but a top-down grasp has to meet the object
+    # at its TOP — 4 cm above centre for a pudding box, 8.5 cm for an orange-juice carton. None
+    # when the geometry couldn't be read (rules then fall back to the centre-relative defaults).
+    obj_top_dz: float | None = None
+    # Object extent along the gripper's closing axis (world Y). The Panda's fingers open to 8 cm,
+    # so anything wider CANNOT be straddled top-down — the fingers land on the lid and close on
+    # air. None when the geometry couldn't be read.
+    obj_width_y: float | None = None
 
     @property
     def obj_elevated(self) -> bool:
@@ -78,6 +92,7 @@ class SceneFeatures:
 class TeacherProfile:
     """The resolved strategy for one scene: how to grasp, and which controller knobs to move."""
     name: str = "default"
+    grasp_mode: str | None = None        # 'top' | 'rim'; None = leave the caller's choice alone
     grasp_offset: np.ndarray = field(default_factory=lambda: np.zeros(3))
     cfg_overrides: dict = field(default_factory=dict)     # → ControllerConfig fields
     mpc_overrides: dict = field(default_factory=dict)     # → MPCConfig fields
@@ -97,12 +112,14 @@ class TeacherProfile:
         controller.cfg = replace(base_cfg, **self.cfg_overrides)
         controller.mpc_cfg = replace(base_mpc, **self.mpc_overrides)
         controller.grasp_offset_xy = np.asarray(self.grasp_offset, float)
+        if self.grasp_mode is not None:
+            controller.grasp_mode = self.grasp_mode
         controller.profile_name = self.name
         return self
 
     def describe(self) -> str:
         off = np.round(self.grasp_offset, 3)
-        bits = [f"grasp_offset={off}"]
+        bits = [f"grasp={self.grasp_mode or '-'}", f"offset={off}"]
         if self.cfg_overrides:
             bits.append("cfg=" + ",".join(f"{k}={v}" for k, v in sorted(self.cfg_overrides.items())))
         if self.mpc_overrides:
@@ -142,7 +159,27 @@ def derive_profile(feat: SceneFeatures, base_cfg, base_mpc) -> TeacherProfile:
     mpc_over: dict = {}
     notes: list[str] = []
 
-    offset, why = choose_grasp_offset(feat, base_cfg.rim_offset, base_cfg.approach_h)
+    # ── Grasp PRIMITIVE, from measured width ─────────────────────────────────
+    # resolve_pick_and_place picks the rim grasp by NAME ("bowl" in the object name). That's a
+    # heuristic about SHAPE, so check the actual shape: anything too wide for the 8 cm gripper to
+    # straddle gets pinched at an edge instead, like a bowl rim, offset by its own half-width.
+    #
+    # NB this does NOT currently fire anywhere on SafeLIBERO — every target measures 0.049-0.054 m
+    # along the closing axis (measured from the true point cloud, not the bounding sphere). It is a
+    # guard against a name heuristic silently mis-classifying a future object, not a fix for the
+    # object-suite grasp failure, whose cause is still open.
+    grasp_mode = feat.grasp_mode
+    rim_offset = base_cfg.rim_offset
+    if (feat.obj_width_y is not None and feat.obj_width_y > STRADDLE_MAX_WIDTH
+            and grasp_mode != "rim"):
+        grasp_mode = "rim"
+        rim_offset = round(feat.obj_width_y / 2.0, 4)
+        cfg_over["rim_offset"] = rim_offset
+        notes.append(f"too wide to straddle ({feat.obj_width_y:.3f} m > {STRADDLE_MAX_WIDTH}) "
+                     f"→ edge pinch at ±{rim_offset:.3f}")
+
+    feat = replace(feat, grasp_mode=grasp_mode)
+    offset, why = choose_grasp_offset(feat, rim_offset, base_cfg.approach_h)
     notes.append(why)
 
     grip = np.asarray(feat.obj_pos, float) + offset
@@ -165,6 +202,24 @@ def derive_profile(feat: SceneFeatures, base_cfg, base_mpc) -> TeacherProfile:
         notes.append(f"tight grasp corridor (gap {gap:.3f} m) → MPC buffer relaxed, CBF unchanged")
         # Come down more vertically so the lateral swing near the obstacle is short.
         cfg_over["approach_h"] = 0.09
+
+    # ── Tall object, top-down grasp ──────────────────────────────────────────
+    # The controller aims `grasp_dz` above the object's reported CENTRE, but a top grasp meets the
+    # object at its TOP. On the object suite (cartons, boxes) that gap is 4-8.5 cm: the gripper
+    # bottoms out on the lid, the geometric grasp trigger never fires, and `_holding` then rejects
+    # the grasp because the EE sits further above the centre than `hold_z` allows — the controller
+    # deadlocks with the object untouched. Aim just below the lid instead, and widen the hold test
+    # to the offset a successful grasp actually produces.
+    #
+    # Top grasps ONLY. A wide bowl is pinched by the rim: it needs the deep centre-relative target
+    # plus the contact-stall detector to seat the fingers on the rim wall, and raising that target
+    # to just under the rim would stop the descent before the pinch.
+    if feat.grasp_mode == "top" and feat.obj_top_dz is not None and feat.obj_top_dz > 0.02:
+        grip_depth = min(0.03, feat.obj_top_dz)      # how far below the lid to place the grip site
+        cfg_over["grasp_dz"] = round(feat.obj_top_dz - grip_depth, 4)
+        cfg_over["hold_z"] = round(feat.obj_top_dz + 0.04, 4)
+        notes.append(f"tall top grasp (top {feat.obj_top_dz:+.3f} above centre) → "
+                     f"grip at centre{cfg_over['grasp_dz']:+.3f}, hold_z {cfg_over['hold_z']:.3f}")
 
     # ── Elevated pick (bowl on a stove / cabinet shelf) ──────────────────────
     if feat.obj_elevated:
@@ -195,8 +250,8 @@ def derive_profile(feat: SceneFeatures, base_cfg, base_mpc) -> TeacherProfile:
         name += "+elevated"
     if gap < crowd_tol:
         name += "+tight"
-    return TeacherProfile(name=name, grasp_offset=offset, cfg_overrides=cfg_over,
-                          mpc_overrides=mpc_over, notes=notes)
+    return TeacherProfile(name=name, grasp_mode=grasp_mode, grasp_offset=offset,
+                          cfg_overrides=cfg_over, mpc_overrides=mpc_over, notes=notes)
 
 
 # ── Layer 2: explicit per-task overrides ─────────────────────────────────────────────────

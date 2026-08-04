@@ -1426,6 +1426,28 @@ def run_libero_trial(
         # 16/16 episodes because the hard-coded +Y rim offset reached TOWARDS the obstacle).
         # Resolve the strategy from the scene geometry, then apply any tuned per-task override.
         from experiments.teacher_profiles import SceneFeatures, resolve_profile
+        # How far the target object's TOP sits above its reported centre. LIBERO reports body
+        # centres, but a top-down grasp meets the object at its lid — 8.5 cm higher for a carton.
+        # Read it from the real geoms so the grasp target follows the object, not a constant.
+        # Uses the same true-geometry point cloud the CBF fits its ellipsoids to (real mesh
+        # vertices + primitive surface samples), so the grasp is planned against the object's
+        # actual shape rather than a name heuristic.
+        _obj_top_dz = _obj_width_y = None
+        try:
+            from experiments.cbf_visualizer import get_obstacle_point_cloud as _cloud_of
+            _oname = _pp_ctx["obj_key"].replace("_pos", "")
+            _pc = None
+            for _sfx in ("", "_main", "_g0"):
+                _pc = _cloud_of(model, data, f"{_oname}{_sfx}")
+                if _pc is not None and len(_pc):
+                    break
+            if _pc is not None and len(_pc):
+                _obj_top_dz = float(_pc[:, 2].max()) - float(_pp_ctx["obj_pos"][2])
+                # Extent along the gripper's closing axis (world Y — the controller commands zero
+                # rotation, so the fingers always close on Y).
+                _obj_width_y = float(_pc[:, 1].max() - _pc[:, 1].min())
+        except Exception:
+            _obj_top_dz = _obj_width_y = None
         _feat = SceneFeatures(
             obj_pos=np.asarray(_pp_ctx["obj_pos"], float),
             goal_pos=np.asarray(_pp_ctx["goal_pos"], float),
@@ -1435,6 +1457,8 @@ def run_libero_trial(
             obstacle_radius=(float(getattr(obstacles[0], "safety_radius", 0.10)) if obstacles else 0.10),
             clutter=[(np.asarray(o.pos, float), float(getattr(o, "safety_radius", 0.045)))
                      for o in _avoid[len(obstacles):]],
+            obj_top_dz=_obj_top_dz,
+            obj_width_y=_obj_width_y,
         )
         _base = controller or label_controller
         _profile = resolve_profile(_feat, _base.cfg, _base.mpc_cfg,
