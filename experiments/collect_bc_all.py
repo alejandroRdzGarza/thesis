@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import csv
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -45,7 +46,12 @@ def build_shards(args) -> list[tuple[str, str, int]]:
 
 
 def shard_done(out: Path, suite: str, level: str, task: int) -> bool:
-    return (out / shard_tag(suite, level, task) / "manifest.csv").exists()
+    """A shard counts as done ONLY if its worker exited cleanly.
+
+    Not "a manifest exists": a worker killed part-way (Ctrl-C, SIGTERM, OOM) can leave a partial
+    manifest behind, and treating that as complete would make a resume silently skip real work and
+    report an empty collection as finished."""
+    return (out / shard_tag(suite, level, task) / ".complete").exists()
 
 
 def launch(out: Path, suite: str, level: str, task: int, args) -> tuple[subprocess.Popen, Path]:
@@ -149,7 +155,28 @@ def main():
     t0 = time.time()
     running: list[tuple[subprocess.Popen, tuple, Path]] = []
     queue = list(todo)
+    interrupted: list[tuple] = []
     done = 0
+
+    def stop_all(*_a):
+        """Ctrl-C / SIGTERM must take the WHOLE run down, not just the current workers.
+
+        Without this the parent would see a killed worker, mark that shard finished and launch the
+        next one — so killing workers by hand looks like they respawn forever."""
+        say("\n  interrupt — stopping workers and exiting (re-run to resume)")
+        for pr, _sc, _lg in running:
+            pr.terminate()
+        for pr, _sc, _lg in running:
+            try:
+                pr.wait(timeout=10)
+            except Exception:
+                pr.kill()
+        logf.close()
+        raise SystemExit(130)
+
+    signal.signal(signal.SIGINT, stop_all)
+    signal.signal(signal.SIGTERM, stop_all)
+
     while queue or running:
         while queue and len(running) < args.workers:
             sc = queue.pop(0)
@@ -172,11 +199,20 @@ def main():
                         n += 1
                         clean += int(float(r.get("r_success", 0) or 0) > 0
                                      and int(r.get("robot_caused_collision", 0) or 0) == 0)
-            status = "ok" if p.returncode == 0 else f"EXIT {p.returncode} (see {log})"
-            say(f"  ✔ done   {shard_tag(*sc):<34} {clean} clean / {n} traces   "
-                f"[{done}/{len(todo)}]  {status}")
+            if p.returncode == 0:
+                (sd / ".complete").touch()            # only a clean exit marks the shard resumable-skippable
+                say(f"  ✔ done   {shard_tag(*sc):<34} {clean} clean / {n} traces   [{done}/{len(todo)}]")
+            else:
+                why = "killed (SIGTERM)" if p.returncode == -15 else f"exit {p.returncode}"
+                say(f"  ✖ FAILED {shard_tag(*sc):<34} {why} — see {log}   [{done}/{len(todo)}]"
+                    f"  (re-run to retry this shard)")
+                interrupted.append(sc)
 
     say(f"\nall shards finished in {(time.time()-t0)/60:.1f} min")
+    if interrupted:
+        say(f"  {len(interrupted)} shard(s) did NOT complete: "
+            + ", ".join(shard_tag(*s) for s in interrupted))
+        say("  re-run the same command to retry them (completed shards are skipped)")
     report(merge(out), out, say)
     logf.close()
 
