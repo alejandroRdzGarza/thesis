@@ -71,6 +71,10 @@ def main():
         return {"image": np.asarray(img, np.uint8), "wrist_image": np.asarray(wri, np.uint8),
                 "state": np.asarray(_build_proprio(obs), np.float32), "prompt": lang}
 
+    import time as _time
+    import mujoco
+    import mujoco.viewer as _mjv
+
     rows = []
     for ep in args.episodes:
         obs = env.reset()
@@ -78,32 +82,39 @@ def main():
             obs = env.set_init_state(init[ep])
         for _ in range(20):                       # settle
             obs, _, _, _ = env.step([0, 0, 0, 0, 0, 0, -1])
+        # OffScreenRenderEnv has no on-screen render() — drive the display with MuJoCo's own passive
+        # viewer bound to the sim's model/data (fetched AFTER reset, which may rebuild the sim).
+        model = env.sim.model._model
+        data = env.sim.data._data
         kb.start_control()
-        print(f"--- episode {ep}: GO (reset key = finish) ---", flush=True)
+        print(f"--- episode {ep}: GO (press q to finish/save) ---", flush=True)
 
         queries, bufs = [], []
         t = 0; ok = False
-        while t < args.horizon:
-            env.render()
-            action, _grasp = input2action(device=kb, robot=robot,
-                                           active_arm="right", env_configuration="single-arm-opposed")
-            if action is None:                    # reset key pressed → end episode
-                break
-            if t % args.replan == 0:              # start a new query
-                queries.append(QueryTrace(chain=np.zeros((2, 1, 1), np.float32),
-                                          logp_old=np.zeros(1, np.float32),
-                                          sigmas=np.array([1.0, 0.0], np.float32),
-                                          noise_level=0.0, sde_type="teleop", obs=_obs_query(obs)))
-                bufs.append([])
-            obs, _r, done, _info = env.step(action)
-            bufs[-1].append(np.asarray(action, np.float32)[:7].copy())
-            t += 1
-            if _success():
-                ok = True
-                print(f"  *** SUCCESS at step {t} ***", flush=True)
-                break
-            if done:
-                break
+        with _mjv.launch_passive(model, data) as viewer:
+            while t < args.horizon and viewer.is_running():
+                _t0 = _time.time()
+                action, _grasp = input2action(device=kb, robot=robot,
+                                               active_arm="right", env_configuration="single-arm-opposed")
+                if action is None:                # reset key (q) → end episode
+                    break
+                if t % args.replan == 0:          # start a new query
+                    queries.append(QueryTrace(chain=np.zeros((2, 1, 1), np.float32),
+                                              logp_old=np.zeros(1, np.float32),
+                                              sigmas=np.array([1.0, 0.0], np.float32),
+                                              noise_level=0.0, sde_type="teleop", obs=_obs_query(obs)))
+                    bufs.append([])
+                obs, _r, done, _info = env.step(action)
+                bufs[-1].append(np.asarray(action, np.float32)[:7].copy())
+                viewer.sync()
+                t += 1
+                if _success():
+                    ok = True
+                    print(f"  *** SUCCESS at step {t} ***", flush=True)
+                    break
+                if done:
+                    break
+                _time.sleep(max(0.0, 0.05 - (_time.time() - _t0)))   # ~20 Hz, controllable by hand
 
         for q, b in zip(queries, bufs):           # attach executed actions
             if b:
