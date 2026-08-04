@@ -694,7 +694,9 @@ def make_libero_env(task_suite: str = "libero_spatial",
                     task_idx: int = 0,
                     safety_level: str = "I",
                     has_renderer: bool = False,
-                    horizon: int = 400) -> tuple:
+                    horizon: int = 400,
+                    has_offscreen_renderer: bool = True,
+                    use_camera_obs: bool = True) -> tuple:
     """Create a LIBERO or SafeLIBERO environment with OSC_POSE controller.
 
     For SafeLIBERO suites (task_suite starts with 'safelibero_'), also loads
@@ -742,8 +744,8 @@ def make_libero_env(task_suite: str = "libero_spatial",
             camera_widths=256,
             camera_names=["agentview", "robot0_eye_in_hand"],   # wrist cam needed for OFT
             has_renderer=has_renderer,
-            has_offscreen_renderer=True,
-            use_camera_obs=True,
+            has_offscreen_renderer=has_offscreen_renderer,
+            use_camera_obs=use_camera_obs,
             control_freq=20,
             horizon=horizon,
             ignore_done=True,

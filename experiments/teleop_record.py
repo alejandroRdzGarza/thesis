@@ -1,24 +1,21 @@
-"""teleop_record.py — hand-demonstrate a task with the keyboard and record a demo trace usable by
-the distillation pipeline (flow_bc_train). For the hard tasks (bowl wedged against an obstacle)
-where the scripted expert struggles: you drive the optimal trajectory once, we record it.
+"""teleop_record.py — STAGE 1 of hand-demonstration: drive a task on-screen with the keyboard and
+record (sim_state, action) per step. No offscreen renderer during teleop (that conflicts with the
+on-screen window on macOS), and keys come from the render WINDOW (viewer callbacks), so no pynput /
+Accessibility permission is needed. Follows the SafeLIBERO fork's proven collect_demonstration flow.
 
-Records, exactly like collect_classical_demos, per-query obs (224² agentview + wrist + 8-D proprio +
-prompt) and the executed OSC_POSE actions in between → <out>/*_trace.npz + manifest.csv. Mix these
-with the scripted demos (flow_bc_train --round demos_scripted demos_teleop) or point a sweep at them.
+Then STAGE 2 (teleop_to_trace.py) replays the saved states offscreen to regenerate the 224² obs +
+build a demo trace the distillation pipeline can consume.
 
-Run ON THE MAC (opens a window — needs a display; not over headless SSH):
+Run ON THE MAC with plain python (NOT mjpython) — the on-screen window must have focus for keys:
   MUJOCO_GL= PYTHONPATH=. python -m experiments.teleop_record \
-      --suite safelibero_spatial --level II --task 3 --episodes 0 1 2 3 --out demos_teleop
+      --suite safelibero_spatial --level II --task 3 --episodes 0 1 2 --out demos_teleop
 
-Controls are printed at start (robosuite keyboard). Typical: arrows/wasd-style move, keys rotate,
-SPACE toggles the gripper. Press the RESET key to END the current episode (saved if it succeeded,
-or always with --save-fails). Success is auto-detected and also ends the episode.
+Controls (printed at start): w/a/s/d move XY · r/f up-down · z/x·t/g·c/v rotate · SPACE gripper ·
+q = end+save the episode. Success is auto-detected.
 """
 from __future__ import annotations
 
 import argparse
-import csv
-import time
 from pathlib import Path
 
 import numpy as np
@@ -31,114 +28,79 @@ def main():
     ap.add_argument("--task", type=int, default=3)
     ap.add_argument("--episodes", type=int, nargs="+", default=[0])
     ap.add_argument("--out", default="demos_teleop")
-    ap.add_argument("--replan", type=int, default=5, help="record one query obs every N steps (match training)")
-    ap.add_argument("--horizon", type=int, default=1500)
+    ap.add_argument("--horizon", type=int, default=2000)
     ap.add_argument("--pos-sensitivity", type=float, default=1.5)
     ap.add_argument("--rot-sensitivity", type=float, default=1.5)
-    ap.add_argument("--save-fails", action="store_true", help="save episodes even if success wasn't detected")
+    ap.add_argument("--save-fails", action="store_true")
     args = ap.parse_args()
 
     from robosuite.devices import Keyboard
     from robosuite.utils.input_utils import input2action
 
-    from experiments.libero_runner import make_libero_env, _preprocess, _build_proprio
-    from experiments.policy_trace import QueryTrace, save_episode_trace
+    from experiments.libero_runner import make_libero_env
 
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
-    env, lang, init = make_libero_env(task_suite=args.suite, task_idx=args.task,
-                                      safety_level=args.level, has_renderer=True, horizon=args.horizon)
-    robot = env.env.robots[0]
-    kb = Keyboard(pos_sensitivity=args.pos_sensitivity, rot_sensitivity=args.rot_sensitivity)
-    try:
-        kb._display_controls()
-    except Exception:
-        pass
+    # On-screen only (no offscreen renderer → no macOS GL conflict); images regenerated in stage 2.
+    env, lang, init = make_libero_env(task_suite=args.suite, task_idx=args.task, safety_level=args.level,
+                                      has_renderer=True, has_offscreen_renderer=False,
+                                      use_camera_obs=False, horizon=args.horizon)
+    renv = env.env                                    # underlying robosuite env (render + viewer + robots)
+    robot = renv.robots[0]
+    device = Keyboard(pos_sensitivity=args.pos_sensitivity, rot_sensitivity=args.rot_sensitivity)
+    renv.render()                                     # create the viewer
+    renv.viewer.add_keypress_callback("any", device.on_press)
+    renv.viewer.add_keyup_callback("any", device.on_release)
+    renv.viewer.add_keyrepeat_callback("any", device.on_press)
     print(f'\nTELEOP  {args.suite} L{args.level} t{args.task}:  "{lang}"')
-    print("  Drive the arm; SPACE toggles the gripper; press the RESET key to END/SAVE an episode.\n")
+    print("  window keys: w/a/s/d move · r/f up-down · z/x t/g c/v rotate · SPACE gripper · q = end+save\n")
 
     def _success():
         try:
             return bool(env.check_success())
         except Exception:
-            try:
-                return bool(env._check_success())
-            except Exception:
-                return False
+            return False
 
-    def _obs_query(obs):
-        img = _preprocess(obs["agentview_image"]) if "agentview_image" in obs else np.zeros((224, 224, 3), np.uint8)
-        wri = _preprocess(obs["robot0_eye_in_hand_image"]) if "robot0_eye_in_hand_image" in obs else np.zeros((224, 224, 3), np.uint8)
-        return {"image": np.asarray(img, np.uint8), "wrist_image": np.asarray(wri, np.uint8),
-                "state": np.asarray(_build_proprio(obs), np.float32), "prompt": lang}
-
-    import time as _time
-    import mujoco
-    import mujoco.viewer as _mjv
-
-    rows = []
+    saved = 0
     for ep in args.episodes:
-        obs = env.reset()
+        env.reset()
         if init is not None:
-            obs = env.set_init_state(init[ep])
-        for _ in range(20):                       # settle
-            obs, _, _, _ = env.step([0, 0, 0, 0, 0, 0, -1])
-        # OffScreenRenderEnv has no on-screen render() — drive the display with MuJoCo's own passive
-        # viewer bound to the sim's model/data (fetched AFTER reset, which may rebuild the sim).
-        model = env.sim.model._model
-        data = env.sim.data._data
-        kb.start_control()
+            env.set_init_state(init[ep])
+        for _ in range(20):                           # settle
+            env.step([0, 0, 0, 0, 0, 0, -1])
+        device.start_control()
         print(f"--- episode {ep}: GO (press q to finish/save) ---", flush=True)
 
-        queries, bufs = [], []
+        states, actions = [], []
         t = 0; ok = False
-        with _mjv.launch_passive(model, data) as viewer:
-            while t < args.horizon and viewer.is_running():
-                _t0 = _time.time()
-                action, _grasp = input2action(device=kb, robot=robot,
-                                               active_arm="right", env_configuration="single-arm-opposed")
-                if action is None:                # reset key (q) → end episode
-                    break
-                if t % args.replan == 0:          # start a new query
-                    queries.append(QueryTrace(chain=np.zeros((2, 1, 1), np.float32),
-                                              logp_old=np.zeros(1, np.float32),
-                                              sigmas=np.array([1.0, 0.0], np.float32),
-                                              noise_level=0.0, sde_type="teleop", obs=_obs_query(obs)))
-                    bufs.append([])
-                obs, _r, done, _info = env.step(action)
-                bufs[-1].append(np.asarray(action, np.float32)[:7].copy())
-                viewer.sync()
-                t += 1
-                if _success():
-                    ok = True
-                    print(f"  *** SUCCESS at step {t} ***", flush=True)
-                    break
-                if done:
-                    break
-                _time.sleep(max(0.0, 0.05 - (_time.time() - _t0)))   # ~20 Hz, controllable by hand
+        while t < args.horizon:
+            renv.render()
+            action, _grasp = input2action(device=device, robot=robot,
+                                          active_arm="right", env_configuration="single-arm-opposed")
+            if action is None:                        # q pressed → end episode
+                break
+            states.append(env.get_sim_state().copy())  # sim state BEFORE the action (for stage-2 obs)
+            env.step(action)
+            actions.append(np.asarray(action, np.float32)[:7].copy())
+            t += 1
+            if _success():
+                ok = True
+                print(f"  *** SUCCESS at step {t} ***", flush=True)
+                break
 
-        for q, b in zip(queries, bufs):           # attach executed actions
-            if b:
-                q.shielded_actions = np.asarray(b, np.float32)
-        usable = [q for q in queries if q.shielded_actions is not None]
-        if usable and (ok or args.save_fails):
-            tp = str((out / f"{args.suite}_L{args.level}_t{args.task}_ep{ep}_teleop_trace.npz").resolve())
-            save_episode_trace(usable, tp)
-            rows.append({"trace_path": tp, "r_success": 1.5 if ok else 0.0,
-                         "robot_caused_collision": 0, "suite": args.suite, "task": args.task, "episode": ep})
-            print(f"  saved {len(usable)} queries → {Path(tp).name}  (success={ok})", flush=True)
+        if states and (ok or args.save_fails):
+            fp = out / f"{args.suite}_L{args.level}_t{args.task}_ep{ep}_teleop.npz"
+            np.savez_compressed(fp, states=np.asarray(states), actions=np.asarray(actions),
+                                success=ok, suite=args.suite, level=args.level, task=args.task,
+                                episode=ep, prompt=lang)
+            saved += 1
+            print(f"  saved {len(states)} steps → {fp.name}  (success={ok})", flush=True)
         else:
-            print(f"  episode {ep}: not saved (success={ok}, queries={len(usable)})", flush=True)
+            print(f"  episode {ep}: not saved (success={ok}, steps={len(states)})", flush=True)
 
-    if rows:
-        mpath = out / "manifest.csv"
-        exists = mpath.exists()
-        with open(mpath, "a", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=["trace_path", "r_success", "robot_caused_collision",
-                                              "suite", "task", "episode"])
-            if not exists:
-                w.writeheader()
-            w.writerows(rows)
-        print(f"\n{len(rows)} teleop demos → {mpath}")
+    print(f"\n{saved} teleop recordings → {out}/")
+    print(f"Now regenerate demo traces (offscreen, can run on the pod):")
+    print(f"  python -m experiments.teleop_to_trace --in {out} --suite {args.suite} "
+          f"--level {args.level} --task {args.task}")
     try:
         env.close()
     except Exception:
