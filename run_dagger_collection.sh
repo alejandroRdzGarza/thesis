@@ -81,7 +81,7 @@ echo "============================================================"
 
 # Verify server is reachable before committing to a long run
 echo -n "  Checking π0.5 server ... "
-if ! python -c "
+if ! ${PY:-python} -c "
 import socket, sys
 s = socket.socket()
 s.settimeout(5)
@@ -112,7 +112,7 @@ for suite in "${SUITES[@]}"; do
         echo "  started: $(timestamp)"
         echo "============================================================"
 
-        python -m experiments.collect_obstacle_data \
+        ${PY:-python} -m experiments.collect_obstacle_data \
             --suite        "$suite"    \
             --safety-level "$level"   \
             --all-tasks               \
