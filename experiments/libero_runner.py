@@ -535,31 +535,58 @@ def _get_arm_qpos_indices(model):
     return qadr, (np.array(rng) if rng else np.zeros((0, 2)))
 
 
-def _ik_grasp_orientation(model, data, target_xyz, arm_qadr, arm_dadr, sid, jnt_rng, iters=200):
-    """Non-destructive damped-least-squares IK: the joint config that places the grip site at
-    `target_xyz`; return its EE ROTATION matrix + whether it converged. Restores qpos afterwards.
+def _ik_grasp_orientation(model, data, target_xyz, arm_qadr, arm_dadr, sid, jnt_rng,
+                          iters=200, seeds=40):
+    """Non-destructive multi-seed DLS-IK: find a COLLISION-FREE joint config that reaches just above
+    `target_xyz`, and return its EE ROTATION matrix + whether one was found. Restores qpos.
 
-    The scripted zero-rotation descent floors ~5 cm high on elevated bowls (cabinet/stove) because
-    OSC_POSE's redundancy resolution can't reach the needed arm posture. Commanding the EE toward
-    THIS orientation lets OSC descend all the way (verified) — and stays in the OSC_POSE action
-    space the VLA also uses, so it's student-reproducible."""
+    The scripted zero-rotation descent floors ~5 cm high on elevated bowls because OSC_POSE's
+    redundancy can't reach the needed posture; commanding this orientation lets OSC descend all the
+    way (verified), and it's in the VLA's action space (student-reproducible). Multi-seed +
+    collision check picks the orientation whose ARM stays off nearby obstacles (e.g. the moka pot),
+    since the naive IK solution swings a forearm link into it."""
     saved = data.qpos.copy()
-    for _ in range(iters):
-        err = np.asarray(target_xyz, float) - data.site_xpos[sid]
-        if np.linalg.norm(err) < 1e-3:
-            break
-        jp = np.zeros((3, model.nv))
-        mujoco.mj_jacSite(model, data, jp, np.zeros((3, model.nv)), sid)
-        J = jp[:, arm_dadr]
-        dq = np.clip(J.T @ np.linalg.solve(J @ J.T + 0.05 * np.eye(3), err), -0.05, 0.05)
+    pre = np.asarray(target_xyz, float) + np.array([0.0, 0.0, 0.05])   # clearance above the grasp
+    q0 = np.array([data.qpos[a] for a in arm_qadr])
+    rs = np.random.default_rng(0)
+
+    def _gname(i):
+        return mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, i) or ""
+
+    def _is_robot(n):
+        return any(s in n.lower() for s in ("gripper", "finger", "hand", "robot", "_link", "pad"))
+
+    def _arm_hits_scene():
+        for c in range(data.ncon):
+            ct = data.contact[c]
+            g1, g2 = _gname(ct.geom1), _gname(ct.geom2)
+            if (_is_robot(g1) or _is_robot(g2)) and not (_is_robot(g1) and _is_robot(g2)):
+                return True
+        return False
+
+    found_R = None
+    for s in range(seeds):
+        seed_q = q0 if s == 0 else jnt_rng[:, 0] + rs.random(len(arm_qadr)) * (jnt_rng[:, 1] - jnt_rng[:, 0])
         for k, a in enumerate(arm_qadr):
-            data.qpos[a] = np.clip(data.qpos[a] + dq[k], jnt_rng[k, 0], jnt_rng[k, 1])
+            data.qpos[a] = seed_q[k]
         mujoco.mj_forward(model, data)
-    R = data.site_xmat[sid].reshape(3, 3).copy()
-    reach = float(np.linalg.norm(np.asarray(target_xyz, float) - data.site_xpos[sid]))
+        for _ in range(iters):
+            err = pre - data.site_xpos[sid]
+            if np.linalg.norm(err) < 1e-3:
+                break
+            jp = np.zeros((3, model.nv))
+            mujoco.mj_jacSite(model, data, jp, np.zeros((3, model.nv)), sid)
+            J = jp[:, arm_dadr]
+            dq = np.clip(J.T @ np.linalg.solve(J @ J.T + 0.05 * np.eye(3), err), -0.05, 0.05)
+            for k, a in enumerate(arm_qadr):
+                data.qpos[a] = np.clip(data.qpos[a] + dq[k], jnt_rng[k, 0], jnt_rng[k, 1])
+            mujoco.mj_forward(model, data)
+        if np.linalg.norm(pre - data.site_xpos[sid]) < 0.01 and not _arm_hits_scene():
+            found_R = data.site_xmat[sid].reshape(3, 3).copy()   # collision-free reach
+            break
     data.qpos[:] = saved
     mujoco.mj_forward(model, data)
-    return R, reach < 0.01
+    return found_R, (found_R is not None)
 
 
 def _unwrap_sim(env):
