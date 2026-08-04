@@ -154,10 +154,12 @@ def main():
                 save_episode_trace(m.policy_trace, tp)
                 rows.append({
                     "trace_path": tp,
-                    # flow_bc_train --success-only filters on these two. We already applied a
-                    # STRICTER filter above, so set the collision column from the raw flag.
                     "r_success": 1.5 if ok else 0.0,
-                    "robot_caused_collision": int(raw_coll),
+                    # Both are recorded honestly. flow_bc_train prefers `collision_raw` when the
+                    # column exists, because `robot_caused_collision` is the contact-graph
+                    # attribution — a documented LOWER BOUND that misses delayed/indirect pushes,
+                    # so filtering a safety demo set on it would admit demos that did collide.
+                    "robot_caused_collision": int(bool(s.get("collision_robot_caused", raw_coll))),
                     "collision_raw": int(raw_coll),
                     "cbf_activations": acts,
                     "cbf_activation_rate": s.get("cbf_activation_rate", 0.0),

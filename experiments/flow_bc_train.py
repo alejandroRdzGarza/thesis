@@ -50,7 +50,12 @@ def _successful_traces(round_dir) -> set | None:
             if not tp:
                 continue
             succeeded = float(r.get("r_success", 0) or 0) > 0
-            safe = int(r.get("robot_caused_collision", 0) or 0) == 0
+            # Prefer the RAW collision flag when the manifest carries it. `robot_caused_collision`
+            # is the contact-graph attribution, a documented LOWER BOUND that misses delayed and
+            # indirect pushes — filtering a SAFETY demo set on it admits demos that did displace
+            # the obstacle. Older manifests without the column fall back to the attributed flag.
+            _coll = r.get("collision_raw", r.get("robot_caused_collision", 0))
+            safe = int(_coll or 0) == 0
             if succeeded and safe:
                 keep.add(str(Path(tp).resolve()))
     return keep
