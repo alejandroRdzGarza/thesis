@@ -31,7 +31,8 @@ export PATH="$HOME/.local/bin:$PATH"
 
 echo "### [1/6] system packages (EGL headless rendering + git-lfs) ###"
 apt-get update -qq
-apt-get install -y -qq libegl1 libgles2 libosmesa6 libgl1 libglu1-mesa git-lfs rsync curl
+# tmux included: the training/collection runs last many hours and must survive an SSH drop.
+apt-get install -y -qq libegl1 libgles2 libosmesa6 libgl1 libglu1-mesa git-lfs rsync curl tmux
 
 echo "### [2/6] clone the three repos ###"
 [ -d "$AEGIS/.git" ]  || git clone https://github.com/THU-RCSCT/vlsa-aegis.git "$AEGIS"
