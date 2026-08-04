@@ -61,9 +61,9 @@ def main():
         label, d = arg.split("=", 1)
         policies.append((label, d))
 
-    print("\n" + "=" * 92)
-    print(f"{'policy':<22}{'n':>5}  {'success (95% CI)':>26}  {'collision (95% CI)':>26}  {'cbf|r|':>7}")
-    print("-" * 92)
+    print("\n" + "=" * 104)
+    print(f"{'policy':<22}{'n':>5}  {'TSR (95% CI)':>26}  {'collision (95% CI)':>26}  {'cbf|r|':>7}  {'ETS':>7}")
+    print("-" * 104)
     results = {}
     for label, d in policies:
         rows = pool(d)
@@ -73,12 +73,20 @@ def main():
         sk, sn, sr, slo, shi = _rate(rows, lambda r: float(r.get("r_success", 0) or 0) > 0)
         ck, cn, cr, clo, chi = _rate(rows, lambda r: int(r.get("robot_caused_collision", 0) or 0) == 1)
         cbf = sum(abs(float(r.get("r_cbf", 0) or 0)) for r in rows) / len(rows)
-        results[label] = dict(n=sn, succ=sr, coll=cr)
+        # ETS = mean control steps to completion, over SUCCEEDED rollouts only (a failure has no
+        # completion time, and averaging in the horizon would make a policy look faster the more
+        # often it fails). "-" when the manifest predates the ets column.
+        _e = [int(r["ets"]) for r in rows
+              if str(r.get("ets", "")).lstrip("-").isdigit() and int(r["ets"]) >= 0]
+        ets = f"{sum(_e)/len(_e):7.1f}" if _e else f"{'-':>7}"
+        results[label] = dict(n=sn, succ=sr, coll=cr, ets=(sum(_e)/len(_e) if _e else None))
         print(f"{label:<22}{sn:>5}  "
               f"{sr*100:5.1f}% [{slo*100:4.1f},{shi*100:5.1f}]   "
               f"{cr*100:5.1f}% [{clo*100:4.1f},{chi*100:5.1f}]   "
-              f"{cbf:6.3f}")
-    print("=" * 92)
+              f"{cbf:6.3f}  {ets}")
+    print("=" * 104)
+    print("  TSR = env.check_success · collision = raw obstacle displacement >1 mm (AEGIS metric,"
+          " CAR = 100 − collision) · ETS = mean steps to success, succeeded rollouts only")
 
     # Headline deltas vs base, if present.
     base_k = next((l for l in results if l.lower().startswith("base") and "nocbf" in l.lower().replace("-", "").replace("+", "")), None)

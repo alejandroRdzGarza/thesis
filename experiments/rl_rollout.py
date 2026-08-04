@@ -43,6 +43,10 @@ class Rollout:
     weight: float = 0.0
     trace_path: str = ""       # flow-SDE policy trace (.npz) for on-policy GRPO; "" if none
     shielded: bool = True      # was the CBF shield active during this rollout?
+    # Control step at which the task was completed (-1 if never). This is ETS, the third metric
+    # in the AEGIS/VLSA table alongside CAR and TSR — it was already in metrics.summary() as
+    # `goal_reach_step` but never reached the manifest, so no eval could report it.
+    ets: int = -1
 
     def manifest_row(self) -> dict:
         rb = self.reward
@@ -59,7 +63,12 @@ class Rollout:
             "r_collision": round(rb.collision, 6),
             "r_cbf": round(rb.cbf, 6),
             "r_progress": round(rb.progress, 6),
+            # NB despite the name this carries the PENALISED collision flag, which under the
+            # default RewardConfig (penalize_raw_collision=True) is the RAW >1 mm obstacle
+            # displacement — the same quantity AEGIS/VLSA report, not the contact-graph
+            # attribution. Flipping that config silently changes what this column means.
             "robot_caused_collision": int(rb.direct_collision),
+            "ets": self.ets,
         }
 
 
@@ -198,8 +207,12 @@ def collect_group(
         if trace:
             trace_path = str(out_dir / f"g{group_id:04d}" / f"rollout_{k:02d}_trace.npz")
             save_episode_trace(trace, trace_path)
+        try:
+            _ets = int(metrics.summary().get("goal_reach_step", -1))
+        except Exception:
+            _ets = -1
         rollouts.append(Rollout(group_id=group_id, rollout_id=k, traj_path=traj_path,
-                                reward=rb, trace_path=trace_path, shielded=use_shield))
+                                reward=rb, trace_path=trace_path, shielded=use_shield, ets=_ets))
     return rollouts
 
 
