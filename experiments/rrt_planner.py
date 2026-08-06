@@ -439,6 +439,69 @@ def object_extent(model, data, body_prefix, center):
             float(pc[:, 2].max()))
 
 
+def object_obb(model, data, body_prefix):
+    """Oriented bounding box of an object: (centre, axes 3x3 as columns, extents).
+
+    Principal axes via PCA on the true surface cloud. Axis-ALIGNED extents — what this code used
+    before — mis-measure any object that is rotated in the scene, which then picks the wrong
+    closing direction for the gripper. Following ManiSkill's `compute_grasp_info_by_obb`, which
+    solves the same problem for its motion-planned demonstrations.
+    """
+    pc = object_cloud(model, data, body_prefix)
+    if pc is None or len(pc) < 4:
+        return None
+    c = pc.mean(axis=0)
+    # principal axes of the point cloud
+    _u, _s, vt = np.linalg.svd(pc - c, full_matrices=False)
+    R = vt.T                                    # columns are the principal axes
+    proj = (pc - c) @ R                         # cloud expressed in the OBB frame
+    lo, hi = proj.min(axis=0), proj.max(axis=0)
+    centre = c + R @ ((lo + hi) / 2.0)
+    return centre, R, (hi - lo)
+
+
+def obb_grasp(model, data, body_prefix, obj_pos, *, approaching=(0.0, 0.0, -1.0),
+              finger_length: float = 0.025, gripper_open: float = 0.075):
+    """A grasp pose from the object's oriented bounding box, or None if it cannot be straddled.
+
+    Method (after ManiSkill): the OBB axis most aligned with `approaching` is the one the gripper
+    comes in along; of the two remaining axes the SHORTER becomes the closing direction, so the
+    fingers close across the object's narrow dimension; the grip point is the approach-side surface
+    moved inward by one finger length.
+
+    Returns None when the closing extent exceeds what the gripper can open to — for a wide bowl
+    that is a genuine physical impossibility, and the caller falls back to a rim pinch.
+    """
+    obb = object_obb(model, data, body_prefix)
+    if obb is None:
+        return None
+    centre, R, extents = obb
+    a = np.asarray(approaching, float)
+    a = a / (np.linalg.norm(a) + 1e-12)
+
+    # axis closest to the approach direction
+    align = np.abs(a @ R)
+    i_app = int(np.argmax(align))
+    rest = [i for i in range(3) if i != i_app]
+    # of the remaining two, close across the shorter one
+    i_close = rest[0] if extents[rest[0]] <= extents[rest[1]] else rest[1]
+    if float(extents[i_close]) > gripper_open:
+        return None                                     # too wide to straddle — use a rim pinch
+
+    closing = R[:, i_close].copy()
+    closing = closing - (a @ closing) * a               # orthogonalise against the approach axis
+    n = float(np.linalg.norm(closing))
+    if n < 1e-6:
+        return None
+    closing /= n
+
+    # grip point: approach-side surface, then in by a finger length
+    half = float(extents[i_app]) * 0.5
+    pos = centre + a * (-half + min(finger_length, half))
+    ortho = np.cross(closing, a)
+    return pos, np.column_stack([ortho, closing, a]), float(extents[i_close])
+
+
 def sample_grasps(model, data, qadr, sid, center, body_prefix, free, *,
                   gripper_open: float = 0.075, seed: int = 0, ik_seeds: int = 20,
                   n_theta: int = 16, n_yaw: int = 8):
@@ -451,6 +514,17 @@ def sample_grasps(model, data, qadr, sid, center, body_prefix, free, *,
     """
     wx, wy, top_z = object_extent(model, data, body_prefix, center)
     out = []
+
+    # Preferred: the OBB grasp — closing across the object's true narrow axis, at the correct
+    # depth below its approach-side surface. Tried first because it is derived from the object's
+    # actual shape rather than swept blindly over yaw angles.
+    obbg = obb_grasp(model, data, body_prefix, center, gripper_open=gripper_open)
+    if obbg is not None:
+        pos, R, width = obbg
+        q, ok = ik_pose(model, data, qadr, sid, pos, R, free=free, seeds=ik_seeds, seed=seed)
+        if ok and q is not None and free(q):
+            out.append({"q": q, "pos": pos, "R": R, "mode": "obb",
+                        "reach": float(np.linalg.norm(pos[:2]))})
 
     # Top-down straddle: only where the object actually fits between the fingers.
     if min(wx, wy) < gripper_open:
@@ -483,7 +557,9 @@ def sample_grasps(model, data, qadr, sid, center, body_prefix, free, *,
                             "reach": float(np.linalg.norm(pos[:2]))})
                 break
 
-    out.sort(key=lambda d: (d["mode"] != "top", d["reach"]))   # prefer straddle, then close reach
+    # OBB grasp first (shape-derived), then swept straddle, then rim pinch.
+    _rank = {"obb": 0, "top": 1, "rim": 2}
+    out.sort(key=lambda d: (_rank.get(d["mode"], 3), d["reach"]))
     return out
 
 

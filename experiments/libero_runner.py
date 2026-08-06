@@ -592,6 +592,89 @@ def _ik_grasp_orientation(model, data, target_xyz, arm_qadr, arm_dadr, sid, jnt_
 _PARKED_XY = 1.5          # |x| or |y| beyond this = an obstacle parked off-scene
 
 
+def randomize_obstacle(model, data, obstacle_body: str, obj_pos, goal_pos, *,
+                       rng=None, tries: int = 40, lateral: float = 0.10,
+                       along: tuple = (0.30, 0.70)) -> bool:
+    """Re-place the active obstacle somewhere it still OBSTRUCTS. Returns whether it moved.
+
+    Training-data augmentation. Without it the policy sees 24 fixed layouts and can learn
+    "in the stove scene, swing left" rather than obstacle avoidance; held-out evaluation then only
+    varies the initial arm state, which cannot distinguish those two.
+
+    The sampling is deliberately not uniform over the table. An obstacle dropped anywhere is
+    usually *not* in the way, and an episode where nothing obstructs teaches nothing about safety —
+    it would dilute the demo set with easy trajectories. Positions are therefore drawn near the
+    straight line from object to goal (the corridor the arm must traverse), offset laterally, at
+    the obstacle's own resting height so it stays on whatever surface supports it.
+
+    Rejected if the pose interpenetrates anything, or lands on top of the object or the goal.
+
+    NOTE: intended for TRAINING data only. Evaluation should stay on the canonical benchmark
+    layouts, or the numbers stop being comparable to AEGIS and to this project's own baselines.
+    """
+    if not _HAS_MUJOCO:
+        return False
+    rng = rng or np.random.default_rng(0)
+    # LIBERO names the MuJoCo BODY with a "_main" suffix while the obs key omits it, so a direct
+    # lookup returns -1 and silently disables randomisation for every scene.
+    bid = -1
+    for _sfx in ("_main", "", "_g0"):
+        bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, f"{obstacle_body}{_sfx}")
+        if bid >= 0:
+            break
+    if bid < 0 or model.body_jntnum[bid] != 1:
+        return False
+    jid = int(model.body_jntadr[bid])
+    if model.jnt_type[jid] != mujoco.mjtJoint.mjJNT_FREE:
+        return False
+    qadr = int(model.jnt_qposadr[jid])
+
+    saved = data.qpos.copy()
+    p0 = data.xpos[bid].copy()
+    o = np.asarray(obj_pos, float)
+    g = np.asarray(goal_pos, float)
+    # Only randomise obstacles that rest on the same surface as the object. An obstacle standing on
+    # a pedestal (the moka pot on its box) would be left floating by an XY-only move, and would then
+    # fall at episode start and register as a displacement — a false collision in every episode.
+    if abs(float(p0[2]) - float(o[2])) > 0.15:
+        return False
+    seg = g[:2] - o[:2]
+    seg_n = float(np.linalg.norm(seg))
+    if seg_n < 1e-6:
+        return False
+    perp = np.array([-seg[1], seg[0]]) / seg_n
+
+    for _ in range(tries):
+        t = rng.uniform(*along)
+        off = rng.uniform(-lateral, lateral)
+        xy = o[:2] + seg * t + perp * off
+        if np.linalg.norm(xy - o[:2]) < 0.10 or np.linalg.norm(xy - g[:2]) < 0.10:
+            continue                                   # sitting on the object or the goal
+        data.qpos[qadr:qadr + 2] = xy
+        data.qpos[qadr + 2] = p0[2]                    # keep its resting height
+        mujoco.mj_forward(model, data)
+        clash = False
+        for c in range(data.ncon):
+            ct = data.contact[c]
+            if ct.geom1 < 0 or ct.geom2 < 0:
+                continue
+            b1, b2 = model.geom_bodyid[ct.geom1], model.geom_bodyid[ct.geom2]
+            # -1e-4 would reject ordinary RESTING contact, which every valid placement has;
+            # only real overlap counts.
+            if (b1 == bid or b2 == bid) and ct.dist < -0.004:
+                clash = True
+                break
+        if not clash:
+            for _ in range(20):            # let it settle so it is not dropped at episode start
+                mujoco.mj_step(model, data)
+            return True
+        data.qpos[:] = saved
+        mujoco.mj_forward(model, data)
+    data.qpos[:] = saved
+    mujoco.mj_forward(model, data)
+    return False
+
+
 def _disable_parked_obstacle_contacts(model, data, verbose: bool = False) -> int:
     """Remove off-scene parked obstacles from collision detection. Returns geoms disabled.
 
@@ -1285,6 +1368,9 @@ def run_libero_trial(
     teacher_suite: str | None = None,
     teacher_level: str | None = None,
     teacher_task: int | None = None,
+    # TRAINING-DATA AUGMENTATION: re-place the obstacle somewhere it still obstructs.
+    # Leave off for evaluation — randomised layouts are not comparable to the benchmark.
+    randomize_obstacle_seed: int | None = None,
 ) -> MetricsTracker:
     """Run one LIBERO episode using OpenVLA + optional Cartesian CBF.
 
@@ -1459,6 +1545,19 @@ def run_libero_trial(
             if abs(_pp[0]) > 1.0 or abs(_pp[1]) > 1.0:  # off-table pruned obstacle — ignore
                 continue
             _avoid.append(_MpcObs(_pp, 0.045))         # clutter object, modest keep-out radius
+        if randomize_obstacle_seed is not None and obstacles:
+            _moved = randomize_obstacle(
+                model, data, obstacles[0].name,
+                _pp_ctx["obj_pos"], _pp_ctx["goal_pos"],
+                rng=np.random.default_rng(randomize_obstacle_seed))
+            if _moved:
+                obstacles[0].pos = np.array(data.xpos[mujoco.mj_name2id(
+                    model, mujoco.mjtObj.mjOBJ_BODY, obstacles[0].name)], dtype=float)
+                obs = env.env._get_observations()
+                print(f"  [randomize] obstacle '{obstacles[0].name}' -> "
+                      f"{np.round(obstacles[0].pos, 3)}")
+            else:
+                print("  [randomize] no valid obstacle placement found — layout unchanged")
         _pp_ctx["avoid"] = _avoid
         # ── Per-scene teacher profile ────────────────────────────────────────
         # One universal controller config cannot cover every scene (goal LI froze in APPROACH on

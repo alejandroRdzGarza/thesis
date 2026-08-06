@@ -145,7 +145,8 @@ class PlannerExpert:
         # because it selects grasps that are convenient for the PLACE and poor for the PICK.
         # Placement reach is a tiebreak only; unreachable placements are caught by trying
         # more candidates rather than by reordering.
-        cands.sort(key=lambda d: (d["mode"] != "top", round(d["reach"], 2), d["place_reach"]))
+        cands.sort(key=lambda d: ({"obb": 0, "top": 1, "rim": 2}.get(d["mode"], 3),
+                                  round(d["reach"], 2), d["place_reach"]))
 
         # Travelled paths keep a standoff, but a fixed one costs scenes: 2 cm closed the narrow
         # passages on 2 of 24 and made them unplannable. Back off instead of failing — a 1 cm
