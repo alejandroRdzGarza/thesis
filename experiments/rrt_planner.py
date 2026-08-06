@@ -38,6 +38,36 @@ def _is_robot_geom(name: str) -> bool:
                ("gripper", "finger", "hand", "robot", "_link", "pad"))
 
 
+class clearance_margin:
+    """Context manager: plan against INFLATED robot geometry so paths keep a real standoff.
+
+    MuJoCo only generates a contact once geoms actually touch, so a `no contacts` test calls a
+    path that passes 0.1 mm from an obstacle "collision-free". Executing such a path grazes the
+    obstacle the moment OSC drifts off the plan — which is exactly what was measured: 24 grazes
+    with displacements of 1.0-4.7 mm, blamed on gripper, arm links and the held object.
+
+    Raising `geom_margin` on the robot's geoms makes MuJoCo report contacts `clearance` metres
+    BEFORE touching, so the planner refuses paths that merely come close. Restored on exit, so a
+    planning call cannot leak an altered contact model into the episode.
+    """
+
+    def __init__(self, model, clearance: float = 0.02):
+        self.model, self.clearance = model, float(clearance)
+        self.saved = None
+
+    def __enter__(self):
+        self.saved = self.model.geom_margin.copy()
+        for g in range(self.model.ngeom):
+            n = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_GEOM, g) or ""
+            if _is_robot_geom(n):
+                self.model.geom_margin[g] = max(self.model.geom_margin[g], self.clearance)
+        return self
+
+    def __exit__(self, *exc):
+        self.model.geom_margin[:] = self.saved
+        return False
+
+
 def make_collision_fn(model, data, qadr, *, ignore: tuple = (), verbose: bool = False):
     """Return `free(q) -> bool`: True when arm configuration `q` touches no scene geom.
 
@@ -173,7 +203,14 @@ def ik_pose(model, data, qadr, sid, target_pos, target_R=None, *, free=None,
     lo_hi = np.array(lo_hi)
     q_cur = np.array([data.qpos[a] for a in qadr])
 
+    # Collect every valid solution and return the one NEAREST the current configuration, rather
+    # than the first found. The Panda's redundancy means IK solutions sit on different elbow
+    # branches; a far branch is reachable in joint space but OSC — which only sees an end-effector
+    # target — cannot drive the arm across to it. Measured symptom: the EE parking 55 mm from the
+    # planned grasp for 600 steps with zero contacts, i.e. not blocked, just not reachable by
+    # end-effector servoing from where the arm actually is.
     best = None
+    solutions = []
     for s in range(seeds):
         q = q_cur.copy() if s == 0 else rng.uniform(lo_hi[:, 0], lo_hi[:, 1])
         for _ in range(iters):
@@ -209,12 +246,15 @@ def ik_pose(model, data, qadr, sid, target_pos, target_R=None, *, free=None,
 
         if reach < 5e-3:
             if free is None or free(q):
-                return q, True                          # collision-free and on target — take it
-            if best is None:
+                solutions.append(q.copy())              # collision-free and on target
+            elif best is None:
                 best = q                                # on target but colliding — keep as fallback
 
     data.qpos[:] = saved
     mujoco.mj_forward(model, data)
+    if solutions:
+        # nearest in joint space = the branch OSC can actually servo to
+        return min(solutions, key=lambda q: float(np.linalg.norm(q - q_cur))), True
     return (best, best is not None)
 
 

@@ -42,6 +42,11 @@ class PlannerConfig:
     descend_steps: int = 6        # interpolation points on the straight-line descents
     ik_seeds: int = 20
     try_candidates: int = 6       # grasps to attempt before giving up on the scene
+    clearance: float = 0.02       # m of standoff the PLANNER must keep from the scene.
+    #                               Planning to zero clearance produced 24 grazing
+    #                               contacts (1.0-4.7 mm displacements) as soon as OSC
+    #                               drifted off the plan. The grasp itself is exempt —
+    #                               it has to touch the object.
 
 
 @dataclass
@@ -66,6 +71,9 @@ class PlannerExpert:
     grasp_offset: object = None
     grasp_offset_vec: object = None
     _rot_ref: object = None      # latest EE quaternion, pushed in by the runner each step
+    # Standoffs to try, in order. Most scenes plan at the full 2 cm; narrow passages fall
+    # back rather than returning no plan at all.
+    clearance_ladder: tuple = (0.02, 0.01, 0.0)
 
     def reset(self):
         self.phase = "PLAN"
@@ -93,6 +101,7 @@ class PlannerExpert:
             self.plan_error = "start configuration in collision"
             return False
 
+        # Grasp POSES are searched WITHOUT clearance — the fingers have to reach the object.
         cands = P.sample_grasps(model, data, qadr, sid, obj, body, free,
                                 seed=self.seed, ik_seeds=c.ik_seeds)
         if not cands:
@@ -100,86 +109,106 @@ class PlannerExpert:
             return False
 
         obj_qadr = P.free_joint_qadr(model, body)
-        _, _, top_z = P.object_extent(model, data, body, obj)
+        from collections import Counter
+        stage = Counter()          # which planning stage rejected each candidate
 
-        for cand in cands[:c.try_candidates]:
-            wps = []
-            p_grasp, R_grasp = cand["pos"], cand["R"]
-            p_pre = p_grasp + np.array([0.0, 0.0, c.pre_grasp_h])
+        # Travelled paths keep a standoff, but a fixed one costs scenes: 2 cm closed the narrow
+        # passages on 2 of 24 and made them unplannable. Back off instead of failing — a 1 cm
+        # plan is worth far more than no plan, and most scenes take the full 2 cm.
+        for clr in self.clearance_ladder:
+            for cand in cands[:c.try_candidates]:
+                wps = []
+                p_grasp, R_grasp = cand["pos"], cand["R"]
+                p_pre = p_grasp + np.array([0.0, 0.0, c.pre_grasp_h])
 
-            # 1. plan to the pre-grasp hover
-            q_pre, ok = P.ik_pose(model, data, qadr, sid, p_pre, R_grasp, free=free,
-                                  seeds=c.ik_seeds, seed=self.seed)
-            if not ok:
-                continue
-            path, _why = P.rrt_connect(q_start, q_pre, jnt_rng, free, seed=self.seed)
-            if path is None:
-                continue
-            path = P.densify(P.shortcut(path, free, seed=self.seed), max_step=0.05)
-            _tr = P.path_to_ee_trace(model, data, qadr, sid, path)
-            for _k, (p, R) in enumerate(_tr):
-                # The LAST approach waypoint must actually be reached: the descent that follows
-                # only moves in z, so any XY error left here is carried straight into the grasp
-                # (measured: 56 mm of XY error at the grip point, fingers closing beside the object).
-                wps.append(dict(pos=p, R=R, grip=_GRIP_OPEN, hold=0, phase="APPROACH",
-                                strict=(_k == len(_tr) - 1)))
+                # 1. plan to the pre-grasp hover
+                q_pre, ok = P.ik_pose(model, data, qadr, sid, p_pre, R_grasp, free=free,
+                                      seeds=c.ik_seeds, seed=self.seed)
+                if not ok:
+                    stage["ik_pregrasp"] += 1
+                    continue
+                with P.clearance_margin(model, clr):
+                    free_clear = P.make_collision_fn(model, data, qadr, ignore=(body,))
+                    path, _why = P.rrt_connect(q_start, q_pre, jnt_rng, free_clear, seed=self.seed)
+                    if path is not None:
+                        path = P.shortcut(path, free_clear, seed=self.seed)
+                if path is None:
+                    stage["rrt_approach"] += 1
+                    continue
+                path = P.densify(path, max_step=0.05)
+                _tr = P.path_to_ee_trace(model, data, qadr, sid, path)
+                for _k, (p, R) in enumerate(_tr):
+                    # The LAST approach waypoint must actually be reached: the descent that follows
+                    # only moves in z, so any XY error left here is carried straight into the grasp
+                    # (measured: 56 mm of XY error at the grip point, fingers closing beside the object).
+                    wps.append(dict(pos=p, R=R, grip=_GRIP_OPEN, hold=0, phase="APPROACH",
+                                    strict=(_k == len(_tr) - 1)))
 
-            # 2. straight-line descent onto the grasp, 3. close
-            for k in range(1, c.descend_steps + 1):
-                wps.append(dict(pos=p_pre + (p_grasp - p_pre) * (k / c.descend_steps),
-                                R=R_grasp, grip=_GRIP_OPEN, hold=0, phase="DESCEND", strict=True))
-            wps.append(dict(pos=p_grasp, R=R_grasp, grip=_GRIP_CLOSE,
-                            hold=c.grasp_hold, phase="GRASP"))
+                # 2. straight-line descent onto the grasp, 3. close
+                for k in range(1, c.descend_steps + 1):
+                    wps.append(dict(pos=p_pre + (p_grasp - p_pre) * (k / c.descend_steps),
+                                    R=R_grasp, grip=_GRIP_OPEN, hold=0, phase="DESCEND", strict=True))
+                wps.append(dict(pos=p_grasp, R=R_grasp, grip=_GRIP_CLOSE,
+                                hold=c.grasp_hold, phase="GRASP"))
 
-            # 4. lift straight up
-            p_lift = p_grasp + np.array([0.0, 0.0, c.lift_h])
-            for k in range(1, c.descend_steps + 1):
-                wps.append(dict(pos=p_grasp + (p_lift - p_grasp) * (k / c.descend_steps),
-                                R=R_grasp, grip=_GRIP_CLOSE, hold=0, phase="LIFT"))
+                # 4. lift straight up
+                p_lift = p_grasp + np.array([0.0, 0.0, c.lift_h])
+                for k in range(1, c.descend_steps + 1):
+                    wps.append(dict(pos=p_grasp + (p_lift - p_grasp) * (k / c.descend_steps),
+                                    R=R_grasp, grip=_GRIP_CLOSE, hold=0, phase="LIFT"))
 
-            # 5. transport, WITH the held object in the collision check
-            rel_pos = R_grasp.T @ (obj - p_grasp)          # object pose in the EE frame at grasp
-            rel_R = R_grasp.T @ np.eye(3)
-            free_held = P.make_attached_collision_fn(model, data, qadr, sid, obj_qadr,
-                                                     rel_pos, rel_R, ignore=(body,))
-            q_lift, ok = P.ik_pose(model, data, qadr, sid, p_lift, R_grasp, free=free,
-                                   seeds=c.ik_seeds, seed=self.seed)
-            if not ok:
-                continue
-            # Drive the EE to wherever puts the OBJECT over the goal. The full 3-D grasp offset
-            # matters, not just its z: a rim pinch holds the object ~a rim radius to one side, so
-            # aiming the EE at the goal leaves the object short by exactly that much (measured:
-            # 4.4 cm miss against a 4.7 cm rim radius).
-            grasp_off = p_grasp - obj                      # EE − object, at the moment of grasp
-            p_place = np.array([goal[0], goal[1], goal[2]]) + grasp_off + np.array([0, 0, 0.01])
-            p_preplace = p_place + np.array([0.0, 0.0, c.place_clear_h])
-            q_pp, ok = P.ik_pose(model, data, qadr, sid, p_preplace, R_grasp, free=free_held,
-                                 seeds=c.ik_seeds, seed=self.seed)
-            if not ok:
-                continue
-            tpath, _why = P.rrt_connect(q_lift, q_pp, jnt_rng, free_held, seed=self.seed)
-            if tpath is None:
-                continue
-            tpath = P.densify(P.shortcut(tpath, free_held, seed=self.seed), max_step=0.05)
-            for p, R in P.path_to_ee_trace(model, data, qadr, sid, tpath):
-                wps.append(dict(pos=p, R=R, grip=_GRIP_CLOSE, hold=0, phase="TRANSPORT"))
+                # 5. transport, WITH the held object in the collision check
+                rel_pos = R_grasp.T @ (obj - p_grasp)          # object pose in the EE frame at grasp
+                rel_R = R_grasp.T @ np.eye(3)
+                free_held = P.make_attached_collision_fn(model, data, qadr, sid, obj_qadr,
+                                                         rel_pos, rel_R, ignore=(body,))
+                q_lift, ok = P.ik_pose(model, data, qadr, sid, p_lift, R_grasp, free=free,
+                                       seeds=c.ik_seeds, seed=self.seed)
+                if not ok:
+                    stage["ik_lift"] += 1
+                    continue
+                # Drive the EE to wherever puts the OBJECT over the goal. The full 3-D grasp offset
+                # matters, not just its z: a rim pinch holds the object ~a rim radius to one side, so
+                # aiming the EE at the goal leaves the object short by exactly that much (measured:
+                # 4.4 cm miss against a 4.7 cm rim radius).
+                grasp_off = p_grasp - obj                      # EE − object, at the moment of grasp
+                p_place = np.array([goal[0], goal[1], goal[2]]) + grasp_off + np.array([0, 0, 0.01])
+                p_preplace = p_place + np.array([0.0, 0.0, c.place_clear_h])
+                q_pp, ok = P.ik_pose(model, data, qadr, sid, p_preplace, R_grasp, free=free_held,
+                                     seeds=c.ik_seeds, seed=self.seed)
+                if not ok:
+                    stage["ik_preplace"] += 1
+                    continue
+                with P.clearance_margin(model, c.clearance):
+                    free_held_clear = P.make_attached_collision_fn(model, data, qadr, sid, obj_qadr,
+                                                                  rel_pos, rel_R, ignore=(body,))
+                    tpath, _why = P.rrt_connect(q_lift, q_pp, jnt_rng, free_held_clear, seed=self.seed)
+                    if tpath is not None:
+                        tpath = P.shortcut(tpath, free_held_clear, seed=self.seed)
+                if tpath is None:
+                    stage["rrt_transport"] += 1
+                    continue
+                tpath = P.densify(tpath, max_step=0.05)
+                for p, R in P.path_to_ee_trace(model, data, qadr, sid, tpath):
+                    wps.append(dict(pos=p, R=R, grip=_GRIP_CLOSE, hold=0, phase="TRANSPORT"))
 
-            # 6. set down, 7. release, 8. retreat
-            for k in range(1, c.descend_steps + 1):
-                wps.append(dict(pos=p_preplace + (p_place - p_preplace) * (k / c.descend_steps),
-                                R=R_grasp, grip=_GRIP_CLOSE, hold=0, phase="PLACE", strict=True))
-            wps.append(dict(pos=p_place, R=R_grasp, grip=_GRIP_OPEN,
-                            hold=c.release_hold, phase="RELEASE"))
-            wps.append(dict(pos=p_place + np.array([0.0, 0.0, 0.10]), R=R_grasp,
-                            grip=_GRIP_OPEN, hold=0, phase="RETREAT"))
+                # 6. set down, 7. release, 8. retreat
+                for k in range(1, c.descend_steps + 1):
+                    wps.append(dict(pos=p_preplace + (p_place - p_preplace) * (k / c.descend_steps),
+                                    R=R_grasp, grip=_GRIP_CLOSE, hold=0, phase="PLACE", strict=True))
+                wps.append(dict(pos=p_place, R=R_grasp, grip=_GRIP_OPEN,
+                                hold=c.release_hold, phase="RELEASE"))
+                wps.append(dict(pos=p_place + np.array([0.0, 0.0, 0.10]), R=R_grasp,
+                                grip=_GRIP_OPEN, hold=0, phase="RETREAT"))
 
-            self._wps = wps
-            self.planned = True
-            self.grasp_mode = cand["mode"]
-            self.phase = "APPROACH"
-            return True
+                self._wps = wps
+                self.planned = True
+                self.grasp_mode = cand["mode"]
+                self.phase = "APPROACH"
+                return True
 
-        self.plan_error = "no candidate produced a complete plan (grasp/transport unreachable)"
+        self.plan_error = (f"no plan at any clearance {self.clearance_ladder}; "
+                           f"rejections by stage: {dict(stage)}")
         return False
 
     # ── execution ───────────────────────────────────────────────────────────
