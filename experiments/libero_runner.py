@@ -1461,8 +1461,16 @@ def run_libero_trial(
             obj_width_y=_obj_width_y,
         )
         _base = controller or label_controller
-        _profile = resolve_profile(_feat, _base.cfg, _base.mpc_cfg,
-                                   suite=teacher_suite, level=teacher_level, task=teacher_task)
+        # A PLANNING teacher derives its own grasp from the object's geometry (rim sweep / top
+        # straddle chosen by measured width), so the per-scene profile — which exists to patch the
+        # SCRIPTED controller's fixed assumptions — does not apply to it and has no mpc_cfg to read.
+        _is_planner = hasattr(_base, "plan")
+        if _is_planner:
+            from experiments.teacher_profiles import TeacherProfile
+            _profile = TeacherProfile(name="planner (profile not applicable)")
+        else:
+            _profile = resolve_profile(_feat, _base.cfg, _base.mpc_cfg,
+                                       suite=teacher_suite, level=teacher_level, task=teacher_task)
         _pp_ctx["profile"] = _profile
         print(f"  [teacher] {_profile.describe()}")
         # IK grasp ORIENTATION: the wrist tilt that lets OSC_POSE descend to the grip point. A
@@ -1491,7 +1499,14 @@ def run_libero_trial(
                 _c.place_mode = _pp_ctx.get("place_mode", "in")
             if hasattr(_c, "grasp_mode"):
                 _c.grasp_mode = _pp_ctx.get("grasp_mode", "top")
-            _profile.apply(_c)                          # grasp side + per-scene controller knobs
+            if not hasattr(_c, "plan"):
+                _profile.apply(_c)                      # grasp side + per-scene controller knobs
+            # A PLANNING teacher builds its whole trajectory up front, which needs model/data —
+            # so it gets one hook here. Reactive controllers have no plan() and are unaffected.
+            if hasattr(_c, "plan"):
+                _ok_plan = _c.plan(model, data, _arm_qadr, _jnt_rng, _grip_sid, _pp_ctx)
+                print(f"  [planner] {'planned' if _ok_plan else 'PLAN FAILED: ' + _c.plan_error}"
+                      + (f"  ({len(_c._wps)} waypoints, grasp={_c.grasp_mode})" if _ok_plan else ""))
         _role = "drive" if controller is not None else "LABEL"
         print(f"  [classical:{_role}] pick '{_pp_ctx['obj_key'].replace('_pos','')}' "
               f"@ {np.round(_pp_ctx['obj_pos'],3)} → goal {np.round(_pp_ctx['goal_pos'],3)}  "
@@ -1639,6 +1654,10 @@ def run_libero_trial(
                         _ee_now = np.array(obs["robot0_eef_pos"], dtype=float)
                         _obj_now = np.array(obs.get(_pp_ctx["obj_key"], _pp_ctx["obj_pos"]),
                                             dtype=float)
+                        # A planning teacher commands wrist ORIENTATION as well as position, so it
+                        # needs the current EE quaternion to form the rotation delta.
+                        if hasattr(controller, "set_ee_quat"):
+                            controller.set_ee_quat(obs.get("robot0_eef_quat", [0, 0, 0, 1]))
                         _nominal, _cphase = controller.act(
                             _ee_now, _obj_now, _pp_ctx["goal_pos"],
                             obstacles=_pp_ctx.get("avoid"), table_z=_pp_ctx["table_z"],

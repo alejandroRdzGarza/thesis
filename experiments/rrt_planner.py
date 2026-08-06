@@ -74,6 +74,75 @@ def make_collision_fn(model, data, qadr, *, ignore: tuple = (), verbose: bool = 
     return free
 
 
+def free_joint_qadr(model, body_prefix):
+    """qpos address of a movable object's free joint (7 values: xyz + wxyz), or None.
+
+    Needed to carry the grasped object along during transport planning — otherwise the planner
+    checks an arm swinging through space while the object it is holding stays behind at the pick
+    location, and every transport plan looks clear when it isn't.
+    """
+    for b in range(model.nbody):
+        n = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, b) or ""
+        if not n.startswith(body_prefix):
+            continue
+        if model.body_jntnum[b] == 1:
+            j = int(model.body_jntadr[b])
+            if model.jnt_type[j] == mujoco.mjtJoint.mjJNT_FREE:
+                return int(model.jnt_qposadr[j])
+    return None
+
+
+def _mat2quat(R):
+    q = np.empty(4)
+    mujoco.mju_mat2Quat(q, np.asarray(R, float).reshape(9))
+    return q
+
+
+def make_attached_collision_fn(model, data, qadr, sid, obj_qadr, rel_pos, rel_R, *, ignore=()):
+    """`free(q)` for the arm while HOLDING an object.
+
+    The object is placed at the pose the grasp implies (EE pose composed with the recorded
+    grasp-relative transform) before contacts are checked, so the held object is part of the
+    swept volume. Gripper-vs-held-object contacts are ignored — they are the grasp.
+    """
+    saved = data.qpos.copy()
+
+    def free(q) -> bool:
+        for a, v in zip(qadr, q):
+            data.qpos[a] = v
+        mujoco.mj_forward(model, data)                       # EE pose for this configuration
+        p_ee = data.site_xpos[sid].copy()
+        R_ee = data.site_xmat[sid].reshape(3, 3).copy()
+        if obj_qadr is not None:
+            p_obj = p_ee + R_ee @ rel_pos
+            R_obj = R_ee @ rel_R
+            data.qpos[obj_qadr:obj_qadr + 3] = p_obj
+            data.qpos[obj_qadr + 3:obj_qadr + 7] = _mat2quat(R_obj)
+        mujoco.mj_forward(model, data)                       # now with the object carried along
+        hit = False
+        for c in range(data.ncon):
+            ct = data.contact[c]
+            n1 = _geom_name(model, ct.geom1)
+            n2 = _geom_name(model, ct.geom2)
+            r1, r2 = _is_robot_geom(n1), _is_robot_geom(n2)
+            held = tuple(s for s in ignore if s)
+            h1 = any(s in n1 for s in held)
+            h2 = any(s in n2 for s in held)
+            if (r1 and h2) or (r2 and h1):                   # gripper holding the object — fine
+                continue
+            if r1 == r2 and not (h1 or h2):                  # robot-robot / scene-scene
+                continue
+            if (h1 and h2):
+                continue
+            hit = True
+            break
+        data.qpos[:] = saved
+        mujoco.mj_forward(model, data)
+        return not hit
+
+    return free
+
+
 def fk_ee_pose(model, data, qadr, sid, q):
     """Forward kinematics: arm configuration → (EE position, EE rotation matrix). Restores qpos."""
     saved = [data.qpos[a] for a in qadr]
@@ -286,6 +355,74 @@ def sample_rim_grasps(model, data, qadr, sid, center, radius, free, *,
                 out.append({"q": q, "pos": pos, "R": R, "theta": theta, "dz": dz,
                             "reach": float(np.linalg.norm(pos[:2]))})
     out.sort(key=lambda d: d["reach"])
+    return out
+
+
+def top_grasp_pose(center, yaw, top_z, grip_depth):
+    """A top-down straddle grasp: approach from above, fingers closing along `yaw`."""
+    u = np.array([np.cos(yaw), np.sin(yaw), 0.0])              # closing direction
+    pos = np.array([center[0], center[1], top_z - grip_depth])
+    z_ax = np.array([0.0, 0.0, -1.0])
+    x_ax = np.cross(u, z_ax); x_ax /= (np.linalg.norm(x_ax) + 1e-12)
+    return pos, np.column_stack([x_ax, u, z_ax])
+
+
+def object_extent(model, data, body_prefix, center):
+    """(width_along_x, width_along_y, top_z) of an object, from its real geoms."""
+    xs, ys, zs = [], [], []
+    for g in range(model.ngeom):
+        n = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, g) or ""
+        if not n.startswith(body_prefix):
+            continue
+        c = data.geom_xpos[g]
+        r = float(np.max(model.geom_size[g]))
+        xs += [c[0] - r, c[0] + r]; ys += [c[1] - r, c[1] + r]; zs += [c[2] - r, c[2] + r]
+    if not xs:
+        return 0.06, 0.06, float(center[2])
+    return max(xs) - min(xs), max(ys) - min(ys), max(zs)
+
+
+def sample_grasps(model, data, qadr, sid, center, body_prefix, free, *,
+                  gripper_open: float = 0.075, seed: int = 0, ik_seeds: int = 20,
+                  n_theta: int = 16, n_yaw: int = 8):
+    """Grasp candidates for ANY object: top-down straddle when it fits the gripper, rim pinch
+    when it does not, both screened for reachability and collision.
+
+    The scripted controller picked the mode by NAME ("bowl" → rim). This picks it by measured
+    geometry, so it generalises across suites — cartons and bottles in the object suite get a
+    straddle, wide bowls in spatial/goal get a rim pinch, with no per-scene table.
+    """
+    wx, wy, top_z = object_extent(model, data, body_prefix, center)
+    out = []
+
+    # Top-down straddle: only where the object actually fits between the fingers.
+    if min(wx, wy) < gripper_open:
+        for i in range(n_yaw):
+            yaw = np.pi * i / n_yaw
+            # close along the narrow axis: yaw is the closing direction
+            for depth in (0.02, 0.035, 0.01):
+                pos, R = top_grasp_pose(center, yaw, top_z, depth)
+                q, ok = ik_pose(model, data, qadr, sid, pos, R, free=free,
+                                seeds=ik_seeds, seed=seed + i)
+                if ok and q is not None and free(q):
+                    out.append({"q": q, "pos": pos, "R": R, "mode": "top",
+                                "reach": float(np.linalg.norm(pos[:2]))})
+                    break
+
+    # Rim pinch: needed for anything too wide to straddle, and a useful fallback otherwise.
+    radius = object_rim_radius(model, data, body_prefix, center)
+    for i in range(n_theta):
+        theta = 2.0 * np.pi * i / n_theta
+        for dz in (0.02, 0.005, -0.01):
+            pos, R = grasp_pose(center, theta, radius, dz)
+            q, ok = ik_pose(model, data, qadr, sid, pos, R, free=free,
+                            seeds=ik_seeds, seed=seed + i)
+            if ok and q is not None and free(q):
+                out.append({"q": q, "pos": pos, "R": R, "mode": "rim", "theta": theta,
+                            "reach": float(np.linalg.norm(pos[:2]))})
+                break
+
+    out.sort(key=lambda d: (d["mode"] != "top", d["reach"]))   # prefer straddle, then close reach
     return out
 
 
