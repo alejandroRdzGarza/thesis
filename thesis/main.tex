@@ -1,0 +1,199 @@
+% ============================================================================
+%  MSc Robotics and Computation — summer project report
+%
+%  Structure scaffold only. The prose is deliberately NOT written: the module
+%  guidance (COMP0247 §5.5) is explicit that AI-drafted reports read shallow and
+%  repetitive and mark poorly, and that any AI assistance must be credited. What
+%  is here is the skeleton, the page budget, and notes on what each section has
+%  to establish — the argument and the words should be yours.
+%
+%  One-column report class rather than a two-column article format, because the
+%  results tables are wide (4-6 policy arms x TSR/collision/CI/ETS), there is
+%  real display math, and the 30-page cap applies either way.
+%
+%  Limits (COMP0247 §5): 30 pages main body, 60 pages including bibliography and
+%  appendices. Readable text size, reasonable margins, numbered pages.
+% ============================================================================
+\documentclass[a4paper,11pt]{report}
+
+\usepackage[a4paper, margin=3cm, bottom=2.5cm]{geometry}
+\usepackage{setspace}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+
+% --- maths -----------------------------------------------------------------
+\usepackage{amsmath,amssymb,amsfonts,bm}
+
+% --- figures and tables ----------------------------------------------------
+\usepackage{graphicx}
+\usepackage{booktabs}      % \toprule/\midrule/\bottomrule — never use \hline
+\usepackage{siunitx}       % align numbers on the decimal point in results tables
+\usepackage{subcaption}
+\usepackage{multirow}
+\graphicspath{{figures/}}
+
+% --- references ------------------------------------------------------------
+\usepackage[numbers,sort&compress]{natbib}   % \citet{x} -> "Author et al. [1]"
+\usepackage[hidelinks]{hyperref}
+\usepackage[capitalise,noabbrev]{cleveref}   % \cref{fig:x} -> "Figure 3.2"
+
+% siunitx setup for percentage-with-CI columns
+\sisetup{detect-weight=true, detect-inline-weight=math}
+
+\newcommand{\pizero}{$\pi_{0.5}$}
+\newcommand{\car}{\textsc{car}}
+\newcommand{\tsr}{\textsc{tsr}}
+\newcommand{\ets}{\textsc{ets}}
+
+% ============================================================================
+\title{{\vspace{-14em}\includegraphics[scale=0.4]{ucl_logo.png}}\\
+  {\Huge Project Title}\\
+  {\large Optional Subtitle}\\}
+\date{Submission date: Day Month Year}
+\author{Candidate number: \#\#\#\#\#   % candidate number, NOT your name
+  \thanks{{\bf Disclaimer:} This report is submitted as part requirement for the
+    MSc Robotics and Computation at UCL. It is substantially the result of my own
+    work except where explicitly indicated in the text.
+    % KEEP ONLY ONE of the two disclaimers below.
+    The report may be freely copied and distributed provided the source is
+    explicitly acknowledged.}
+  \\ \\ MSc Robotics and Computation \\ \\ Supervisor: NAME}
+
+\begin{document}
+\onehalfspacing
+\maketitle
+
+\begin{abstract}
+% ~200 words. Write this LAST. Motivation, method, headline numbers.
+% Your headline is a shield-free safety result plus the CBF-activation-rate drop.
+\end{abstract}
+
+\tableofcontents
+\setcounter{page}{1}
+
+% ============================================================================
+\chapter{Introduction}\label{ch:intro}
+% BUDGET ~3 pages.
+% Establish, in order:
+%  - VLAs can follow instructions but have no notion of collision safety.
+%  - Why an external safety filter is the standard answer, and why that is
+%    unsatisfying: it is always needed, and it costs task success.
+%  - The question this project actually asks: can the safety be moved INTO the
+%    policy so the filter becomes redundant?
+%  - Scope: SafeLIBERO, pi_0.5, simulation only. Say what is NOT in scope.
+%  - Contributions, as a short list. Be honest about which are negative results.
+
+\section{Motivation}
+\section{Problem statement and scope}
+\section{Contributions}
+
+% ============================================================================
+\chapter{Background and Related Work}\label{ch:background}
+% BUDGET ~5 pages. Concision is explicitly marked for — do not pad this.
+% Must establish that your approach is the logical next step, not a survey.
+
+\section{Vision-language-action models}
+% pi_0.5, flow-matching action head, action chunking. Only the detail a reader
+% needs to follow your method.
+
+\section{Control barrier functions for manipulation}
+% h(x) >= 0, the QP projection, why it composes with any policy.
+
+\section{Safety filters for VLAs}
+% AEGIS is the direct comparison — state exactly what they do and where they
+% stop (their documented distribution-shift limitation is your opening).
+
+\section{Imitation and RL for safety internalisation}
+% DAgger, SafeDAgger, Flow-GRPO, piRL. Position: piRL is task RL for flow VLAs;
+% this project is safety RL / safety distillation.
+
+% ============================================================================
+\chapter{Method}\label{ch:method}
+% BUDGET ~8 pages. This is where the marks for "difficulty and achievement" are
+% won. Use figures — a system diagram and a barrier-geometry figure.
+
+\section{The SafeLIBERO benchmark}
+% Suites, levels, and the three metrics. Define CAR, TSR, ETS PRECISELY here,
+% including the >1mm displacement threshold, and say it matches AEGIS so the
+% comparison is fair. This paragraph is load-bearing for your whole evaluation.
+
+\section{Obstacle geometry and the barrier}
+% MVEE from the true mesh point cloud; the EE model; sphere decomposition.
+
+\section{The CBF shield}
+% The QP, the AEGIS-faithful every-step application, and the implementation
+% choices that turned out to matter.
+
+\section{Collision attribution}
+% Raw displacement vs contact-graph attribution, and why the RAW flag is the
+% metric reported (the attribution is a lower bound).
+
+\section{Teachers}
+\subsection{The shielded policy as its own teacher}
+\subsection{A privileged scripted expert}
+% Per-scene teacher profiles: grasp side by obstacle clearance, grasp target
+% from real object geometry. This is the ablation, not the main line.
+
+\section{Distillation}
+% Flow-matching BC on shielded actions; the clean + shield-active filters;
+% DAgger rounds and why they are capped at two.
+
+% ============================================================================
+\chapter{Experiments and Results}\label{ch:results}
+% BUDGET ~9 pages. Largest chapter. One section per question, each stating the
+% question, the setup, the numbers, and the reading.
+
+\section{Experimental setup}
+% Held-out init split, episode counts, Wilson CIs, hardware.
+
+\section{Does the shield make \pizero{} safe?}
+% The AEGIS-matched baseline. This is where you can claim to match/exceed AEGIS,
+% WITH the caveat that privileged ground-truth geometry removes their perception
+% gap — state that caveat yourself before a marker finds it.
+
+\section{Can scalar-reward RL internalise safety?}
+% Experiments 001-004. A characterised negative result: the learning signal and
+% the destabilising signal are the same knob. Say why this is structural.
+
+\section{Can the shield be distilled by imitation?}
+% Exp 005/005b and the full-grid run. The headline table goes here.
+
+\section{Does a privileged scripted teacher do better?}
+% The per-scene teacher work. Honest answer: no, and the action-distribution
+% mismatch explains why.
+
+\section{Ablations}
+% Success filter on/off; shield-active filter; number of DAgger rounds.
+
+% ============================================================================
+\chapter{Discussion}\label{ch:discussion}
+% BUDGET ~3 pages. "Critical analysis of method and results" is an explicit
+% marking criterion — this chapter is worth real marks. Do not skip the
+% limitations; naming them yourself reads as strength, not weakness.
+
+\section{Why imitation succeeds where scalar-reward RL fails}
+\section{The cost of internalised caution}
+% Success erodes across DAgger rounds. Explain the mechanism.
+\section{Limitations}
+% Simulation only; privileged geometry; OSC_POSE action-space limits on the
+% wedged-object tasks; single seed where applicable.
+\section{Future work}
+
+% ============================================================================
+\chapter{Conclusion}\label{ch:conclusion}
+% BUDGET ~1 page. Short. Nothing new.
+
+% ============================================================================
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\appendix
+\chapter{Additional results}
+% Per-suite and per-task breakdowns that would clutter the main text.
+
+\chapter{Implementation notes}
+% Reproduction commands. NOTE: the module guidance requires crediting AI tools
+% used for code or writing, both in the codebase README and here. Be specific
+% about which parts.
+
+\end{document}
