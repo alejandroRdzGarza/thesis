@@ -589,6 +589,44 @@ def _ik_grasp_orientation(model, data, target_xyz, arm_qadr, arm_dadr, sid, jnt_
     return found_R, (found_R is not None)
 
 
+_PARKED_XY = 1.5          # |x| or |y| beyond this = an obstacle parked off-scene
+
+
+def _disable_parked_obstacle_contacts(model, data, verbose: bool = False) -> int:
+    """Remove off-scene parked obstacles from collision detection. Returns geoms disabled.
+
+    SafeLIBERO scenes carry the obstacle variants for every safety level and park the unused ones
+    far outside the workspace (|x| or |y| of 10-20 m), where they sit interpenetrating the ground
+    plane. Those bodies generate thousands of contacts, overflowing MuJoCo's contact buffer
+    (`ncon = 5000` warnings). When that buffer overflows, which contacts get dropped depends on
+    ordering — so the SAME episode can produce a different outcome on a re-run.
+
+    That is not hypothetical: re-running 26 scored episodes produced a different success or
+    collision verdict on 6 of them (~23%). Clearing contype/conaffinity on the parked bodies takes
+    them out of contact generation entirely, which is both cheaper and more targeted than enlarging
+    the buffer. They are parked precisely because they are unused for this episode, so nothing that
+    matters is affected.
+    """
+    if not _HAS_MUJOCO:
+        return 0
+    n = 0
+    for b in range(model.nbody):
+        p = data.xpos[b]
+        if abs(float(p[0])) < _PARKED_XY and abs(float(p[1])) < _PARKED_XY:
+            continue
+        name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, b) or ""
+        for g in range(model.ngeom):
+            if model.geom_bodyid[g] == b and (model.geom_contype[g] or model.geom_conaffinity[g]):
+                model.geom_contype[g] = 0
+                model.geom_conaffinity[g] = 0
+                n += 1
+        if verbose and name:
+            print(f"    [parked] {name} at {np.round(p, 1)} — contacts disabled")
+    if n:
+        mujoco.mj_forward(model, data)
+    return n
+
+
 def _unwrap_sim(env):
     sim   = env.sim
     model = getattr(sim, "model", None)
@@ -1306,6 +1344,7 @@ def run_libero_trial(
 
     # ── Extract MuJoCo model/data for CBF Jacobian computation ───────────────
     model, data  = _unwrap_sim(env)
+    _disable_parked_obstacle_contacts(model, data)
     arm_body_ids = _get_arm_body_ids(model)
     arm_dof_idx  = _get_arm_dof_indices(model)
     ee_body_id   = arm_body_ids[-1] if arm_body_ids else 0

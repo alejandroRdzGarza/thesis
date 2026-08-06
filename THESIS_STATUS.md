@@ -196,12 +196,17 @@ Stated plainly; several are consequences of scope rather than oversights.
 1. **Simulation only.** No physical robot. The safety claim is about a simulated Franka Panda.
 2. **Privileged geometry.** Obstacle shape and pose come from the simulator, not perception. This
    is what makes the CBF numbers exceed AEGIS's and it must be stated wherever they are compared.
-3. **Non-reproducible rollouts — discovered 2026-08-06.** Re-running 26 identical episodes produced
-   a different score on 6 of them (~23%). The likely cause is MuJoCo contact-buffer overflow
-   (`ncon = 5000`) dropping contacts in an order-dependent way. This does not invalidate the large
-   effects (90% → 15% collision is far outside this noise) but it does mean small differences
-   between configurations cannot be read from single runs, and it needs fixing before any
-   fine-grained comparison is reported.
+3. **Non-reproducible rollouts — found and fixed 2026-08-06.** Re-running 26 identical episodes
+   originally produced a different score on 6 of them (~23%). Cause: SafeLIBERO scenes carry the
+   obstacle variants for every safety level and park the unused ones far outside the workspace,
+   where they sit interpenetrating the ground plane and generate thousands of contacts. That
+   overflowed MuJoCo's contact buffer (`ncon = 5000`), and when the buffer overflows, which
+   contacts get dropped is order-dependent — so identical episodes could diverge. Fixed by clearing
+   `contype`/`conaffinity` on parked bodies, removing them from contact generation. Verified: zero
+   overflow warnings, and three identical runs now produce identical outcomes.
+   **Numbers produced before this fix carry roughly 23% per-episode noise** and should be re-run
+   before any fine-grained comparison is reported; the large effects (90% → 15% collision) are far
+   outside that noise and stand.
 4. **Residual unshielded collision.** The distilled policy still collides ~15% of the time without
    the shield. The claim is reduced reliance, not eliminated need.
 5. **Distillation and the shield conflict.** Stacking them reduces success; they are alternatives,
@@ -270,3 +275,4 @@ Against the UCL PG project criteria:
 The strongest claim this work can support is: *distilling a CBF safety filter into a VLA reduces
 unshielded collisions roughly six-fold at no cost to task success, and reduces the policy's
 dependence on the filter roughly four-fold, in simulation with privileged obstacle geometry.*
+
