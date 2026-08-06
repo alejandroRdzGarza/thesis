@@ -367,19 +367,30 @@ def top_grasp_pose(center, yaw, top_z, grip_depth):
     return pos, np.column_stack([x_ax, u, z_ax])
 
 
+def object_cloud(model, data, body_prefix):
+    """True surface point cloud of an object — real mesh vertices plus primitive samples.
+
+    Do NOT size objects from per-geom bounding-sphere radii (`max(geom_size)` applied to every
+    axis). That over-estimates a box by its diagonal: it reports a 5.5 cm orange-juice carton as
+    16 cm wide, which makes a feasible top-down straddle look impossible and falls back to a rim
+    pinch that closes on air. Measured failure — object suite went 0/4 that way.
+    """
+    from experiments.cbf_visualizer import get_obstacle_point_cloud
+    for sfx in ("", "_main", "_g0"):
+        pc = get_obstacle_point_cloud(model, data, f"{body_prefix}{sfx}")
+        if pc is not None and len(pc):
+            return np.asarray(pc, float)
+    return None
+
+
 def object_extent(model, data, body_prefix, center):
-    """(width_along_x, width_along_y, top_z) of an object, from its real geoms."""
-    xs, ys, zs = [], [], []
-    for g in range(model.ngeom):
-        n = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, g) or ""
-        if not n.startswith(body_prefix):
-            continue
-        c = data.geom_xpos[g]
-        r = float(np.max(model.geom_size[g]))
-        xs += [c[0] - r, c[0] + r]; ys += [c[1] - r, c[1] + r]; zs += [c[2] - r, c[2] + r]
-    if not xs:
+    """(width_along_x, width_along_y, top_z) of an object, from its TRUE geometry."""
+    pc = object_cloud(model, data, body_prefix)
+    if pc is None:
         return 0.06, 0.06, float(center[2])
-    return max(xs) - min(xs), max(ys) - min(ys), max(zs)
+    return (float(pc[:, 0].max() - pc[:, 0].min()),
+            float(pc[:, 1].max() - pc[:, 1].min()),
+            float(pc[:, 2].max()))
 
 
 def sample_grasps(model, data, qadr, sid, center, body_prefix, free, *,
@@ -397,8 +408,12 @@ def sample_grasps(model, data, qadr, sid, center, body_prefix, free, *,
 
     # Top-down straddle: only where the object actually fits between the fingers.
     if min(wx, wy) < gripper_open:
+        # Close along the NARROW axis first: a 8.3 x 4.9 cm box only fits the gripper one way
+        # round. yaw is the closing direction, so yaw=0 closes along x, yaw=pi/2 along y.
+        yaw0 = 0.0 if wx < wy else np.pi / 2
         for i in range(n_yaw):
-            yaw = np.pi * i / n_yaw
+            # sweep outward from the narrow-axis yaw rather than from an arbitrary zero
+            yaw = yaw0 + (np.pi * ((i + 1) // 2) / n_yaw) * (1 if i % 2 == 0 else -1)
             # close along the narrow axis: yaw is the closing direction
             for depth in (0.02, 0.035, 0.01):
                 pos, R = top_grasp_pose(center, yaw, top_z, depth)
@@ -427,13 +442,12 @@ def sample_grasps(model, data, qadr, sid, center, body_prefix, free, *,
 
 
 def object_rim_radius(model, data, body_prefix, center):
-    """Rim radius of a circular object, from its true geometry (max XY extent from the centre)."""
-    r = []
-    for g in range(model.ngeom):
-        n = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, g) or ""
-        if n.startswith(body_prefix):
-            r.append(float(np.linalg.norm(data.geom_xpos[g][:2] - np.asarray(center, float)[:2])))
-    return max(r) if r else 0.05
+    """Rim radius of a circular object, from its true surface cloud (not bounding spheres)."""
+    pc = object_cloud(model, data, body_prefix)
+    if pc is None:
+        return 0.05
+    d = np.linalg.norm(pc[:, :2] - np.asarray(center, float)[:2], axis=1)
+    return float(np.percentile(d, 95))          # 95th pct: the rim, robust to stray vertices
 
 
 def path_to_ee_trace(model, data, qadr, sid, path):

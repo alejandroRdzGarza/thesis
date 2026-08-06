@@ -34,6 +34,9 @@ class PlannerConfig:
     release_hold: int = 8
     reach_tol: float = 0.02       # m, waypoint-reached tolerance
     max_steps_per_wp: int = 20
+    strict_max_steps: int = 90   # budget to ARRIVE at a grasp/release pose before
+    #                              closing the gripper; travelling waypoints keep the
+    #                              cheaper max_steps_per_wp timeout
     kp: float = 20.0
     krot: float = 4.0
     descend_steps: int = 6        # interpolation points on the straight-line descents
@@ -53,6 +56,7 @@ class PlannerExpert:
     _i: int = 0
     _steps_on_wp: int = 0
     _held: int = 0
+    reach_failed: bool = False   # never arrived at a grasp/release pose
 
     # PickPlaceController compatibility (the runner sets these; the planner derives its own).
     place_mode: str = "on"
@@ -71,6 +75,7 @@ class PlannerExpert:
         self._i = 0
         self._steps_on_wp = 0
         self._held = 0
+        self.reach_failed = False
 
     # ── planning ────────────────────────────────────────────────────────────
     def plan(self, model, data, qadr, jnt_rng, sid, ctx) -> bool:
@@ -111,13 +116,18 @@ class PlannerExpert:
             if path is None:
                 continue
             path = P.densify(P.shortcut(path, free, seed=self.seed), max_step=0.05)
-            for p, R in P.path_to_ee_trace(model, data, qadr, sid, path):
-                wps.append(dict(pos=p, R=R, grip=_GRIP_OPEN, hold=0, phase="APPROACH"))
+            _tr = P.path_to_ee_trace(model, data, qadr, sid, path)
+            for _k, (p, R) in enumerate(_tr):
+                # The LAST approach waypoint must actually be reached: the descent that follows
+                # only moves in z, so any XY error left here is carried straight into the grasp
+                # (measured: 56 mm of XY error at the grip point, fingers closing beside the object).
+                wps.append(dict(pos=p, R=R, grip=_GRIP_OPEN, hold=0, phase="APPROACH",
+                                strict=(_k == len(_tr) - 1)))
 
             # 2. straight-line descent onto the grasp, 3. close
             for k in range(1, c.descend_steps + 1):
                 wps.append(dict(pos=p_pre + (p_grasp - p_pre) * (k / c.descend_steps),
-                                R=R_grasp, grip=_GRIP_OPEN, hold=0, phase="DESCEND"))
+                                R=R_grasp, grip=_GRIP_OPEN, hold=0, phase="DESCEND", strict=True))
             wps.append(dict(pos=p_grasp, R=R_grasp, grip=_GRIP_CLOSE,
                             hold=c.grasp_hold, phase="GRASP"))
 
@@ -157,7 +167,7 @@ class PlannerExpert:
             # 6. set down, 7. release, 8. retreat
             for k in range(1, c.descend_steps + 1):
                 wps.append(dict(pos=p_preplace + (p_place - p_preplace) * (k / c.descend_steps),
-                                R=R_grasp, grip=_GRIP_CLOSE, hold=0, phase="PLACE"))
+                                R=R_grasp, grip=_GRIP_CLOSE, hold=0, phase="PLACE", strict=True))
             wps.append(dict(pos=p_place, R=R_grasp, grip=_GRIP_OPEN,
                             hold=c.release_hold, phase="RELEASE"))
             wps.append(dict(pos=p_place + np.array([0.0, 0.0, 0.10]), R=R_grasp,
@@ -189,8 +199,37 @@ class PlannerExpert:
         self._steps_on_wp += 1
 
         reached = float(np.linalg.norm(err)) < self.cfg.reach_tol
+        if wp.get("strict") and not reached and self._steps_on_wp < self.cfg.strict_max_steps:
+            act = np.zeros(7)                       # keep servoing until we actually arrive
+            act[:3] = np.clip(self.cfg.kp * err, -1.0, 1.0)
+            if self._rot_ref is not None:
+                from scipy.spatial.transform import Rotation as _R
+                Rcur = _R.from_quat(np.asarray(self._rot_ref, float)).as_matrix()
+                act[3:6] = np.clip(self.cfg.krot *
+                                   _R.from_matrix(wp["R"] @ Rcur.T).as_rotvec(), -1.0, 1.0)
+            act[6] = wp["grip"]
+            return act, self.phase
+        if wp.get("strict") and not reached:
+            self.reach_failed = True
         if wp["hold"] > 0:
-            # a hold waypoint (closing/opening the gripper) advances on a step count, not distance
+            # A hold waypoint closes or opens the gripper, so it MUST be in position first.
+            # Advancing on a step timeout here was closing the fingers 5-6 cm short of the object
+            # (measured: 55 mm and 60 mm tracking error, fingers shut to 0.0015 on empty air,
+            # object never moved) — the single largest failure mode of this teacher.
+            if not reached and self._steps_on_wp < self.cfg.strict_max_steps:
+                act = np.zeros(7)
+                act[:3] = np.clip(self.cfg.kp * err, -1.0, 1.0)
+                if self._rot_ref is not None:
+                    from scipy.spatial.transform import Rotation as _R
+                    Rcur = _R.from_quat(np.asarray(self._rot_ref, float)).as_matrix()
+                    act[3:6] = np.clip(self.cfg.krot *
+                                       _R.from_matrix(wp["R"] @ Rcur.T).as_rotvec(), -1.0, 1.0)
+                # hold the PREVIOUS gripper command while still travelling — closing early is
+                # exactly the bug this branch exists to prevent
+                act[6] = self._wps[self._i - 1]["grip"] if self._i > 0 else _GRIP_OPEN
+                return act, self.phase
+            if self._steps_on_wp >= self.cfg.strict_max_steps and not reached:
+                self.reach_failed = True     # could not get to the grasp/release pose
             if self._held >= wp["hold"]:
                 self._held = 0
                 self._i += 1
