@@ -42,6 +42,20 @@ class PlannerConfig:
     descend_steps: int = 6        # interpolation points on the straight-line descents
     ik_seeds: int = 20
     try_candidates: int = 10      # grasps to attempt before giving up on the scene
+    # closed-loop servo (final grasp and final set-down)
+    servo_xy_lock: float = 0.020  # centre in XY to within this before descending — a fast vertical
+    #                               move under OSC drags the grip point off the object. MUST stay
+    #                               >= what OSC can actually hold: at 0.012 an extended reach
+    #                               oscillates at the boundary and never descends at all (this is
+    #                               a known failure of the scripted controller, re-hit here).
+    servo_max_steps: int = 140    # hard cap so a servo can never hang the episode; on expiry it
+    #                               attempts the grasp anyway rather than descending forever
+    servo_z_cap: float = 0.25     # cap the descent command so OSC coupling cannot induce XY drift
+    servo_grasp_tol: float = 0.012
+    servo_place_tol: float = 0.020
+    stall_eps: float = 0.0015     # m of downward progress below which a step counts as stalled
+    stall_patience: int = 12      # consecutive stalled steps = contact reached
+    place_dz: float = 0.010       # release the object this far above the goal surface
     clearance: float = 0.02       # m of standoff the PLANNER must keep from the scene.
     #                               Planning to zero clearance produced 24 grazing
     #                               contacts (1.0-4.7 mm displacements) as soon as OSC
@@ -62,6 +76,9 @@ class PlannerExpert:
     _steps_on_wp: int = 0
     _held: int = 0
     reach_failed: bool = False   # never arrived at a grasp/release pose
+    _stall: int = 0              # steps the descent has made no downward progress
+    _min_z: object = None        # lowest EE z reached during the current descent
+    _closing: int = 0            # steps spent closing the fingers
 
     # PickPlaceController compatibility (the runner sets these; the planner derives its own).
     place_mode: str = "on"
@@ -84,6 +101,9 @@ class PlannerExpert:
         self._steps_on_wp = 0
         self._held = 0
         self.reach_failed = False
+        self._stall = 0
+        self._min_z = None
+        self._closing = 0
 
     # ── planning ────────────────────────────────────────────────────────────
     def plan(self, model, data, qadr, jnt_rng, sid, ctx) -> bool:
@@ -120,7 +140,12 @@ class PlannerExpert:
         goal_xy = np.asarray(goal, float)[:2]
         for cd in cands:
             cd["place_reach"] = float(np.linalg.norm(goal_xy + (cd["pos"] - obj)[:2]))
-        cands.sort(key=lambda d: (d["mode"] != "top", d["place_reach"]))
+        # Primary key is grasp quality (straddle first, then closest reach) — ordering by
+        # placement reach instead raised planning to 96% but dropped clean demos 40% -> 29%,
+        # because it selects grasps that are convenient for the PLACE and poor for the PICK.
+        # Placement reach is a tiebreak only; unreachable placements are caught by trying
+        # more candidates rather than by reordering.
+        cands.sort(key=lambda d: (d["mode"] != "top", round(d["reach"], 2), d["place_reach"]))
 
         # Travelled paths keep a standoff, but a fixed one costs scenes: 2 cm closed the narrow
         # passages on 2 of 24 and made them unplannable. Back off instead of failing — a 1 cm
@@ -154,12 +179,13 @@ class PlannerExpert:
                     wps.append(dict(pos=p, R=R, grip=_GRIP_OPEN, hold=0, phase="APPROACH",
                                     strict=(_k == len(_tr) - 1)))
 
-                # 2. straight-line descent onto the grasp, 3. close
-                for k in range(1, c.descend_steps + 1):
-                    wps.append(dict(pos=p_pre + (p_grasp - p_pre) * (k / c.descend_steps),
-                                    R=R_grasp, grip=_GRIP_OPEN, hold=0, phase="DESCEND", strict=True))
-                wps.append(dict(pos=p_grasp, R=R_grasp, grip=_GRIP_CLOSE,
-                                hold=c.grasp_hold, phase="GRASP"))
+                # 2-3. descend and close, CLOSED-LOOP on the live object pose. The planned pose is
+                # only a prediction; driving to it blind closed the fingers 55 mm from the object
+                # (measured, no contacts — OSC simply does not converge to every pose IK can reach).
+                # Servoing re-aims at wherever the object ACTUALLY is on each step.
+                wps.append(dict(pos=p_grasp, R=R_grasp, grip=_GRIP_OPEN, hold=0,
+                                phase="DESCEND", servo="grasp",
+                                grasp_off=(p_grasp - obj).copy()))
 
                 # 4. lift straight up
                 p_lift = p_grasp + np.array([0.0, 0.0, c.lift_h])
@@ -230,10 +256,12 @@ class PlannerExpert:
                 for p, R in P.path_to_ee_trace(model, data, qadr, sid, tpath):
                     wps.append(dict(pos=p, R=R, grip=_GRIP_CLOSE, hold=0, phase="TRANSPORT"))
 
-                # 6. set down, 7. release, 8. retreat
-                for k in range(1, c.descend_steps + 1):
-                    wps.append(dict(pos=p_preplace + (p_place - p_preplace) * (k / c.descend_steps),
-                                    R=R_grasp, grip=_GRIP_CLOSE, hold=0, phase="PLACE", strict=True))
+                # 6-7. set down and release, CLOSED-LOOP. Driving to a placement computed from the
+                # grasp offset predicted at t=0 ignores how the object ACTUALLY ended up in the
+                # gripper; re-deriving the offset from the live object and EE each step makes the
+                # placement self-correct for grasp slip.
+                wps.append(dict(pos=p_place, R=R_grasp, grip=_GRIP_CLOSE, hold=0,
+                                phase="PLACE", servo="place"))
                 wps.append(dict(pos=p_place, R=R_grasp, grip=_GRIP_OPEN,
                                 hold=c.release_hold, phase="RELEASE"))
                 wps.append(dict(pos=p_place + np.array([0.0, 0.0, 0.10]), R=R_grasp,
@@ -249,6 +277,76 @@ class PlannerExpert:
                            f"rejections by stage: {dict(stage)}")
         return False
 
+    # ── closed-loop servos ──────────────────────────────────────────────────
+    def _servo(self, wp, ee, obj, goal, gripper):
+        """Drive the last few centimetres from OBSERVED state. Returns (action7, phase_done).
+
+        Two cases, both re-derived every step rather than replayed from the plan:
+
+        grasp  target = live object pose + the grasp offset chosen at plan time. XY is locked
+               before descending (a fast vertical move under OSC drags the grip point off the
+               object), and the fingers close on CONTACT — detected as the descent ceasing to
+               reach new lows — rather than at a predicted height, which is what makes it robust
+               to the object not being exactly where the plan assumed.
+
+        place  target = goal + (live EE - live object). Using the LIVE offset means the placement
+               corrects for however the object actually sits in the gripper, instead of trusting
+               the offset predicted at the moment of grasp.
+        """
+        c = self.cfg
+        act = np.zeros(7)
+        if self._rot_ref is not None:
+            from scipy.spatial.transform import Rotation as _R
+            Rcur = _R.from_quat(np.asarray(self._rot_ref, float)).as_matrix()
+            act[3:6] = np.clip(c.krot * _R.from_matrix(wp["R"] @ Rcur.T).as_rotvec(), -1.0, 1.0)
+
+        if wp["servo"] == "grasp":
+            target = obj + np.asarray(wp["grasp_off"], float)
+            # already closing? hold still and finish the grip
+            if self._closing > 0:
+                self._closing += 1
+                act[6] = _GRIP_CLOSE
+                return act, self._closing > c.grasp_hold
+            dxy = target[:2] - ee[:2]
+            act[6] = _GRIP_OPEN
+            if (float(np.linalg.norm(dxy)) > c.servo_xy_lock
+                    and self._steps_on_wp < c.servo_max_steps // 2):
+                act[:2] = np.clip(c.kp * dxy, -1.0, 1.0)      # centre first, do not descend yet
+                return act, False
+            act[:2] = np.clip(c.kp * dxy, -1.0, 1.0)
+            act[2] = float(np.clip(c.kp * (target[2] - ee[2]), -c.servo_z_cap, 1.0))
+            # contact test: the descent stops finding new lows
+            if self._min_z is None or ee[2] < self._min_z - c.stall_eps:
+                self._min_z, self._stall = float(ee[2]), 0
+            else:
+                self._stall += 1
+            reached = float(np.linalg.norm(target - ee)) < c.servo_grasp_tol
+            if reached or self._stall >= c.stall_patience or self._steps_on_wp >= c.servo_max_steps:
+                self._closing = 1
+                act[:3] = 0.0
+                act[6] = _GRIP_CLOSE
+            return act, False
+
+        # place: put the OBJECT on the goal, using the offset it actually has right now
+        live_off = ee - obj
+        target = goal + live_off + np.array([0.0, 0.0, c.place_dz])
+        act[6] = _GRIP_CLOSE
+        dxy = target[:2] - ee[:2]
+        if (float(np.linalg.norm(dxy)) > c.servo_xy_lock
+                and self._steps_on_wp < c.servo_max_steps // 2):
+            act[:2] = np.clip(c.kp * dxy, -1.0, 1.0)
+            return act, False
+        act[:2] = np.clip(c.kp * dxy, -1.0, 1.0)
+        act[2] = float(np.clip(c.kp * (target[2] - ee[2]), -c.servo_z_cap, 1.0))
+        if self._min_z is None or ee[2] < self._min_z - c.stall_eps:
+            self._min_z, self._stall = float(ee[2]), 0
+        else:
+            self._stall += 1
+        done = (float(np.linalg.norm(target - ee)) < c.servo_place_tol
+                or self._stall >= c.stall_patience
+                or self._steps_on_wp >= c.servo_max_steps)
+        return act, done
+
     # ── execution ───────────────────────────────────────────────────────────
     def act(self, ee_pos, obj_pos, goal_pos, *, obstacle=None, obstacles=None,
             table_z=None, gripper=None):
@@ -262,8 +360,23 @@ class PlannerExpert:
         wp = self._wps[self._i]
         self.phase = wp["phase"]
         ee = np.asarray(ee_pos, float)
-        err = wp["pos"] - ee
         self._steps_on_wp += 1
+
+        # ── closed-loop waypoints ────────────────────────────────────────────
+        # Everything else replays a pose fixed at plan time. These two re-derive their target from
+        # what is ACTUALLY observed, because they are the two places where centimetre precision
+        # decides the outcome and where an open-loop plan measurably fails.
+        if wp.get("servo"):
+            act, done = self._servo(wp, ee, np.asarray(obj_pos, float),
+                                    np.asarray(goal_pos, float), gripper)
+            if done:
+                self._i += 1
+                self._steps_on_wp = 0
+                self._stall = 0
+                self._min_z = None
+            return act, self.phase
+
+        err = wp["pos"] - ee
 
         reached = float(np.linalg.norm(err)) < self.cfg.reach_tol
         if wp.get("strict") and not reached and self._steps_on_wp < self.cfg.strict_max_steps:
