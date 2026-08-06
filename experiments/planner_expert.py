@@ -41,7 +41,7 @@ class PlannerConfig:
     krot: float = 4.0
     descend_steps: int = 6        # interpolation points on the straight-line descents
     ik_seeds: int = 20
-    try_candidates: int = 6       # grasps to attempt before giving up on the scene
+    try_candidates: int = 10      # grasps to attempt before giving up on the scene
     clearance: float = 0.02       # m of standoff the PLANNER must keep from the scene.
     #                               Planning to zero clearance produced 24 grazing
     #                               contacts (1.0-4.7 mm displacements) as soon as OSC
@@ -112,6 +112,16 @@ class PlannerExpert:
         from collections import Counter
         stage = Counter()          # which planning stage rejected each candidate
 
+        # Order candidates by whether they make the PLACEMENT reachable. The grasp offset is
+        # carried to the goal (the EE must go to goal + offset to put the object on the goal), so a
+        # grasp on the far side of the object pushes the placement outward — measured on goal LII
+        # t0, where every top candidate put the place pose at x=0.166 y=0.291, outside the arm's
+        # workspace, and IK failed there even with collision checking switched off entirely.
+        goal_xy = np.asarray(goal, float)[:2]
+        for cd in cands:
+            cd["place_reach"] = float(np.linalg.norm(goal_xy + (cd["pos"] - obj)[:2]))
+        cands.sort(key=lambda d: (d["mode"] != "top", d["place_reach"]))
+
         # Travelled paths keep a standoff, but a fixed one costs scenes: 2 cm closed the narrow
         # passages on 2 of 24 and made them unplannable. Back off instead of failing — a 1 cm
         # plan is worth far more than no plan, and most scenes take the full 2 cm.
@@ -173,18 +183,46 @@ class PlannerExpert:
                 # 4.4 cm miss against a 4.7 cm rim radius).
                 grasp_off = p_grasp - obj                      # EE − object, at the moment of grasp
                 p_place = np.array([goal[0], goal[1], goal[2]]) + grasp_off + np.array([0, 0, 0.01])
-                p_preplace = p_place + np.array([0.0, 0.0, c.place_clear_h])
-                q_pp, ok = P.ik_pose(model, data, qadr, sid, p_preplace, R_grasp, free=free_held,
-                                     seeds=c.ik_seeds, seed=self.seed)
+                # Approach the placement from as high as is REACHABLE. A fixed hover height puts
+                # the pre-place pose outside the workspace when the goal is already elevated (a
+                # cabinet top), and the whole scene then fails to plan — measured as ik_preplace
+                # rejecting all 18 candidate/clearance combinations on goal LII t0.
+                q_pp, ok, p_preplace = None, False, None
+                for _h in (c.place_clear_h, 0.08, 0.05, 0.02):
+                    cand_pp = p_place + np.array([0.0, 0.0, _h])
+                    q_pp, ok = P.ik_pose(model, data, qadr, sid, cand_pp, R_grasp, free=free_held,
+                                         seeds=c.ik_seeds, seed=self.seed)
+                    if ok:
+                        p_preplace = cand_pp
+                        break
                 if not ok:
                     stage["ik_preplace"] += 1
                     continue
-                with P.clearance_margin(model, c.clearance):
-                    free_held_clear = P.make_attached_collision_fn(model, data, qadr, sid, obj_qadr,
-                                                                  rel_pos, rel_R, ignore=(body,))
-                    tpath, _why = P.rrt_connect(q_lift, q_pp, jnt_rng, free_held_clear, seed=self.seed)
+                # NB uses `clr`, not c.clearance: the transport leg was pinned at the fixed 2 cm
+                # while only the approach followed the ladder, so a scene reported as failing "at
+                # all clearances" had in fact only ever been tried at one.
+                #
+                # Transport must clear whatever sits between pick and place while CARRYING the
+                # object; when it fails the usual reason is too little height, so retry from a
+                # higher lift before giving this candidate up.
+                tpath = None
+                for _lift_extra in (0.0, 0.08, 0.16):
+                    if _lift_extra > 0.0:
+                        p_lift_try = p_grasp + np.array([0.0, 0.0, c.lift_h + _lift_extra])
+                        q_try, ok_l = P.ik_pose(model, data, qadr, sid, p_lift_try, R_grasp,
+                                                free=free, seeds=c.ik_seeds, seed=self.seed)
+                        if not ok_l:
+                            continue
+                        q_lift, p_lift = q_try, p_lift_try
+                    with P.clearance_margin(model, clr):
+                        free_held_clear = P.make_attached_collision_fn(
+                            model, data, qadr, sid, obj_qadr, rel_pos, rel_R, ignore=(body,))
+                        tpath, _why = P.rrt_connect(q_lift, q_pp, jnt_rng, free_held_clear,
+                                                    seed=self.seed)
+                        if tpath is not None:
+                            tpath = P.shortcut(tpath, free_held_clear, seed=self.seed)
                     if tpath is not None:
-                        tpath = P.shortcut(tpath, free_held_clear, seed=self.seed)
+                        break
                 if tpath is None:
                     stage["rrt_transport"] += 1
                     continue

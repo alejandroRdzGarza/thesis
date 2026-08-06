@@ -247,6 +247,12 @@ def ik_pose(model, data, qadr, sid, target_pos, target_R=None, *, free=None,
         if reach < 5e-3:
             if free is None or free(q):
                 solutions.append(q.copy())              # collision-free and on target
+                # Seed 0 IS the current configuration, so a solution from it is already the
+                # nearest branch — take it and skip the rest. Otherwise gather a few and choose.
+                # Without this early exit every call ran all `seeds` iterations, which made
+                # planning ~20x slower once this function stopped returning on first success.
+                if s == 0 or len(solutions) >= 5:
+                    break
             elif best is None:
                 best = q                                # on target but colliding — keep as fallback
 
