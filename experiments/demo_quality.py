@@ -37,9 +37,15 @@ from pathlib import Path
 
 # Absolute red flags. Each is a property that is wrong regardless of what the rest of the set does.
 ABS_RULES = {
-    # The gripper should close ON the object. Closing far from it is the "grasped thin air and got
-    # lucky" case — directly observed, and previously invisible to the success filter.
-    "grasp_far":     ("obj_dist_at_grasp", lambda v: v > 0.08),
+    # Coarse backstop for a grip point planned somewhere absurd. Deliberately loose: this does NOT
+    # detect the gripper closing on air. obj_dist_at_grasp measures the EE site, which sits ~5-6 cm
+    # behind the fingertips, so a real grasp and a close-on-air read almost the same (measured on
+    # one scene: 55.3 mm succeeding, 57.7 mm failing). That failure mode is instead caught by the
+    # success filter itself — an episode that grasps nothing does not reach the goal — so it never
+    # reaches the training set. Detecting it directly would need the HELD object's pose tracked,
+    # which the runner does not currently record (obj_dist follows the nearest target object and
+    # switches between them mid-episode).
+    "grasp_far":     ("obj_dist_at_grasp", lambda v: v > 0.15),
     # One close per pick. More means it fumbled and retried, and BC would learn the fumble.
     "regrasped":     ("gripper_close_transitions", lambda v: v > 1),
     "stalled":       ("deadlock_steps", lambda v: v > 0),
