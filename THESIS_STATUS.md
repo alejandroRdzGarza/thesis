@@ -3,6 +3,14 @@
 **MSc Robotics and Computation, UCL · COMP0247**
 **Written 2026-08-06. Self-contained: assumes no prior knowledge of the project.**
 
+
+> **UPDATE 2026-08-07 — headline result is in.** Shielded self-distillation cuts shield-free
+> collision from 82.5% to 17.5% (CAR 17.5% → 82.5%) while raising success 58.3% → 80.8%, on
+> held-out inits, n=120 per arm, disjoint 95% CIs. Full table, training-data characterisation and
+> threats to validity: [`figures/results_shielded_distillation.md`](figures/results_shielded_distillation.md).
+> Sections below predate this and describe the pre-result state.
+
+
 This document exists so a reader who has not followed the work can judge what has been achieved,
 how solid it is, and what is still open. Results are labelled **verified**, **in progress** or
 **preliminary**. Where a number has a caveat that weakens it, the caveat is stated next to the
