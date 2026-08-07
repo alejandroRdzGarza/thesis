@@ -77,9 +77,25 @@ def main():
                     help="require the shield to have fired at least this many times. 0 keeps every "
                          "clean episode (including ones where the shield never engaged, which carry "
                          "no safety signal).")
+    ap.add_argument("--no-cbf", dest="use_cbf", action="store_false", default=True,
+                    help="CONTROL ABLATION: collect with the shield OFF, keeping successful + "
+                         "collision-free episodes. The shielded round-0 set is filtered on BOTH "
+                         "success and cleanliness, which confounds two mechanisms: imitating the "
+                         "shield's corrections, and plain success-filtering (self-improvement, "
+                         "which raises success on its own and correlates with not knocking things "
+                         "over). Training on unshielded episodes selected the same way isolates "
+                         "them: if collision still falls, the shield contributed nothing and the "
+                         "gain is selection; if it does not, the shield's contribution is proven. "
+                         "Implies --min-cbf-acts 0, since with no shield nothing can activate.")
     ap.add_argument("--keep-all", action="store_true",
                     help="write every trace regardless of the filters (for analysis, not training)")
     args = ap.parse_args()
+    if not args.use_cbf and args.min_cbf_acts:
+        # With the shield off, cbf_activations is always 0, so any positive threshold would silently
+        # discard EVERY episode and report an empty collection as a successful run.
+        print(f"  --no-cbf: forcing --min-cbf-acts {args.min_cbf_acts} -> 0 "
+              f"(nothing can activate with the shield off)")
+        args.min_cbf_acts = 0
 
     from openpi.policies.policy_logprob import PolicyWithLogprob
     from openpi.training import config as _config
@@ -132,7 +148,7 @@ def main():
                 m = run_libero_trial(
                     env=env, episode_idx=ep, instruction=lang, initial_states=inits,
                     obstacles=[], goal_pos=None, auto_goal=True, use_geo_success=False,
-                    use_cbf=True, vla="pi05", auto_detect_obstacle=True, aegis_faithful=True,
+                    use_cbf=args.use_cbf, vla="pi05", auto_detect_obstacle=True, aegis_faithful=True,
                     replan_steps=args.replan, horizon=args.horizon,
                     policy_fn=policy_fn, record_policy_trace=True, scene_name=tag)
             except Exception as e:
