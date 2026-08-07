@@ -105,7 +105,10 @@ for ARM in noshield matched; do
     say ">>> [4/5] evaluating $ARM (shield OFF, inits $EVAL_INITS)"
     for s in $SUITES; do for l in $LEVELS; do for t in $TASKS; do
         od="$OUT/eval_${ARM}_nocbf/${s}_L${l}_t${t}"
-        [ -d "$od" ] && continue                  # resumable
+        # Test for the MANIFEST, not the directory. A scene that crashed part-way leaves the
+        # directory behind, so a -d test would treat partial data as complete and silently fold
+        # it into the results; the manifest is only written once the scene finishes.
+        [ -f "$od/manifest.csv" ] && continue
         $PY -m experiments.rl_rollout_local --config pi05_libero_cbf \
             --checkpoint "$OUT/${ARM}_ckpt" \
             --suite "$s" --level "$l" --task "$t" --episodes $EVAL_INITS --K 1 \

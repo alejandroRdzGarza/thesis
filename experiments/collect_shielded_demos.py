@@ -122,14 +122,35 @@ def main():
     policy_fn = build_policy_fn(pol_lp)
 
     scenes = [(s, l, t) for s in args.suites for l in args.levels for t in args.tasks]
-    total = len(scenes) * len(args.episodes)
+
+    # RESUME. A full-grid collection is a ~21 h job; without this an interruption at hour 20 costs
+    # everything. The manifest alone cannot drive a resume because it records only KEPT episodes —
+    # the ~85% that are dropped would look un-attempted and be re-run. So every ATTEMPT is appended
+    # to attempted.txt, and kept rows are reloaded from the manifest so the final one stays whole.
+    attempted_path = out / "attempted.txt"
+    attempted: set[str] = set()
+    if attempted_path.exists():
+        attempted = {ln.strip() for ln in attempted_path.read_text().splitlines() if ln.strip()}
+    mpath = out / "manifest.csv"
+    if mpath.exists():
+        with open(mpath) as f:
+            rows_prior = [r for r in csv.DictReader(f)]
+    else:
+        rows_prior = []
+
+    todo = [(sc, ep) for sc in scenes for ep in args.episodes
+            if f"{sc[0]},{sc[1]},{sc[2]},{ep}" not in attempted]
+    total = len(todo)
+    if attempted:
+        say(f"    RESUMING: {len(attempted)} rollouts already attempted "
+            f"({len(rows_prior)} kept); {total} remaining")
     say(f"    {len(scenes)} scenes × {len(args.episodes)} inits = {total} rollouts")
     say(f"    keeping: success AND raw-collision-free"
         + (f" AND cbf_activations >= {args.min_cbf_acts}" if args.min_cbf_acts else "")
         + ("  [--keep-all: filters reported but not applied]" if args.keep_all else ""))
     say("")
 
-    rows: list[dict] = []
+    rows: list[dict] = list(rows_prior)
     # A full-grid collection is a many-hour job; a bare [done/total] gives no way to tell
     # whether it is on budget. Progress adds elapsed/ETA/rate plus the running KEPT count,
     # which is the number that actually decides whether the run is worth finishing.
@@ -149,7 +170,14 @@ def main():
             continue
 
         for ep in args.episodes:
+            _key = f"{suite},{level},{task},{ep}"
+            if _key in attempted:
+                continue
             done += 1
+            # Recorded BEFORE the rollout: an episode that crashes the process must not be retried
+            # forever on every resume.
+            with open(attempted_path, "a") as _af:
+                _af.write(_key + "\n")
             try:
                 m = run_libero_trial(
                     env=env, episode_idx=ep, instruction=lang, initial_states=inits,
