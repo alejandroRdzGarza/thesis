@@ -35,6 +35,8 @@ class PlannerConfig:
     #                               contact forces to stabilise before the lift began
     release_hold: int = 8
     reach_tol: float = 0.02       # m, waypoint-reached tolerance
+    reach_rot_tol: float = 0.15   # rad (~8.6 deg), orientation half of "reached". Position alone
+                                  # let a rate-limited wrist close 35 deg cocked, 6 cm off target.
     max_steps_per_wp: int = 20
     strict_max_steps: int = 90   # budget to ARRIVE at a grasp/release pose before
     #                              closing the gripper; travelling waypoints keep the
@@ -453,7 +455,18 @@ class PlannerExpert:
 
         err = wp["pos"] - ee
 
+        # A grasp pose is a POSE, so arrival has to mean position AND orientation. Testing position
+        # alone was survivable while the wrist turned at krot=4 and was aligned by the time the
+        # position converged; rate-limiting rotation to keep the hand from sweeping into obstacles
+        # made orientation the slower of the two, so the hand reached the grip point still 35 deg
+        # cocked and closed 6 cm from the object (measured on object LII t0, which regressed from
+        # success to "runs the whole plan carrying nothing" the moment the cap went in).
         reached = float(np.linalg.norm(err)) < self.cfg.reach_tol
+        if reached and wp.get("R") is not None and self._rot_ref is not None:
+            from scipy.spatial.transform import Rotation as _R
+            _Rc = _R.from_quat(np.asarray(self._rot_ref, float)).as_matrix()
+            _rerr = float(np.linalg.norm(_R.from_matrix(wp["R"] @ _Rc.T).as_rotvec()))
+            reached = _rerr < self.cfg.reach_rot_tol
         if wp.get("strict") and not reached and self._steps_on_wp < self.cfg.strict_max_steps:
             act = np.zeros(7)                       # keep servoing until we actually arrive
             act[:3] = np.clip(self.cfg.kp * err, -1.0, 1.0)
@@ -476,8 +489,7 @@ class PlannerExpert:
                 if self._rot_ref is not None:
                     from scipy.spatial.transform import Rotation as _R
                     Rcur = _R.from_quat(np.asarray(self._rot_ref, float)).as_matrix()
-                    act[3:6] = np.clip(self.cfg.krot *
-                                       _R.from_matrix(wp["R"] @ Rcur.T).as_rotvec(), -1.0, 1.0)
+                    act[3:6] = self._limit_rot(_R.from_matrix(wp["R"] @ Rcur.T).as_rotvec())
                 # hold the PREVIOUS gripper command while still travelling — closing early is
                 # exactly the bug this branch exists to prevent
                 act[6] = self._wps[self._i - 1]["grip"] if self._i > 0 else _GRIP_OPEN
