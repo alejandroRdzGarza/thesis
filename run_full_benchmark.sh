@@ -31,12 +31,18 @@ set -euo pipefail
 EPISODES=10
 SAVE_VIDEO=""
 SHOW_EVERY=""
+VLA="pi05"
+PI05_HOST="127.0.0.1"
+PI05_PORT=8000
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --save-video)   SAVE_VIDEO="--save-video"; shift ;;
         --show-every)   SHOW_EVERY="--show-every $2"; shift 2 ;;
         --show-every=*) SHOW_EVERY="--show-every ${1#*=}"; shift ;;
+        --vla)          VLA="$2"; shift 2 ;;
+        --pi05-host)    PI05_HOST="$2"; shift 2 ;;
+        --pi05-port)    PI05_PORT="$2"; shift 2 ;;
         [0-9]*)         EPISODES="$1"; shift ;;
         *) echo "Unknown argument: $1"; exit 1 ;;
     esac
@@ -67,6 +73,7 @@ python run_libero_benchmark.py \
     --horizon 220 \
     --replan-steps 8 \
     --results-dir "$RESULTS_DIR" \
+    --vla "$VLA" --pi05-host "$PI05_HOST" --pi05-port "$PI05_PORT" \
     $SAVE_VIDEO $SHOW_EVERY \
     2>&1 | tee "$RESULTS_DIR/libero_spatial_plain.log"
 echo ">>> [1/4] done: $(timestamp)"
@@ -82,6 +89,7 @@ python run_libero_benchmark.py \
     --horizon 220 \
     --replan-steps 8 \
     --results-dir "$RESULTS_DIR" \
+    --vla "$VLA" --pi05-host "$PI05_HOST" --pi05-port "$PI05_PORT" \
     $SAVE_VIDEO $SHOW_EVERY \
     2>&1 | tee "$RESULTS_DIR/libero_spatial_cbf.log"
 echo ">>> [2/4] done: $(timestamp)"
@@ -98,6 +106,7 @@ python run_libero_benchmark.py \
     --horizon 300 \
     --replan-steps 8 \
     --results-dir "$RESULTS_DIR" \
+    --vla "$VLA" --pi05-host "$PI05_HOST" --pi05-port "$PI05_PORT" \
     $SAVE_VIDEO $SHOW_EVERY \
     2>&1 | tee "$RESULTS_DIR/safelibero_spatial_LI_plain.log"
 echo ">>> [3/4] done: $(timestamp)"
@@ -114,6 +123,7 @@ python run_libero_benchmark.py \
     --horizon 300 \
     --replan-steps 8 \
     --results-dir "$RESULTS_DIR" \
+    --vla "$VLA" --pi05-host "$PI05_HOST" --pi05-port "$PI05_PORT" \
     $SAVE_VIDEO $SHOW_EVERY \
     2>&1 | tee "$RESULTS_DIR/safelibero_spatial_LI_cbf.log"
 echo ">>> [4/4] done: $(timestamp)"

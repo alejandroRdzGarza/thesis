@@ -35,9 +35,12 @@ set -uo pipefail
 EPISODES=25
 HORIZON=600
 REPLAN=8
-VLA=openvla
+VLA=pi05
 OPENVLA_PORT=8000
+PI05_HOST=127.0.0.1
+PI05_PORT=8000
 RESULTS_DIR=results_safelibero_all
+MODEL_TAG=""
 INCLUDE_LONG=0
 SAVE_VIDEO=""
 SHOW_EVERY=""
@@ -50,8 +53,11 @@ while [[ $# -gt 0 ]]; do
         --horizon)      HORIZON="$2";       shift 2 ;;
         --replan)       REPLAN="$2";        shift 2 ;;
         --results-dir)  RESULTS_DIR="$2";   shift 2 ;;
+        --model-tag)    MODEL_TAG="$2";     shift 2 ;;
         --vla)          VLA="$2";           shift 2 ;;
         --openvla-port) OPENVLA_PORT="$2";  shift 2 ;;
+        --pi05-host)    PI05_HOST="$2";     shift 2 ;;
+        --pi05-port)    PI05_PORT="$2";     shift 2 ;;
         --level)        LEVELS=("$2");      shift 2 ;;  # single level: I or II
         --include-long) INCLUDE_LONG=1;   shift ;;
         --save-video)   SAVE_VIDEO="--save-video"; shift ;;
@@ -66,6 +72,9 @@ if [[ $INCLUDE_LONG -eq 1 ]]; then
     SUITES+=(safelibero_long)
 fi
 
+if [[ -n "$MODEL_TAG" ]]; then
+    RESULTS_DIR="${RESULTS_DIR}/${MODEL_TAG}"
+fi
 mkdir -p "$RESULTS_DIR"
 
 timestamp() { date '+%Y-%m-%d %H:%M:%S'; }
@@ -125,6 +134,8 @@ for suite in "${SUITES[@]}"; do
                     --replan-steps "$REPLAN" \
                     --vla "$VLA" \
                     --openvla-port "$OPENVLA_PORT" \
+                    --pi05-host "$PI05_HOST" \
+                    --pi05-port "$PI05_PORT" \
                     --results-dir "$RESULTS_DIR" \
                     $extra_flags \
                     $SAVE_VIDEO \

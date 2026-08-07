@@ -73,10 +73,14 @@ except ImportError as e:
     ) from e
 
 # ── Config ────────────────────────────────────────────────────────────────────
-# Auto-detect local weights so the server works without env vars on RunPod.
-_LOCAL_DEFAULT = "/workspace/vla_model"
-_HF_DEFAULT    = "moojink/openvla-7b-oft-finetuned-libero-spatial"
-_default_path  = _LOCAL_DEFAULT if os.path.isdir(_LOCAL_DEFAULT) else _HF_DEFAULT
+# Auto-detect local weights — checks RunPod path first, then UCL path, then HF.
+_LOCAL_DEFAULT     = "/workspace/vla_model"
+_UCL_DEFAULT       = "/cs/student/project_msc/2025/rai/jesusr01/vla_model"
+_HF_DEFAULT        = "moojink/openvla-7b-oft-finetuned-libero-spatial"
+_default_path = next(
+    (p for p in (_LOCAL_DEFAULT, _UCL_DEFAULT) if os.path.isdir(p)),
+    _HF_DEFAULT,
+)
 
 MODEL_PATH  = os.environ.get("OPENVLA_MODEL_PATH", _default_path)
 UNNORM_KEY  = os.environ.get("OPENVLA_UNNORM_KEY",  "libero_spatial_no_noops")

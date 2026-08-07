@@ -47,3 +47,38 @@ papers/
 results_libero_old_8bit/
 results_*/
 *.log
+
+# ── Vendored third-party repos and archives ──────────────────────────────────
+# Downloaded for reference, not part of this project. ManiSkill-main.zip (233 MB) and
+# ucl_grpo_results.tar.gz (897 MB) each exceed GitHub's 100 MB per-file limit and caused a
+# rejected push; the unpacked trees are large enough to bloat clones even though they pass.
+ManiSkill-main/
+ManiSkill-main.zip
+flow_grpo-main/
+openvla-oft-main.zip
+*.zip
+*.tar.gz
+
+# ── Experiment outputs ───────────────────────────────────────────────────────
+# Regenerable from the scripts, and large. Results worth keeping are backed up out of band
+# (pod_backup/) rather than versioned.
+demos_classical/
+demos_quality/
+demos_sweep/
+sweep_classical/
+sweep_final/
+sweep_onsurface_quick/
+sweep_planner_v*/
+results_distill/
+results_shielded/
+results_libero/
+results_sweep/
+pod_backup/
+videos/
+videos_metric_check/
+*.mp4
+*.npz
+
+# ── Logs ─────────────────────────────────────────────────────────────────────
+MUJOCO_LOG.TXT
+*.log

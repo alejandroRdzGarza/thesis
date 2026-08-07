@@ -359,6 +359,15 @@ def main():
     # Get LLM dim before LoRA wrapping
     llm_dim = vla.llm_dim
 
+    # Load dataset statistics from checkpoint dir (LIBERO stats are stored separately)
+    import json
+    stats_path = Path(args.vla_path) / "dataset_statistics.json"
+    if stats_path.exists():
+        with open(stats_path) as f:
+            extra_stats = json.load(f)
+        vla.norm_stats.update(extra_stats)
+        print(f"  loaded norm_stats from {stats_path}: keys={list(extra_stats.keys())}")
+
     # Retrieve action normalization stats
     if args.unnorm_key not in vla.norm_stats:
         available = list(vla.norm_stats.keys())
