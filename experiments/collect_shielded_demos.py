@@ -103,6 +103,7 @@ def main():
     from experiments.load_policy import create_policy_partial
     from experiments.rl_rollout_local import build_policy_fn
     from experiments.policy_trace import save_episode_trace
+    from experiments.progress import Progress
 
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
     logf = open(out / "collect.log", "a")
@@ -129,9 +130,14 @@ def main():
     say("")
 
     rows: list[dict] = []
+    # A full-grid collection is a many-hour job; a bare [done/total] gives no way to tell
+    # whether it is on budget. Progress adds elapsed/ETA/rate plus the running KEPT count,
+    # which is the number that actually decides whether the run is worth finishing.
     per = defaultdict(lambda: [0, 0, 0, 0])   # scene → [n, success, clean, kept]
     t0 = time.time()
     done = 0
+    prog = Progress(total, f"collect [{'shielded' if args.use_cbf else 'NO-SHIELD'}]")
+    prog.__enter__()
 
     for suite, level, task in scenes:
         tag = f"{suite}_L{level}_t{task}"
@@ -153,6 +159,7 @@ def main():
                     policy_fn=policy_fn, record_policy_trace=True, scene_name=tag)
             except Exception as e:
                 say(f"  [{done}/{total}] {tag} ep{ep}: ERROR {type(e).__name__}: {e}")
+                prog.step(f"{tag} ep{ep} ERROR")
                 continue
 
             s = m.summary()
@@ -184,9 +191,13 @@ def main():
                     "queries": len(m.policy_trace),
                 })
 
-            eta = (time.time() - t0) / done * (total - done) / 60.0
             say(f"  [{done}/{total}] {tag} ep{ep}: succ={ok} coll={raw_coll} cbf_acts={acts} "
-                f"→ {'KEPT' if keep else 'dropped'}   (eta {eta:.0f} min)")
+                f"→ {'KEPT' if keep else 'dropped'}")
+            # The running KEPT rate is the number that decides whether the run is worth finishing:
+            # the shielded grid yields ~39%, and an unshielded control is expected far lower, so a
+            # rate visible early is what lets the budget be cut before hours are spent.
+            prog.note(kept=int(keep))
+            prog.step(f"{tag} ep{ep} {'KEPT' if keep else 'drop'}")
 
         try:
             env.close()
@@ -198,6 +209,8 @@ def main():
             with open(out / "manifest.csv", "w", newline="") as f:
                 w = csv.DictWriter(f, fieldnames=FIELDS)
                 w.writeheader(); w.writerows(rows)
+
+    prog.__exit__()
 
     # ── report ──────────────────────────────────────────────────────────────
     say("")
