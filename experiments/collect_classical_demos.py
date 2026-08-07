@@ -22,6 +22,12 @@ import argparse
 import csv
 from pathlib import Path
 
+# Recorded per demo alongside the pass/fail verdict so demo QUALITY can be audited after the fact.
+# All are already computed by MetricsTracker; they were simply not being written out.
+QUALITY_FIELDS = ["obj_dist_at_grasp", "gripper_close_transitions", "deadlock_steps",
+                  "min_dist_overall", "mean_jerk", "path_efficiency", "path_length_m",
+                  "goal_reach_step"]
+
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
@@ -96,7 +102,13 @@ def main():
                 save_episode_trace(m.policy_trace, tp)
                 rows.append({"trace_path": tp, "r_success": 1.5 if ok else 0.0,
                              "robot_caused_collision": int(cl),
-                             "suite": args.suite, "task": task, "episode": ep})
+                             "suite": args.suite, "task": task, "episode": ep,
+                             # Quality fields. Success + collision-free says a demo is ADMISSIBLE;
+                             # these say whether it is GOOD. BC copies the whole trajectory, so a
+                             # lucky grasp, a fumbled regrasp or a 3 mm near-miss all get imitated
+                             # even though the outcome filter cannot see them. Carried through to
+                             # the manifest so `demo_quality` can flag them without re-simulating.
+                             **{k: s.get(k, "") for k in QUALITY_FIELDS}})
             n += 1; succ += int(ok); coll += int(cl); clean += int(is_clean)
             prog.note(clean=int(is_clean))
             prog.step(f"t{task} ep{ep} {'KEPT' if is_clean else 'drop'}")
@@ -108,7 +120,7 @@ def main():
     prog.__exit__()
     with open(out / "manifest.csv", "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["trace_path", "r_success", "robot_caused_collision",
-                                          "suite", "task", "episode"])
+                                          "suite", "task", "episode", *QUALITY_FIELDS])
         w.writeheader(); w.writerows(rows)
     print(f"\n{n} demos: {succ} success, {coll} collided, {clean} CLEAN (success+safe) "
           f"→ {out}/manifest.csv")

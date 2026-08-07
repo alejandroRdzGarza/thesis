@@ -34,7 +34,12 @@ SUITES = ["safelibero_spatial", "safelibero_object", "safelibero_goal"]
 LEVELS = ["I", "II"]
 TASKS = [0, 1, 2, 3]
 
-MANIFEST_FIELDS = ["trace_path", "r_success", "robot_caused_collision", "suite", "task", "episode"]
+from experiments.collect_classical_demos import QUALITY_FIELDS
+
+# The quality columns ride along so `demo_quality` can audit the merged round without re-simulating
+# anything. The trainer ignores columns it does not know about.
+MANIFEST_FIELDS = ["trace_path", "r_success", "robot_caused_collision", "suite", "task", "episode",
+                   *QUALITY_FIELDS]
 
 
 def shard_tag(suite: str, level: str, task: int) -> str:
