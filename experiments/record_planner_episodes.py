@@ -31,6 +31,19 @@ import re
 from pathlib import Path
 
 
+def _collision_step(sweep: Path, r: dict):
+    """Control step at which the collision fired — so a clip can be seeked straight to it."""
+    p = sweep / "logs" / f"{r['suite']}_L{r['level']}_t{r['task']}_ep{r['episode']}.log"
+    try:
+        m = re.search(r"\[(\d+)\] COLLISION: obstacle displaced ([\d.]+)m.*?culprit=\[([^\]]*)\]",
+                      p.read_text())
+    except OSError:
+        return None
+    if not m:
+        return None
+    return int(m.group(1)), float(m.group(2)), m.group(3).replace("'", "").replace(" ", "")
+
+
 def _log_metrics(sweep: Path, r: dict) -> tuple:
     """(object displacement, object→goal distance) from the episode's own debug dump."""
     p = sweep / "logs" / f"{r['suite']}_L{r['level']}_t{r['task']}_ep{r['episode']}.log"
@@ -53,6 +66,11 @@ def main():
     ap.add_argument("--max-success", type=int, default=8,
                     help="how many SUCCESSES to record (to check for false positives)")
     ap.add_argument("--max-fail", type=int, default=12)
+    ap.add_argument("--only-suite", default=None)
+    ap.add_argument("--only-level", default=None, choices=["I", "II"])
+    ap.add_argument("--all", action="store_true",
+                    help="record EVERY episode of the selected scenes rather than a "
+                         "sample — for inspecting one suite/level in detail")
     args = ap.parse_args()
 
     from experiments.libero_runner import make_libero_env, run_libero_trial
@@ -61,10 +79,18 @@ def main():
     sweep = Path(args.sweep)
     rows = list(csv.DictReader(open(sweep / "per_episode.csv")))
     planned = [r for r in rows if int(r["planned"])]
-    succ = [r for r in planned if int(r["success"])][:args.max_success]
-    fail = [r for r in planned if not int(r["success"])][:args.max_fail]
+    if args.only_level:
+        planned = [r for r in planned if r["level"] == args.only_level]
+    if args.only_suite:
+        planned = [r for r in planned if r["suite"] == args.only_suite]
+    if args.all:
+        succ, fail = planned, []
+    else:
+        succ = [r for r in planned if int(r["success"])][:args.max_success]
+        fail = [r for r in planned if not int(r["success"])][:args.max_fail]
     # every collision-flagged episode is worth seeing, whichever bucket it fell in
-    coll = [r for r in planned if int(r["collision"]) and r not in succ and r not in fail][:6]
+    coll = [] if args.all else [r for r in planned
+                                if int(r["collision"]) and r not in succ and r not in fail][:6]
     todo = succ + fail + coll
 
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
@@ -75,8 +101,13 @@ def main():
     for i, r in enumerate(todo, 1):
         suite, level, task, ep = r["suite"], r["level"], int(r["task"]), int(r["episode"])
         moved, objgoal = _log_metrics(sweep, r)
+        cs = _collision_step(sweep, r)
+        ctag = ""
+        if cs:
+            step, disp, culp = cs
+            ctag = f"__COLLstep{step}-{disp*1000:.0f}mm-{culp}"
         name = (f"{suite.replace('safelibero_','')}_L{level}_t{task}_ep{ep}"
-                f"__TSR-{r['success']}__COLL-{r['collision']}"
+                f"__TSR-{r['success']}__COLL-{r['collision']}{ctag}"
                 f"__objgoal-{objgoal*100:.0f}cm__{r['final_phase']}.mp4")
         vid = str((out / name).resolve())
         print(f"[{i}/{len(todo)}] {name}", flush=True)

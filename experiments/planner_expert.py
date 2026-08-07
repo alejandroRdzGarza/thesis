@@ -50,6 +50,12 @@ class PlannerConfig:
     # stacks (e.g. ManiSkill's solver) expose joint_vel_limits / joint_acc_limits at all.
     carry_speed: float = 0.30     # max |action| on the position channels while holding
     approach_speed: float = 0.60  # slightly capped even empty, to keep tracking accurate
+    # Rotation rate cap. The wrist was servoed at krot=4 with no limit, so at episode start it
+    # snapped to the grasp orientation in a few steps and swept the hand through whatever was
+    # beside it — observed directly: "a big collision at the start as the end effector starts
+    # rotating and hits the pitcher". Position was capped after the payload-slip fix; rotation
+    # was not, and it is the same failure in the other three DOF.
+    rot_rate: float = 0.25
     descend_steps: int = 6        # interpolation points on the straight-line descents
     ik_seeds: int = 20
     try_candidates: int = 10      # grasps to attempt before giving up on the scene
@@ -254,7 +260,7 @@ class PlannerExpert:
                         if not ok_l:
                             continue
                         q_lift, p_lift = q_try, p_lift_try
-                    with P.clearance_margin(model, clr):
+                    with P.clearance_margin(model, clr, also=(body,)):
                         free_held_clear = P.make_attached_collision_fn(
                             model, data, qadr, sid, obj_qadr, rel_pos, rel_R, ignore=(body,))
                         tpath, _why = P.rrt_connect(q_lift, q_pp, jnt_rng, free_held_clear,
@@ -302,6 +308,14 @@ class PlannerExpert:
             v = v * (cap / n)
         return np.clip(v, -1.0, 1.0)
 
+    def _limit_rot(self, drot):
+        """Cap the commanded rotation delta — the wrist must turn gradually, not snap."""
+        v = np.asarray(drot, float) * self.cfg.krot
+        n = float(np.linalg.norm(v))
+        if n > self.cfg.rot_rate:
+            v = v * (self.cfg.rot_rate / n)
+        return np.clip(v, -1.0, 1.0)
+
     # ── closed-loop servos ──────────────────────────────────────────────────
     def _servo(self, wp, ee, obj, goal, gripper):
         """Drive the last few centimetres from OBSERVED state. Returns (action7, phase_done).
@@ -323,7 +337,7 @@ class PlannerExpert:
         if self._rot_ref is not None:
             from scipy.spatial.transform import Rotation as _R
             Rcur = _R.from_quat(np.asarray(self._rot_ref, float)).as_matrix()
-            act[3:6] = np.clip(c.krot * _R.from_matrix(wp["R"] @ Rcur.T).as_rotvec(), -1.0, 1.0)
+            act[3:6] = self._limit_rot(_R.from_matrix(wp["R"] @ Rcur.T).as_rotvec())
 
         if wp["servo"] == "grasp":
             target = obj + np.asarray(wp["grasp_off"], float)
@@ -347,8 +361,16 @@ class PlannerExpert:
                 self._min_z, self._stall = float(ee[2]), 0
             else:
                 self._stall += 1
+            # Close ONLY on arrival or on physical contact. Closing because a timer expired is
+            # how the gripper ends up shutting "a bit far away from the actual bowl" (observed in
+            # goal LII t0) — a miss recorded as a grasp. A timeout now abandons the attempt
+            # instead, so the failure is visible rather than silently producing a bad demo.
             reached = float(np.linalg.norm(target - ee)) < c.servo_grasp_tol
-            if reached or self._stall >= c.stall_patience or self._steps_on_wp >= c.servo_max_steps:
+            if self._steps_on_wp >= c.servo_max_steps and not (reached or
+                                                               self._stall >= c.stall_patience):
+                self.reach_failed = True
+                return act, True
+            if reached or self._stall >= c.stall_patience:
                 self._closing = 1
                 act[:3] = 0.0
                 act[6] = _GRIP_CLOSE
@@ -427,8 +449,7 @@ class PlannerExpert:
             if self._rot_ref is not None:
                 from scipy.spatial.transform import Rotation as _R
                 Rcur = _R.from_quat(np.asarray(self._rot_ref, float)).as_matrix()
-                act[3:6] = np.clip(self.cfg.krot *
-                                   _R.from_matrix(wp["R"] @ Rcur.T).as_rotvec(), -1.0, 1.0)
+                act[3:6] = self._limit_rot(_R.from_matrix(wp["R"] @ Rcur.T).as_rotvec())
             act[6] = wp["grip"]
             return act, self.phase
         if wp.get("strict") and not reached:
@@ -467,7 +488,7 @@ class PlannerExpert:
         if self._rot_ref is not None:
             Rcur = Rot.from_quat(np.asarray(self._rot_ref, float)).as_matrix()
             drot = Rot.from_matrix(wp["R"] @ Rcur.T).as_rotvec()
-            act[3:6] = np.clip(self.cfg.krot * drot, -1.0, 1.0)
+            act[3:6] = self._limit_rot(drot)
         act[6] = wp["grip"]
         return act, self.phase
 

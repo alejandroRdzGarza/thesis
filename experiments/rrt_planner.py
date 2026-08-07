@@ -51,15 +51,19 @@ class clearance_margin:
     planning call cannot leak an altered contact model into the episode.
     """
 
-    def __init__(self, model, clearance: float = 0.02):
-        self.model, self.clearance = model, float(clearance)
+    def __init__(self, model, clearance: float = 0.02, also: tuple = ()):
+        # `also`: extra geom-name substrings to inflate — used for the object being CARRIED.
+        # Inflating only robot geoms leaves the payload planned at zero clearance, and the payload
+        # is exactly what sweeps through an obstacle during transport (observed: the carried bowl
+        # clipping the moka pot in goal LII t2).
+        self.model, self.clearance, self.also = model, float(clearance), tuple(a for a in also if a)
         self.saved = None
 
     def __enter__(self):
         self.saved = self.model.geom_margin.copy()
         for g in range(self.model.ngeom):
             n = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_GEOM, g) or ""
-            if _is_robot_geom(n):
+            if _is_robot_geom(n) or any(a in n for a in self.also):
                 self.model.geom_margin[g] = max(self.model.geom_margin[g], self.clearance)
         return self
 
