@@ -142,7 +142,11 @@ def main():
                          "offline demos + all DAgger rounds)")
     ap.add_argument("--out", required=True, help="output checkpoint dir for the BC-updated policy")
     ap.add_argument("--lr", type=float, default=1e-4, help="BC LR (imitation is stable; higher than RL)")
-    ap.add_argument("--epochs", type=int, default=2)
+    ap.add_argument("--epochs", type=int, default=20,
+                    help="20+. NOT 2: the long-standing 'BC gives 0%% success' result was a "
+                         "2-epoch underfit, not a property of BC. A default that silently "
+                         "underfits reads as 'this data teaches nothing' whatever the data is, "
+                         "which is how a bad default fakes an experimental conclusion.")
     ap.add_argument("--minibatch", type=int, default=8)
     ap.add_argument("--success-only", action="store_true",
                     help="imitate ONLY traces whose rollout succeeded AND stayed collision-free "
