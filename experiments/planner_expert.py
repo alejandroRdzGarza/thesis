@@ -69,6 +69,9 @@ class PlannerConfig:
     #                               attempts the grasp anyway rather than descending forever
     servo_z_cap: float = 0.25     # cap the descent command so OSC coupling cannot induce XY drift
     servo_grasp_tol: float = 0.012
+    servo_salvage_tol: float = 0.035   # on servo timeout, close if within this of the grip point
+                                       # (~half the Franka's ~80 mm finger span, so the fingers
+                                       # still straddle the object); abandon beyond it.
     servo_place_tol: float = 0.020
     stall_eps: float = 0.0015     # m of downward progress below which a step counts as stalled
     stall_patience: int = 12      # consecutive stalled steps = contact reached
@@ -361,15 +364,23 @@ class PlannerExpert:
                 self._min_z, self._stall = float(ee[2]), 0
             else:
                 self._stall += 1
-            # Close ONLY on arrival or on physical contact. Closing because a timer expired is
-            # how the gripper ends up shutting "a bit far away from the actual bowl" (observed in
-            # goal LII t0) — a miss recorded as a grasp. A timeout now abandons the attempt
-            # instead, so the failure is visible rather than silently producing a bad demo.
-            reached = float(np.linalg.norm(target - ee)) < c.servo_grasp_tol
+            # Close on arrival or on physical contact. A timer expiring is NOT on its own a reason
+            # to close: that is how the gripper ends up shutting "a bit far away from the actual
+            # bowl" (observed in goal LII t0), a miss recorded as a grasp.
+            #
+            # But abandoning every timeout is too blunt — it cost four object-LII successes that
+            # were converging and merely had not crossed the 12 mm arrival tolerance yet. The
+            # physical bound is the finger span: the Franka's gripper opens ~80 mm, so at ~35 mm
+            # the fingers still straddle the object and closing yields a real grasp, while beyond
+            # that they shut on air. Salvage inside that span, abandon outside it.
+            dist = float(np.linalg.norm(target - ee))
+            reached = dist < c.servo_grasp_tol
             if self._steps_on_wp >= c.servo_max_steps and not (reached or
                                                                self._stall >= c.stall_patience):
-                self.reach_failed = True
-                return act, True
+                if dist > c.servo_salvage_tol:
+                    self.reach_failed = True
+                    return act, True
+                reached = True          # close: still within the fingers' reach
             if reached or self._stall >= c.stall_patience:
                 self._closing = 1
                 act[:3] = 0.0
