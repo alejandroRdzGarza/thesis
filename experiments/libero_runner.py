@@ -1435,6 +1435,15 @@ def run_libero_trial(
         reset_result = env.reset()
         obs = reset_result[0] if isinstance(reset_result, tuple) else reset_result
 
+    # ── Extract MuJoCo model/data for CBF Jacobian computation ───────────────
+    model, data  = _unwrap_sim(env)
+    # Must come BEFORE the settling loop. SafeLIBERO parks unused obstacles off-scene in a heap;
+    # left collidable they overflow MuJoCo's contact buffer (ncon = 5000), and on overflow MuJoCo
+    # drops contacts in an order-dependent way, so identical episodes diverge. Settling first would
+    # therefore run 60 non-deterministic steps and, since settling is what fixes each object's
+    # resting pose, hand every subsequent collision check a different reference.
+    _disable_parked_obstacle_contacts(model, data)
+
     # Let the scene settle BEFORE anything is measured, so an obstacle that spawns unsupported
     # finishes falling before it becomes the collision reference.
     if settle_steps > 0:
@@ -1443,9 +1452,6 @@ def run_libero_trial(
             _r = env.step(_z)
             obs = _r[0] if isinstance(_r, tuple) else _r
 
-    # ── Extract MuJoCo model/data for CBF Jacobian computation ───────────────
-    model, data  = _unwrap_sim(env)
-    _disable_parked_obstacle_contacts(model, data)
     arm_body_ids = _get_arm_body_ids(model)
     arm_dof_idx  = _get_arm_dof_indices(model)
     ee_body_id   = arm_body_ids[-1] if arm_body_ids else 0
