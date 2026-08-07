@@ -1371,6 +1371,13 @@ def run_libero_trial(
     # TRAINING-DATA AUGMENTATION: re-place the obstacle somewhere it still obstructs.
     # Leave off for evaluation — randomised layouts are not comparable to the benchmark.
     randomize_obstacle_seed: int | None = None,
+    # Physics settling steps before the episode (and the collision reference) begin.
+    # SafeLIBERO spawns some obstacles unsupported: in spatial level II the moka pot falls ~10 cm
+    # on its own, which crosses the 1 mm collision threshold at step 0 and is then attributed to
+    # the robot. Measured with the arm held completely still: 102 mm of drift in level II versus
+    # 0.06 mm in level I. Letting the scene settle first makes the collision metric measure the
+    # robot instead of the scene's own initial transient.
+    settle_steps: int = 60,
 ) -> MetricsTracker:
     """Run one LIBERO episode using OpenVLA + optional Cartesian CBF.
 
@@ -1427,6 +1434,14 @@ def run_libero_trial(
     else:
         reset_result = env.reset()
         obs = reset_result[0] if isinstance(reset_result, tuple) else reset_result
+
+    # Let the scene settle BEFORE anything is measured, so an obstacle that spawns unsupported
+    # finishes falling before it becomes the collision reference.
+    if settle_steps > 0:
+        _z = np.zeros(7); _z[6] = -1.0
+        for _ in range(settle_steps):
+            _r = env.step(_z)
+            obs = _r[0] if isinstance(_r, tuple) else _r
 
     # ── Extract MuJoCo model/data for CBF Jacobian computation ───────────────
     model, data  = _unwrap_sim(env)
