@@ -48,14 +48,19 @@ ABS_RULES = {
     "grasp_far":     ("obj_dist_at_grasp", lambda v: v > 0.15),
     # One close per pick. More means it fumbled and retried, and BC would learn the fumble.
     "regrasped":     ("gripper_close_transitions", lambda v: v > 1),
-    "stalled":       ("deadlock_steps", lambda v: v > 0),
     # Passing within a centimetre without displacing anything is luck, not safety, and it is
     # exactly the behaviour a safety-distillation student should NOT copy.
     "near_miss":     ("min_dist_overall", lambda v: v < 0.01),
 }
 # Relative flags: worst decile of this particular collection.
-REL_RULES = ["mean_jerk", "goal_reach_step"]
-REL_LOWER_BETTER = {"mean_jerk": True, "goal_reach_step": True}
+# `deadlock_steps` belongs here, NOT in ABS_RULES. It counts steps where the EE moved <3 mm over a
+# 20-step window, and a controller with deliberate hold phases stalls BY DESIGN — the planner pauses
+# at every grasp waypoint to close the gripper. Measured on 318 planner demos: median 11, p75 11,
+# p95 76, max 616. An absolute `> 0` rule therefore flagged 318 of 318, which is a filter that says
+# nothing. What "stalled" means depends on the controller's normal behaviour, so it has to be
+# measured against the rest of the collection.
+REL_RULES = ["mean_jerk", "goal_reach_step", "deadlock_steps"]
+REL_LOWER_BETTER = {"mean_jerk": True, "goal_reach_step": True, "deadlock_steps": True}
 
 
 def _f(row, key, default=float("nan")):
