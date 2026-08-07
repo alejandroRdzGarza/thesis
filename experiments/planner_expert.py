@@ -30,7 +30,9 @@ class PlannerConfig:
     pre_grasp_h: float = 0.10     # hover height above the grasp before descending
     lift_h: float = 0.15          # how far to lift after grasping
     place_clear_h: float = 0.12   # height above the goal to arrive at before setting down
-    grasp_hold: int = 12          # steps to hold while the fingers close
+    grasp_hold: int = 25          # steps to hold while the fingers close and the grasp
+    #                               SETTLES before any motion — 12 was not enough for the
+    #                               contact forces to stabilise before the lift began
     release_hold: int = 8
     reach_tol: float = 0.02       # m, waypoint-reached tolerance
     max_steps_per_wp: int = 20
@@ -39,6 +41,15 @@ class PlannerConfig:
     #                              cheaper max_steps_per_wp timeout
     kp: float = 20.0
     krot: float = 4.0
+    # Speed cap while CARRYING. Waypoints sit 5 cm apart and kp=20 saturates the command for any
+    # error above 5 cm, so the follower ran bang-bang at full speed between them. The resulting
+    # acceleration shakes the payload out of the fingers: measured on object LI t0, grip separation
+    # held at 0.054 for ~90 steps through lift and most of transport, then collapsed to 0.013 over
+    # four steps as the arm decelerated into the goal, and the object fell.
+    # Limiting velocity while a payload is held is the standard remedy — it is why motion-planning
+    # stacks (e.g. ManiSkill's solver) expose joint_vel_limits / joint_acc_limits at all.
+    carry_speed: float = 0.30     # max |action| on the position channels while holding
+    approach_speed: float = 0.60  # slightly capped even empty, to keep tracking accurate
     descend_steps: int = 6        # interpolation points on the straight-line descents
     ik_seeds: int = 20
     try_candidates: int = 10      # grasps to attempt before giving up on the scene
@@ -79,6 +90,7 @@ class PlannerExpert:
     _stall: int = 0              # steps the descent has made no downward progress
     _min_z: object = None        # lowest EE z reached during the current descent
     _closing: int = 0            # steps spent closing the fingers
+    _place_off: object = None    # grasp offset FROZEN on entering the place servo
 
     # PickPlaceController compatibility (the runner sets these; the planner derives its own).
     place_mode: str = "on"
@@ -104,6 +116,7 @@ class PlannerExpert:
         self._stall = 0
         self._min_z = None
         self._closing = 0
+        self._place_off = None
 
     # ── planning ────────────────────────────────────────────────────────────
     def plan(self, model, data, qadr, jnt_rng, sid, ctx) -> bool:
@@ -278,6 +291,17 @@ class PlannerExpert:
                            f"rejections by stage: {dict(stage)}")
         return False
 
+    _CARRY_PHASES = ("LIFT", "TRANSPORT", "PLACE")
+
+    def _limit(self, v, wp):
+        """Cap the commanded position delta, tighter while a payload is held."""
+        cap = self.cfg.carry_speed if wp["phase"] in self._CARRY_PHASES else self.cfg.approach_speed
+        v = np.asarray(v, float)
+        n = float(np.linalg.norm(v))
+        if n > cap:
+            v = v * (cap / n)
+        return np.clip(v, -1.0, 1.0)
+
     # ── closed-loop servos ──────────────────────────────────────────────────
     def _servo(self, wp, ee, obj, goal, gripper):
         """Drive the last few centimetres from OBSERVED state. Returns (action7, phase_done).
@@ -312,10 +336,12 @@ class PlannerExpert:
             act[6] = _GRIP_OPEN
             if (float(np.linalg.norm(dxy)) > c.servo_xy_lock
                     and self._steps_on_wp < c.servo_max_steps // 2):
-                act[:2] = np.clip(c.kp * dxy, -1.0, 1.0)      # centre first, do not descend yet
+                act[:2] = self._limit(np.append(c.kp * dxy, 0.0), wp)[:2]   # centre, do not descend
                 return act, False
-            act[:2] = np.clip(c.kp * dxy, -1.0, 1.0)
-            act[2] = float(np.clip(c.kp * (target[2] - ee[2]), -c.servo_z_cap, 1.0))
+            _v = self._limit(np.array([c.kp * dxy[0], c.kp * dxy[1],
+                                       c.kp * (target[2] - ee[2])]), wp)
+            act[:2] = _v[:2]
+            act[2] = float(np.clip(_v[2], -c.servo_z_cap, 1.0))
             # contact test: the descent stops finding new lows
             if self._min_z is None or ee[2] < self._min_z - c.stall_eps:
                 self._min_z, self._stall = float(ee[2]), 0
@@ -328,17 +354,32 @@ class PlannerExpert:
                 act[6] = _GRIP_CLOSE
             return act, False
 
-        # place: put the OBJECT on the goal, using the offset it actually has right now
-        live_off = ee - obj
+        # Place: drive the EE so the OBJECT lands on the goal. The offset is sampled ONCE, on
+        # entering this phase, and then held.
+        #
+        # Recomputing it every step diverges: the instant the object is not actually held, it stops
+        # following the gripper, so (ee - obj) grows each step, the target recedes, and the arm
+        # chases it out of the workspace. Measured: object dropped at the start of PLACE, then the
+        # EE ran to [-0.87, 0.78] and the episode was lost. Sampling once still corrects for how
+        # the object really sits in the gripper — which was the point — without the feedback loop.
+        if self._place_off is None:
+            self._place_off = (ee - obj).copy()
+        live_off = self._place_off
         target = goal + live_off + np.array([0.0, 0.0, c.place_dz])
+        # If the object is no longer where the frozen offset says it should be, it has been
+        # dropped; chasing the placement is pointless and only throws the arm around.
+        if float(np.linalg.norm((ee - obj) - live_off)) > 0.10:
+            return act, True
         act[6] = _GRIP_CLOSE
         dxy = target[:2] - ee[:2]
         if (float(np.linalg.norm(dxy)) > c.servo_xy_lock
                 and self._steps_on_wp < c.servo_max_steps // 2):
-            act[:2] = np.clip(c.kp * dxy, -1.0, 1.0)
+            act[:2] = self._limit(np.append(c.kp * dxy, 0.0), wp)[:2]
             return act, False
-        act[:2] = np.clip(c.kp * dxy, -1.0, 1.0)
-        act[2] = float(np.clip(c.kp * (target[2] - ee[2]), -c.servo_z_cap, 1.0))
+        _v = self._limit(np.array([c.kp * dxy[0], c.kp * dxy[1],
+                                   c.kp * (target[2] - ee[2])]), wp)
+        act[:2] = _v[:2]
+        act[2] = float(np.clip(_v[2], -c.servo_z_cap, 1.0))
         if self._min_z is None or ee[2] < self._min_z - c.stall_eps:
             self._min_z, self._stall = float(ee[2]), 0
         else:
@@ -422,7 +463,7 @@ class PlannerExpert:
             self._steps_on_wp = 0
 
         act = np.zeros(7)
-        act[:3] = np.clip(self.cfg.kp * err, -1.0, 1.0)
+        act[:3] = self._limit(self.cfg.kp * err, wp)
         if self._rot_ref is not None:
             Rcur = Rot.from_quat(np.asarray(self._rot_ref, float)).as_matrix()
             drot = Rot.from_matrix(wp["R"] @ Rcur.T).as_rotvec()
