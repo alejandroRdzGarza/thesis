@@ -62,6 +62,11 @@ def launch(out: Path, suite: str, level: str, task: int, args) -> tuple[subproce
            "--suite", suite, "--level", level, "--tasks", str(task),
            "--episodes", *[str(e) for e in args.episodes],
            "--out", str(sd), "--horizon", str(args.horizon), "--replan", str(args.replan)]
+    cmd += ["--teacher", args.teacher]
+    if args.teacher == "planner":
+        cmd.append("--no-cbf")      # self-safe teacher; the shield only fights its plan
+    if args.randomize_seed is not None:
+        cmd += ["--randomize-seed", str(args.randomize_seed)]
     if args.clean_only:
         cmd.append("--clean-only")
     env = dict(os.environ, PYTHONPATH=os.environ.get("PYTHONPATH", "."))
@@ -119,15 +124,25 @@ def main():
                          "fine-tuned VLA can be benchmarked on inits it never saw.")
     ap.add_argument("--out", type=Path, default=Path("results_distill/bc_all"))
     ap.add_argument("--workers", type=int, default=max(1, min(8, (os.cpu_count() or 4) - 2)))
-    ap.add_argument("--horizon", type=int, default=300)
+    ap.add_argument("--horizon", type=int, default=None,
+                    help="control steps per episode. Default depends on the teacher: the\n                          scripted controller finishes within 300, the planner needs ~900\n                          because it tracks a dense waypoint trace.")
     ap.add_argument("--replan", type=int, default=5)
     ap.add_argument("--clean-only", action="store_true", default=True,
                     help="drop traces for failed/colliding episodes (default: on)")
     ap.add_argument("--keep-all", dest="clean_only", action="store_false",
                     help="keep every trace on disk, not just the clean ones")
+    ap.add_argument("--teacher", default="planner", choices=["classical", "planner"])
+    ap.add_argument("--randomize-seed", type=int, default=None,
+                    help="TRAINING-DATA obstacle randomisation. Omit for canonical layouts "
+                         "(Student A); set it for the augmented set (Student B). Never for eval.")
     ap.add_argument("--force", action="store_true", help="re-run shards that already have a manifest")
     ap.add_argument("--merge-only", action="store_true", help="just merge existing shards and report")
     args = ap.parse_args()
+
+    if args.horizon is None:
+        args.horizon = 900 if args.teacher == "planner" else 300
+    if args.teacher == "planner":
+        args.replan = 1          # the planner is queried every control step, not every 5
 
     out: Path = args.out
     out.mkdir(parents=True, exist_ok=True)

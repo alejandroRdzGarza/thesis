@@ -558,7 +558,11 @@ def sample_grasps(model, data, qadr, sid, center, body_prefix, free, *,
                 break
 
     # OBB grasp first (shape-derived), then swept straddle, then rim pinch.
-    _rank = {"obb": 0, "top": 1, "rim": 2}
+    # OBB is ranked LAST despite being the more principled construction: it was verified to
+    # select sensible grasps (right closing axis, correct rejection of the 11 cm bowl) but
+    # NOT verified to execute better, and promoting it took object LI t0 from 2/2 to 0/3.
+    # Promote it only once an end-to-end sweep shows it wins.
+    _rank = {"top": 0, "rim": 1, "obb": 2}
     out.sort(key=lambda d: (_rank.get(d["mode"], 3), d["reach"]))
     return out
 

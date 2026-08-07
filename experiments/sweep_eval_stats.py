@@ -85,6 +85,35 @@ def main():
               f"{cr*100:5.1f}% [{clo*100:4.1f},{chi*100:5.1f}]   "
               f"{cbf:6.3f}  {ets}")
     print("=" * 104)
+
+    # Which bodies caused the residual collisions. The headline rate says how OFTEN a policy
+    # collides; this says WITH WHAT, and it is where a whole-arm teacher should differ from an
+    # end-effector shield (which removes gripper and held-object contacts but not arm links).
+    cats = ["gripper", "arm_link", "held_object", "scene_object"]
+    rows_any = False
+    for label, d in policies:
+        rows = pool(d)
+        cnt = {c: 0 for c in cats}
+        other = 0
+        for r in rows:
+            for c in str(r.get("culprit", "") or "").split("|"):
+                c = c.strip()
+                if not c:
+                    continue
+                if c in cnt:
+                    cnt[c] += 1
+                else:
+                    other += 1
+        if sum(cnt.values()) + other == 0:
+            continue
+        if not rows_any:
+            print("\n  COLLISION CULPRITS (episodes in which each body touched the obstacle)")
+            print(f"  {'policy':<22}" + "".join(f"{c:>14}" for c in cats) + f"{'other':>8}")
+            rows_any = True
+        print(f"  {label:<22}" + "".join(f"{cnt[c]:>14}" for c in cats) + f"{other:>8}")
+    if not rows_any:
+        print("\n  (no culprit column in these manifests — re-run the eval to populate it)")
+
     print("  TSR = env.check_success · collision = raw obstacle displacement >1 mm (AEGIS metric,"
           " CAR = 100 − collision) · ETS = mean steps to success, succeeded rollouts only")
 

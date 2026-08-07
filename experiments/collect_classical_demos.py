@@ -33,6 +33,18 @@ def main():
     ap.add_argument("--out", default="results_distill/round0")
     ap.add_argument("--horizon", type=int, default=300)
     ap.add_argument("--replan", type=int, default=5)
+    ap.add_argument("--teacher", default="classical", choices=["classical", "planner"],
+                    help="which expert generates the demos: the scripted MPC-CBF controller, or "
+                         "the joint-space RRT planner")
+    ap.add_argument("--randomize-seed", type=int, default=None,
+                    help="base seed for TRAINING-DATA obstacle randomisation; each episode gets "
+                         "seed+episode. Leave unset for canonical layouts. Never use for eval.")
+    ap.add_argument("--no-cbf", dest="use_cbf", action="store_false", default=None,
+                    help="collect WITHOUT the CBF shield. Default depends on the teacher: the "
+                         "scripted controller NEEDS the shield (its nominal actions collide ~60%% "
+                         "unshielded), whereas the planner is self-safe by construction and the "
+                         "shield actively fights it — it fired on every step and stalled the "
+                         "episode in LIFT.")
     ap.add_argument("--clean-only", action="store_true",
                     help="only write a trace when the episode SUCCEEDED and stayed collision-free. "
                          "BC discards the rest anyway (flow_bc_train --success-only), and each "
@@ -41,27 +53,41 @@ def main():
     args = ap.parse_args()
 
     from experiments.libero_runner import make_libero_env, run_libero_trial
-    from experiments.classical_expert import PickPlaceController
     from experiments.policy_trace import save_episode_trace
+    from experiments.progress import Progress
+    if args.teacher == "planner":
+        from experiments.planner_expert import PlannerExpert as _Teacher
+    else:
+        from experiments.classical_expert import PickPlaceController as _Teacher
+    if args.use_cbf is None:
+        args.use_cbf = (args.teacher != "planner")
+    print(f"  teacher={args.teacher}  shield={'ON' if args.use_cbf else 'OFF'}"
+          f"  randomise={'seed ' + str(args.randomize_seed) if args.randomize_seed is not None else 'no'}",
+          flush=True)
 
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
-    controller = PickPlaceController()
     rows = []
     n = succ = coll = clean = 0
+    _total = len(args.tasks) * len(args.episodes)
+    prog = Progress(_total, f"collect [{args.teacher}] {args.suite} L{args.level}")
+    prog.__enter__()
     for task in args.tasks:
         env, lang, init_states = make_libero_env(
             task_suite=args.suite, task_idx=task, safety_level=args.level, horizon=args.horizon)
         for ep in args.episodes:
+            controller = _Teacher()
             controller.reset()
             m = run_libero_trial(
                 env=env, episode_idx=ep, instruction=lang, initial_states=init_states,
-                obstacles=[], goal_pos=None, auto_goal=True, use_geo_success=False, use_cbf=True,
+                obstacles=[], goal_pos=None, auto_goal=True, use_geo_success=False, use_cbf=args.use_cbf,
                 vla="pi05", auto_detect_obstacle=True, aegis_faithful=True, replan_steps=args.replan,
                 horizon=args.horizon, controller=controller, record_policy_trace=True,
                 scene_name=f"{args.suite}_L{args.level}_t{task}",
                 # Per-scene teacher: the controller is specialised to this task's geometry
                 # (grasp side, elevation, corridor) plus any tuned override.
-                teacher_suite=args.suite, teacher_level=args.level, teacher_task=task)
+                teacher_suite=args.suite, teacher_level=args.level, teacher_task=task,
+                randomize_obstacle_seed=(None if args.randomize_seed is None
+                                         else args.randomize_seed + ep))
             s = m.summary()
             ok = bool(s["goal_reached"]); cl = bool(s["collision_detected"])
             is_clean = ok and not cl
@@ -72,15 +98,14 @@ def main():
                              "robot_caused_collision": int(cl),
                              "suite": args.suite, "task": task, "episode": ep})
             n += 1; succ += int(ok); coll += int(cl); clean += int(is_clean)
-            print(f"  {args.suite} L{args.level} t{task} ep{ep}: succ={ok} coll={cl} "
-                  f"queries={len(m.policy_trace)} "
-                  f"{'→ ' + Path(tp).name if (is_clean or not args.clean_only) else '(dropped)'}",
-                  flush=True)
+            prog.note(clean=int(is_clean))
+            prog.step(f"t{task} ep{ep} {'KEPT' if is_clean else 'drop'}")
         try:
             env.close()
         except Exception:
             pass
 
+    prog.__exit__()
     with open(out / "manifest.csv", "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["trace_path", "r_success", "robot_caused_collision",
                                           "suite", "task", "episode"])

@@ -47,6 +47,10 @@ class Rollout:
     # in the AEGIS/VLSA table alongside CAR and TSR — it was already in metrics.summary() as
     # `goal_reach_step` but never reached the manifest, so no eval could report it.
     ets: int = -1
+    # Which body caused the collision (gripper / arm_link / held_object / scene_object).
+    # The aggregate collision rate cannot show the claim that a whole-arm teacher reduces ARM-LINK
+    # collisions specifically — the residual an end-effector shield structurally cannot remove.
+    culprit: str = ""
 
     def manifest_row(self) -> dict:
         rb = self.reward
@@ -69,6 +73,7 @@ class Rollout:
             # attribution. Flipping that config silently changes what this column means.
             "robot_caused_collision": int(rb.direct_collision),
             "ets": self.ets,
+            "culprit": self.culprit,
         }
 
 
@@ -212,7 +217,8 @@ def collect_group(
         except Exception:
             _ets = -1
         rollouts.append(Rollout(group_id=group_id, rollout_id=k, traj_path=traj_path,
-                                reward=rb, trace_path=trace_path, shielded=use_shield, ets=_ets))
+                                reward=rb, trace_path=trace_path, shielded=use_shield, ets=_ets,
+                                culprit=str(getattr(metrics, "collision_culprit", "") or "")))
     return rollouts
 
 
