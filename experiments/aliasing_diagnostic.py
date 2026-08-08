@@ -50,8 +50,15 @@ import numpy as np
 
 
 def collect_pairs(round_dir: Path, max_traces: int, with_image: bool, img_dim: int = 8):
-    """(obs_features, target_actions) over a round's traces."""
-    from experiments.policy_trace import load_episode_trace
+    """(obs_features, target_actions) over a round's traces.
+
+    Reads the npz keys DIRECTLY rather than via load_episode_trace. The archive stores `obs_state`
+    (Q,8) and `obs_image` (Q,224,224,3) as separate keys and np.load is lazy per key, so a
+    proprio-only run never decompresses a single image. Building full QueryTrace objects instead
+    inflates a 55 MB planner trace to hundreds of MB of pixels — enough to get this script
+    OOM-killed, silently, since SIGKILL leaves no traceback.
+    """
+    import gc
 
     paths = sorted(glob.glob(str(round_dir / "**" / "*_trace.npz"), recursive=True))
     if not paths:
@@ -61,27 +68,45 @@ def collect_pairs(round_dir: Path, max_traces: int, with_image: bool, img_dim: i
         paths = random.sample(paths, max_traces)
 
     feats, acts = [], []
-    for p in paths:
-        for q in load_episode_trace(p):
-            if q.shielded_actions is None or q.obs is None:
+    print(f"  reading {len(paths)} traces"
+          f"{' (+images)' if with_image else ' (proprio only — images never decompressed)'} ...",
+          flush=True)
+    for i, p in enumerate(paths, 1):
+        try:
+            with np.load(p, allow_pickle=True) as z:
+                if not (bool(z["has_obs"]) and bool(z["has_shielded"])):
+                    print(f"    [{i}/{len(paths)}] skipped (no obs/targets): {Path(p).name}", flush=True)
+                    continue
+                state = np.asarray(z["obs_state"], dtype=np.float32)          # (Q, 8)
+                sa = np.asarray(z["shielded_actions"], dtype=np.float32)      # (Q, L, 7)
+                lens = np.asarray(z["shielded_lens"], dtype=np.int32)
+                if with_image:
+                    im = np.asarray(z["obs_image"], dtype=np.float32)         # the expensive key
+                    g = im.mean(axis=3)                                       # (Q,H,W) greyscale
+                    st = max(1, g.shape[1] // img_dim)
+                    small = g[:, ::st, ::st][:, :img_dim, :img_dim]
+                    small = small.reshape(len(g), -1) / 255.0
+                    del im, g
+                else:
+                    small = None
+        except Exception as e:
+            print(f"    [{i}/{len(paths)}] unreadable ({type(e).__name__}): {Path(p).name}", flush=True)
+            continue
+
+        n = 0
+        for qi in range(len(state)):
+            if lens[qi] <= 0:
                 continue
-            state = np.asarray(q.obs.get("state"), dtype=np.float32).ravel()
-            if state.size == 0:
-                continue
-            f = state
-            if with_image:
-                im = q.obs.get("image")
-                if im is not None:
-                    im = np.asarray(im, dtype=np.float32)
-                    if im.ndim == 3:
-                        im = im.mean(axis=2)                      # greyscale
-                    s = max(1, im.shape[0] // img_dim)
-                    small = im[::s, ::s][:img_dim, :img_dim].ravel() / 255.0
-                    f = np.concatenate([state, small])
-            # The BC target is the executed chunk; compare the FIRST executed action, which is the
-            # one the policy must commit to from this observation.
+            f = state[qi] if small is None else np.concatenate([state[qi], small[qi]])
             feats.append(f)
-            acts.append(np.asarray(q.shielded_actions, dtype=np.float32)[0])
+            # The action the policy must commit to from this observation: the first executed one.
+            acts.append(sa[qi, 0])
+            n += 1
+        del state, sa, lens, small
+        gc.collect()
+        if i % 5 == 0 or i == len(paths):
+            print(f"    [{i}/{len(paths)}] {len(feats)} samples so far", flush=True)
+
     if not feats:
         raise SystemExit(f"no usable (obs, action) pairs in {round_dir}")
     return np.stack(feats), np.stack(acts)
@@ -115,6 +140,37 @@ def aliasing_ratio(F: np.ndarray, A: np.ndarray, k: int, n_sample: int, seed: in
     # How close neighbours actually are, so "neighbour" can be sanity-checked rather than assumed.
     nd = np.mean([np.linalg.norm(Fz[i] - Fz[j]) for i, row in zip(idx, nbr) for j in row])
     return d_nbr, d_rnd, (d_nbr / d_rnd if d_rnd > 0 else float("nan")), nd
+
+
+def aliasing_curve(F: np.ndarray, A: np.ndarray, radii, n_sample: int, seed: int = 0):
+    """Action disagreement at FIXED observation distances, normalised by random-pair disagreement.
+
+    The k-NN ratio conflates two things: how well observations determine actions, and how densely
+    the dataset samples observation space. A scripted controller produces smooth repetitive
+    trajectories whose states cluster tightly, so its k nearest neighbours are far closer than a
+    VLA rollout's (measured: 0.18 vs 0.73 in z-units) and its disagreement is mechanically lower —
+    for reasons unrelated to aliasing. Evaluating at the SAME observation radius in both datasets
+    removes that, so the numbers are comparable.
+    """
+    from scipy.spatial import cKDTree
+    rng = np.random.default_rng(seed)
+    Fz = (F - F.mean(0)) / (F.std(0) + 1e-8)
+    tree = cKDTree(Fz)
+    idx = rng.choice(len(Fz), size=min(n_sample, len(Fz)), replace=False)
+    ri, rj = rng.choice(len(Fz), size=20000), rng.choice(len(Fz), size=20000)
+    d_rnd = float(np.mean(np.linalg.norm(A[ri] - A[rj], axis=1)))
+
+    out = []
+    for r in radii:
+        ds, npairs = [], 0
+        for i in idx:
+            for j in tree.query_ball_point(Fz[i], r):
+                if j != i:
+                    ds.append(np.linalg.norm(A[i] - A[j])); npairs += 1
+            if npairs > 40000:
+                break
+        out.append((r, (float(np.mean(ds)) / d_rnd if ds else float("nan")), npairs))
+    return out, d_rnd
 
 
 def main():
@@ -160,6 +216,15 @@ def main():
         print("    -> partial aliasing. BC will fit the reliable part and average the rest.")
     else:
         print("    -> observations largely determine actions. BC should fit this dataset.")
+    print("\n  AT MATCHED OBSERVATION RADIUS (density-independent — use THIS to compare datasets)")
+    print(f"  {'radius (z)':>12}{'aliasing':>11}{'pairs':>10}")
+    try:
+        curve, _ = aliasing_curve(F, A, [0.1, 0.25, 0.5, 1.0], args.n_sample)
+        for r, v, npairs in curve:
+            print(f"  {r:>12.2f}{v:>11.3f}{npairs:>10}")
+    except ImportError:
+        print("    (scipy unavailable)")
+
     print("\n  Compare ratios ACROSS datasets — the absolute value depends on k and on how the")
     print("  observation is built, so it is a relative measure, not a threshold.\n")
 
