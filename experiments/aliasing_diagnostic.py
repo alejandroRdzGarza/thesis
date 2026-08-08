@@ -126,16 +126,27 @@ def main():
                     help="traces to sample (each holds hundreds of queries)")
     ap.add_argument("--k", type=int, default=8, help="neighbours per sample")
     ap.add_argument("--n-sample", type=int, default=4000, help="query points to evaluate")
+    ap.add_argument("--max-samples", type=int, default=1400,
+                    help="cap the REFERENCE set size. Essential for comparing datasets: neighbour "
+                         "distance falls as the set grows, so a denser dataset scores a lower ratio "
+                         "for reasons unrelated to aliasing. A planner round yields ~337 queries per "
+                         "trace against ~35 for a shielded round, so uncapped the two are not "
+                         "comparable at all. Set the SAME value for every dataset you compare.")
     ap.add_argument("--with-image", action="store_true",
                     help="append a crude downsampled-greyscale descriptor to the observation")
     args = ap.parse_args()
 
     label = args.label or args.round.name
     F, A = collect_pairs(args.round, args.max_traces, args.with_image)
+    if args.max_samples and len(F) > args.max_samples:
+        rng = np.random.default_rng(0)
+        sel = rng.choice(len(F), size=args.max_samples, replace=False)
+        F, A = F[sel], A[sel]
     d_nbr, d_rnd, ratio, nd = aliasing_ratio(F, A, args.k, args.n_sample)
 
     print(f"\n  dataset            : {label}")
-    print(f"  samples            : {len(F)} (obs dim {F.shape[1]}, action dim {A.shape[1]})")
+    print(f"  samples            : {len(F)} (obs dim {F.shape[1]}, action dim {A.shape[1]})"
+          f"{'  [capped for comparability]' if args.max_samples else ''}")
     print(f"  observation source : {'proprio + downsampled image' if args.with_image else 'proprio only'}")
     print(f"  mean neighbour distance (z-scored obs) : {nd:.4f}")
     print(f"  action disagreement, neighbours        : {d_nbr:.4f}")
