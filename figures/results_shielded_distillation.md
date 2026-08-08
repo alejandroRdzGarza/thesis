@@ -52,6 +52,68 @@ The 186 round-0 demonstrations, filtered on success AND collision-free AND shiel
 Position actions are bounded at ±1 per axis, so a correction norm of 0.33 is a large deflection,
 not a nudge.
 
+## Collision culprits: which body, and what the shield can reach
+
+Recovered from the run log with `experiments/culprits_from_log.py` (the eval predates the `culprit`
+manifest column; the runner printed `touched_by=[...]` per episode, so no re-run was needed).
+`scene_object` is excluded: it fires on 120/120 episodes of every arm including collision-free ones,
+because the obstacle resting on its surface registers a permanent contact.
+
+Validation: the `collided` column reproduces the headline table exactly (99/120 = 82.5%,
+16/120 = 13.3%, 23/120 = 19.2%, 21/120 = 17.5%, 10/120 = 8.3%, 11/120 = 9.2%).
+
+| arm | episodes | collided | gripper | arm_link | held_object |
+|---|---|---|---|---|---|
+| base, no shield | 120 | 99 | **71** | 17 | 36 |
+| base + shield | 120 | 16 | **0** | 15 | 0 |
+| r1, no shield | 120 | 23 | 7 | 13 | 9 |
+| r1 + shield | 120 | 10 | **0** | 8 | 1 |
+| r2, no shield | 120 | 21 | 8 | 8 | 7 |
+| r2 + shield | 120 | 11 | **0** | 9 | 0 |
+
+**The shield eliminates end-effector collisions completely.** 71 → 0 from base, and zero gripper
+collisions across all 360 shielded episodes. Of `base+shield`'s 16 residual collisions, 15 are
+`arm_link` — bodies the barrier never constrained.
+
+**So the 13.3% floor is a scope limit, not a leak.** The EE barrier does exactly what it constrains
+and nothing it does not. The corollary matters for reading the headline: the distilled policy at
+17.5% shield-free is close to the practical ceiling of the supervision it received, rather than a
+degraded approximation of a perfect teacher.
+
+## Decomposing the improvement by body
+
+The culprit breakdown separates the two mechanisms in a way the pooled rate cannot, because the
+shield's authority is confined to one channel.
+
+| channel | shield constrains it? | base → r2 (no shield) | attributable to |
+|---|---|---|---|
+| gripper | yes | 71 → 8 | shield corrections **and** selection |
+| **arm_link** | **no** | **17 → 8** | **selection alone** |
+| held_object | no | 36 → 7 | selection alone |
+
+**The CBF cannot have caused the arm_link reduction** — it does not constrain arm links, and
+`base+shield` still shows 15 of them. That improvement must come from the selection filter:
+demonstrations were retained only if NOTHING collided, arm links included, and the student learned
+that. Mechanism (b) is therefore demonstrably real and measurable, observed in a channel where the
+shield is absent by construction.
+
+Mechanism (a) is separately supported: the shield modified a median 32% of demonstration actions
+(median 51 activations/episode, minimum 9, correction norm 0.33) and drove gripper collisions to
+zero in the training data.
+
+So the honest claim is not "distillation works" but **safety distillation transfers through two
+distinct channels, separable by which bodies the filter has authority over**: direct imitation of
+corrections where the filter acts, and behaviour selection where it does not.
+
+Note `r2` without any shield reaches 8 `arm_link` collisions against shielded base's 15 — the
+distilled policy avoids with its whole arm better than the shield can, because the shield
+structurally cannot act there at all.
+
+**Statistical caution.** 17/120 vs 8/120 is 14.2% [9.0, 21.6] vs 6.7% [3.4, 12.7] — overlapping
+Wilson intervals, so the arm_link trend is SUGGESTIVE, not established, unlike the headline result
+where the intervals are disjoint. The gripper finding (71 → 0, zero across 360 shielded episodes) is
+not in doubt.
+
 ## Threat to validity: selection vs distillation
 
 Demonstrations are filtered on three properties at once — the shield fired, the episode succeeded,
@@ -63,7 +125,11 @@ and nothing was displaced. Two mechanisms could therefore drive the improvement:
 shield (filtered behaviour cloning / self-improvement), and successful episodes correlate with not
 having knocked anything over. Under this explanation the shield is incidental.
 
-Nothing in the six-arm evaluation distinguishes them. Two quantitative arguments bear against (b):
+The culprit decomposition above PARTIALLY separates them, which the pooled rates cannot: the
+arm_link improvement (17 → 8) occurs in a channel the shield does not constrain, so mechanism (b) is
+real and measurable. Mechanism (a) is separately evidenced in the gripper channel, where the shield
+drove demonstration collisions to zero and modified ~32% of imitated actions. Two further arguments
+bear against (b) being the WHOLE story:
 
 1. **The demonstrations are pervasively shield-shaped.** The shield was active on a median 32% of
    control steps, with median 51 activations per episode and a minimum of 9 — there is no
@@ -75,7 +141,11 @@ Nothing in the six-arm evaluation distinguishes them. Two quantitative arguments
    often would not require *less* safety intervention. Needing half as much correction indicates the
    policy stopped entering the states that triggered it.
 
-**These make (b) implausible; they do not eliminate it.** The decisive test is a matched-size control:
+**Taken together: both mechanisms operate, and neither alone explains the result.** Selection is
+proven to transfer avoidance (arm_link, where the shield is absent); the shield is proven to shape
+the demonstrations heavily and to eliminate the entire EE channel. What remains unquantified is
+their RELATIVE contribution within the gripper channel, where both act. The decisive test is a
+matched-size control:
 collect demonstrations with the shield OFF, filter identically, train at the same demo count, and
 evaluate shield-off. If collision still falls, the gain was selection. Implemented in
 `run_shield_control.sh` (~37 h: 21 h collection, 8 h training, 8 h evaluation); **not run**, for
