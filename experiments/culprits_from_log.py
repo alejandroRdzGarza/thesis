@@ -38,13 +38,21 @@ TOUCHED = re.compile(r"touched_by=\[([^\]]*)\]")
 ARMPATH = re.compile(r"eval_([A-Za-z0-9_]+)/")
 COLLIDED = re.compile(r"collision=(True|False)")
 
-CATS = ["gripper", "arm_link", "held_object", "scene_object"]
+# Bodies the robot controls. `scene_object` is deliberately NOT here: it fires on every episode
+# including collision-free ones (measured: 120/120 on every arm), because the obstacle resting on
+# its surface registers a permanent contact. Counting it would drown the real signal.
+CATS = ["gripper", "arm_link", "held_object"]
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--log", required=True, type=Path)
+    ap.add_argument("--per-scene", type=int, default=5,
+                    help="rollouts per scene. The buffer is trimmed to the LAST this-many before "
+                         "attribution, because DEMO-COLLECTION episodes print touched_by too and "
+                         "would otherwise all be charged to whichever eval arm ran first (observed: "
+                         "696 episodes attributed to base_nocbf instead of 120).")
     args = ap.parse_args()
 
     text = args.log.read_text(errors="ignore").splitlines()
@@ -61,7 +69,7 @@ def main():
             continue
         a = ARMPATH.search(line)
         if a and pending:
-            per_arm[a.group(1)].extend(pending)
+            per_arm[a.group(1)].extend(pending[-args.per_scene:])
             pending = []
 
     if not per_arm:
