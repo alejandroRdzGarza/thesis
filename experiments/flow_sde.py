@@ -155,3 +155,88 @@ def grpo_surrogate(logp_new, logp_old, advantage, clip: float = 0.2):
     adv = np.asarray(advantage, dtype=np.float64)
     ratio = np.exp(logp_new - logp_old)
     return np.minimum(ratio * adv, np.clip(ratio, 1.0 - clip, 1.0 + clip) * adv)
+
+
+def flow_sde_sample_guided(v_fn, x_init: np.ndarray, sigmas: np.ndarray,
+                           noise_level: float, rng: np.random.Generator,
+                           guidance_fn, lam: float = 1.0,
+                           sde_type: str = "sde", lam_schedule: str = "endpoint") -> dict:
+    """Sample an action chunk with the velocity field STEERED toward the safe set.
+
+    WHY THIS EXISTS. The CBF shield currently runs as a post-hoc projection: pi0.5 produces an
+    action, the QP pushes it onto the safe set, and the robot executes the result. Measured, that
+    costs capability — the distilled policy scores TSR 82.5% unshielded and 70.8% with the shield
+    stacked on, because projection takes a coherent action and moves it OFF the policy's manifold.
+    Safe, but no longer a competent grasp.
+
+    Flow matching offers an intervention point that projection does not have. The action is not
+    produced in one shot; it is integrated over ~10 denoising steps. Biasing the VELOCITY at each
+    step keeps the sample on the manifold the whole way — the result is a safe action the policy
+    itself would plausibly have produced, rather than a safe correction of one it did produce.
+    This is the flow-matching analogue of classifier guidance, with a control barrier function in
+    place of the classifier.
+
+        v_guided = v + lambda(sigma) * g,     g = guidance_fn(x0_pred, sigma)
+
+    x0_pred is the CURRENT ESTIMATE OF THE CLEAN ACTION, not the noisy latent: under this sampler's
+    convention (x_{t+dt} = x_t + dt*v, time 1 -> 0) integrating the remaining distance in one step
+    gives x0 ~= x - sigma*v. Evaluating the barrier at the noisy latent instead would ask it about
+    a point that is mostly noise, especially early in the chain.
+
+    lam_schedule="linear" scales guidance by (1 - sigma): weak at sigma~1 where the sample carries
+    no action information and the barrier estimate is meaningless, strongest as sigma -> 0 where the
+    sample is nearly the final action. "constant" applies lam throughout.
+
+    guidance_fn(x0_pred, sigma) -> array like x, the direction to push in LATENT space. The caller
+    owns decode/encode: typically decode x0_pred to an env-space action, run the existing CBF QP,
+    and return (u_safe - u_nom) mapped back to latent space. Normalisation is affine, so a delta
+    maps by dividing by the action scale. Return zeros to leave a step unguided.
+
+    Returns the same dict as flow_sde_sample plus `guidance_norms` (per-step ||lambda*g||), so the
+    strength actually applied can be reported rather than assumed.
+    """
+    sigma_max = float(sigmas[1]) if len(sigmas) > 1 else 1.0
+    x = np.asarray(x_init, dtype=np.float64)
+    chain = [x.copy()]
+    step_logp, g_norms = [], []
+    for k in range(len(sigmas) - 1):
+        sig, sig_prev = float(sigmas[k]), float(sigmas[k + 1])
+        v = v_fn(x, sig)
+        # Estimate the clean action this step is heading toward, and ask the barrier about THAT.
+        x0_pred = x - sig * np.asarray(v, dtype=np.float64)
+        g = guidance_fn(x0_pred, sig)
+        if g is None:
+            g = np.zeros_like(x)
+        g = np.asarray(g, dtype=np.float64)
+        # Schedules. "endpoint" is the principled one for this parameterisation: with
+        # v = (x - x0)/sigma, shifting the ENDPOINT by delta means v' = (x - x0 - delta)/sigma =
+        # v - delta/sigma, so guidance must scale as 1/sigma. The "linear" (1-sigma) schedule does
+        # the opposite — it pushes hardest late, exactly where the field is stiffest and the
+        # remaining integration budget is smallest, so a stiff field simply drags the sample back.
+        # Measured on a synthetic barrier: "linear" fired on every step and still breached, while
+        # "endpoint" reaches the safe set.
+        if lam_schedule == "endpoint":
+            w = lam / max(sig, 1e-3)
+        elif lam_schedule == "linear":
+            w = lam * (1.0 - sig)
+        else:
+            w = lam
+        # MINUS, not plus. Integration runs with dt < 0 (sigma 1 -> 0), so x_next = x + dt*(v + w*g)
+        # displaces x along -g. Adding the correction drove the action AWAY from where the barrier
+        # asked it to go (synthetic check: projection requested x 0.30 -> 0.40, the sample went to
+        # 0.10 — safe only by overshooting out the opposite side). Subtracting matches the
+        # derivation: to shift the endpoint by delta, v' = (x - x0 - delta)/sigma = v - delta/sigma.
+        v_guided = np.asarray(v, dtype=np.float64) - w * g
+        g_norms.append(float(np.linalg.norm(w * g)))
+        x_next, lp, _, _ = sde_step_with_logprob(
+            v_guided, sig, sig_prev, x, noise_level, sde_type, sigma_max, None, rng)
+        step_logp.append(lp)
+        chain.append(x_next.copy())
+        x = x_next
+    step_logp = np.array(step_logp)
+    return {
+        "action": x, "chain": chain, "step_logp": step_logp,
+        "total_logp": float(np.sum(step_logp)), "sigmas": sigmas,
+        "noise_level": noise_level, "sde_type": sde_type,
+        "guidance_norms": np.array(g_norms), "lam": lam, "lam_schedule": lam_schedule,
+    }
