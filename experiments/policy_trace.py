@@ -112,22 +112,32 @@ def save_episode_trace(queries: list[QueryTrace], path: str | Path) -> Path:
 
 
 def load_episode_trace(path: str | Path) -> list[QueryTrace]:
-    d = np.load(path, allow_pickle=True)
-    if int(d["n_queries"]) == 0:
-        return []
-    chain, logp = d["chain"], d["logp_old"]
-    sigmas = d["sigmas"]; nl = float(d["noise_level"]); st = str(d["sde_type"])
-    has_obs = bool(d["has_obs"]) if "has_obs" in d else False
-    has_shielded = bool(d["has_shielded"]) if "has_shielded" in d else False
+    with np.load(path, allow_pickle=True) as d:
+        if int(d["n_queries"]) == 0:
+            return []
+        chain, logp = d["chain"], d["logp_old"]
+        sigmas = d["sigmas"]; nl = float(d["noise_level"]); st = str(d["sde_type"])
+        has_obs = bool(d["has_obs"]) if "has_obs" in d else False
+        has_shielded = bool(d["has_shielded"]) if "has_shielded" in d else False
+        # Hoist EVERY array out of the per-query loop. NpzFile.__getitem__ decompresses the whole
+        # array on each access and caches nothing, so `d["obs_image"][i]` inside the loop
+        # decompressed the entire (Q,224,224,3) stack once per query: ~110 MB x 728 queries = tens
+        # of GB of allocation churn for a single trace. That was the real cause of the silent
+        # OOM kills during index building, and of index builds taking half an hour.
+        obs_image = d["obs_image"] if has_obs else None
+        obs_wrist = d["obs_wrist_image"] if has_obs else None
+        obs_state = d["obs_state"] if has_obs else None
+        obs_prompt = str(d["obs_prompt"]) if has_obs else ""
+        sh_all = d["shielded_actions"] if has_shielded else None
+        sh_lens = d["shielded_lens"] if has_shielded else None
+
     out = []
     for i in range(len(chain)):
         obs = None
         if has_obs:
-            obs = {"image": d["obs_image"][i], "wrist_image": d["obs_wrist_image"][i],
-                   "state": d["obs_state"][i], "prompt": str(d["obs_prompt"])}
-        sh = None
-        if has_shielded:
-            sh = d["shielded_actions"][i, : int(d["shielded_lens"][i])]
+            obs = {"image": obs_image[i], "wrist_image": obs_wrist[i],
+                   "state": obs_state[i], "prompt": obs_prompt}
+        sh = sh_all[i, : int(sh_lens[i])] if has_shielded else None
         out.append(QueryTrace(chain[i], logp[i], sigmas, nl, st, obs=obs, shielded_actions=sh))
     return out
 
