@@ -151,6 +151,55 @@ evaluate shield-off. If collision still falls, the gain was selection. Implement
 `run_shield_control.sh` (~37 h: 21 h collection, 8 h training, 8 h evaluation); **not run**, for
 compute-budget reasons. This is stated as a limitation, not claimed as a result.
 
+## Rejected hypothesis: observation aliasing does not explain the failure
+
+Earlier analysis attributed the failure of cross-policy distillation to observation aliasing:
+pi0.5 sees image + 8-D proprio (eef_pos3 + axis_angle3 + gripper2) and no joint angles, so a shield
+correction that depends on the full joint configuration is not a function of anything the policy
+observes, and BC would average contradictory targets. That was asserted, never measured. It is
+measurable from the demonstration files alone, and the measurement rejects it.
+
+**Method** (`experiments/aliasing_diagnostic.py`). For each dataset, take (observation, target
+action) pairs, find samples that are near-neighbours IN OBSERVATION SPACE, and measure how much
+their target actions disagree, normalised by the disagreement between random pairs:
+
+    aliasing = E[||a_i - a_j|| : obs within radius r] / E[||a_i - a_j|| : random pairs]
+
+~1 means observations carry no information about actions (BC cannot fit); ~0 means they determine
+them. Validated on synthetic data: an action that is a clean function of the observation scores
+0.374, an action independent of the observation scores 1.001.
+
+Compared at MATCHED OBSERVATION RADIUS rather than matched neighbour count. A k-nearest-neighbour
+ratio conflates aliasing with sampling density, and the two teachers differ sharply there: the
+scripted planner produces smooth repetitive trajectories whose neighbours sit 4x closer than a VLA
+rollout's (0.18 vs 0.73 in z-units), which lowers its disagreement for reasons unrelated to
+aliasing. Both datasets capped to 1400 samples.
+
+| radius (z-scored obs) | shielded π0.5 (distils) | classical planner (cross-policy) |
+|---|---|---|
+| 0.10 | 0.103 | **0.051** |
+| 0.25 | 0.174 | **0.093** |
+| 0.50 | 0.237 | **0.118** |
+| 1.00 | 0.376 | **0.174** |
+
+**The ordering is the reverse of the prediction.** The planner dataset is roughly 2x LESS aliased at
+every radius: the teacher whose demonstrations fail to distil has the CLEANER observation-to-action
+mapping, and the teacher that distils successfully is the more aliased of the two.
+
+In hindsight the direction is unsurprising — a scripted planner is close to a deterministic function
+of state, so low aliasing is nearly definitional — but it means aliasing at these levels is not the
+binding constraint on distillability, and the stored explanation for the cross-policy failure does
+not survive contact with the data.
+
+**Consequence.** If a planner-trained student underperforms, aliasing is not the cause. The
+surviving candidates are: distribution shift (the student never visits the planner's states at
+inference), action-distribution mismatch (saturated P-control/QP deltas against pi0.5's
+flow-matched chunks), and coverage (the planner solves only 18 of 24 scenes, so six have no
+training data at all). The measurement eliminates one of four hypotheses.
+
+The prediction was recorded before the planner number was computed, so this is a genuine refutation
+rather than a post-hoc reinterpretation.
+
 ## Other limitations
 
 **The shield is end-effector only.** The barrier constrains EE spheres against obstacle spheres
