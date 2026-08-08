@@ -32,23 +32,36 @@ import random
 from pathlib import Path
 
 
-def measure_examples_per_trace(rows: list[dict], n_sample: int = 5) -> float:
-    """Average usable training examples per trace, from a small sample of real traces."""
-    from experiments.policy_trace import load_episode_trace
+def measure_examples_per_trace(rows: list[dict], n_sample: int = 8) -> float:
+    """Average training examples per trace.
+
+    Reads ONLY the `n_queries` scalar from each .npz. np.load on a compressed archive is lazy, so
+    nothing else is decompressed — critical because a planner trace holds ~337 queries of paired
+    224x224 images, and load_episode_trace() on even a few of them was enough to get this script
+    OOM-killed (silently, since SIGKILL leaves no traceback).
+    """
+    import numpy as np
     random.seed(0)
     sample = random.sample(rows, min(n_sample, len(rows)))
     counts = []
-    for r in sample:
-        p = Path(r["trace_path"])
-        if not p.exists():
+    print(f"  measuring examples/trace from {len(sample)} traces (header only, no image decode) ...",
+          flush=True)
+    for i, r in enumerate(sample, 1):
+        path = Path(r["trace_path"])
+        if not path.exists():
+            print(f"    [{i}/{len(sample)}] MISSING {path.name}", flush=True)
             continue
-        qs = load_episode_trace(str(p))
-        # One example per query that carries an executed-action chunk — the same condition the
-        # trainer's index builder applies.
-        counts.append(sum(1 for q in qs if q.shielded_actions is not None))
+        try:
+            with np.load(path, allow_pickle=True) as z:
+                n = int(z["n_queries"]) if "n_queries" in z.files else 0
+        except Exception as e:
+            print(f"    [{i}/{len(sample)}] unreadable ({type(e).__name__}) {path.name}", flush=True)
+            continue
+        counts.append(n)
+        print(f"    [{i}/{len(sample)}] {path.name}: {n} queries", flush=True)
     if not counts:
-        raise SystemExit("could not read any trace to measure examples/trace — are the paths "
-                         "rebased for this machine? (see experiments/rebase_manifest.py)")
+        raise SystemExit("could not read any trace — are the paths rebased for this machine? "
+                         "(see experiments/rebase_manifest.py)")
     return sum(counts) / len(counts)
 
 
@@ -70,11 +83,15 @@ def main():
     args = ap.parse_args()
 
     rd: Path = args.round
+    print(f"\n  reading {rd/args.manifest} ...", flush=True)
     rows = list(csv.DictReader(open(rd / args.manifest)))
     if not rows:
         raise SystemExit(f"no rows in {rd/args.manifest}")
+    print(f"  {len(rows)} demos in manifest", flush=True)
 
     ept = args.examples_per_trace or measure_examples_per_trace(rows)
+    print(f"  -> {ept:.0f} examples per trace", flush=True)
+    print("  selecting demos evenly across scenes ...", flush=True)
     # steps = traces * ept * epochs / minibatch  ->  solve for traces
     n_target = max(1, round(args.target_steps * args.minibatch / (ept * args.epochs)))
     n_target = min(n_target, len(rows))

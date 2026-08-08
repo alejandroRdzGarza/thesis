@@ -212,7 +212,15 @@ def main():
     # host at round 1: ~2.8k 224² images ≈ 0.9 GB decoded at once).
     index: list[tuple] = []   # (trace_path, usable_idx, chunk)
     n_no_shield = 0
-    for tp in trace_paths:
+    # Narrate it. This loop decompresses every trace and can run for tens of minutes on a large
+    # round; when it was silent, an OOM kill here (SIGKILL, so no traceback) was indistinguishable
+    # from normal progress, and cost two 30-minute runs before it was diagnosed.
+    _n_tp = len(trace_paths)
+    print(f"  building index from {_n_tp} traces (decompressing; this is the slow part) ...",
+          flush=True)
+    import time as _t
+    _t0 = _t.time()
+    for _i, tp in enumerate(trace_paths, 1):
         qs = load_episode_trace(tp)
         if qs and all(q.shielded_actions is None for q in qs):
             n_no_shield += 1
@@ -220,6 +228,11 @@ def main():
             index.append((tp, uidx, chunk))
         del qs
         _gc.collect()
+        if _i % 10 == 0 or _i == _n_tp:
+            _el = _t.time() - _t0
+            _eta = _el / _i * (_n_tp - _i)
+            print(f"    [{_i}/{_n_tp}] {len(index)} examples  "
+                  f"{_el/60:.1f}m elapsed  ETA {_eta/60:.1f}m", flush=True)
     if not index:
         raise SystemExit(
             f"no shielded targets found in {round_dirs} ({n_no_shield} traces had no shielded_actions "
