@@ -127,3 +127,68 @@ def make_sphere_guidance_fn(ee_pos, obstacle_spheres, r_ee: float, action_scale,
         return u
 
     return make_cbf_guidance_fn(project, action_scale, **kw)
+
+
+def extract_action_scale(policy, action_dim: int = 7):
+    """The normalisation scale applied to actions, for mapping a delta into latent space.
+
+    A guidance delta is a DIFFERENCE, and normalisation is affine, so only the scale matters — the
+    mean cancels. Getting this wrong silently mis-scales every correction, so the value found (and
+    where it came from) is printed rather than assumed.
+
+    openpi stores per-key stats whose scale field is `std` for mean/std normalisation or
+    (q99 - q01) for quantile normalisation, depending on the config. Both are handled; a scalar
+    fallback of 1.0 is returned with a loud warning if neither is found.
+    """
+    ns = getattr(policy, "_norm_stats", None) or getattr(policy, "norm_stats", None)
+    if ns is None:
+        for attr in ("_output_transform", "_input_transform"):
+            t = getattr(policy, attr, None)
+            ns = getattr(t, "norm_stats", None)
+            if ns:
+                break
+    if ns and "actions" in ns:
+        st = ns["actions"]
+        for field in ("std", "scale"):
+            v = getattr(st, field, None)
+            if v is not None:
+                v = np.asarray(v, dtype=np.float64).ravel()[:action_dim]
+                print(f"  action_scale from norm_stats['actions'].{field}: {np.round(v, 4)}")
+                return v
+        q01, q99 = getattr(st, "q01", None), getattr(st, "q99", None)
+        if q01 is not None and q99 is not None:
+            v = (np.asarray(q99, float) - np.asarray(q01, float)).ravel()[:action_dim]
+            print(f"  action_scale from norm_stats['actions'] q99-q01: {np.round(v, 4)}")
+            return v
+    print("  WARNING: could not read action norm stats — falling back to scale 1.0. Guidance "
+          "magnitude will be wrong if actions are normalised. Inspect policy norm_stats manually.")
+    return np.ones(action_dim)
+
+
+def make_guidance_source(obstacle_spheres, r_ee: float, action_scale, dt: float = 1.0,
+                         margin: float = 0.0, n_guide: int = 3, decay: float = 0.5,
+                         stats: GuidanceStats | None = None):
+    """A `guidance_source(obs_dict) -> guidance_fn` for GuidedPolicy.
+
+    Needs no hook into the runner: the END-EFFECTOR POSITION IS ALREADY IN THE OBSERVATION.
+    pi0.5's 8-D proprio state is eef_pos(3) + axis_angle(3) + gripper(2), so state[:3] is the
+    current EE position and the barrier can be built per query from the observation alone. The
+    obstacle geometry is static within an episode and is closed over here.
+
+    Returns None when no obstacle is within reach of one action step, so unguided steps cost
+    nothing and `GuidanceStats.fire_rate` stays interpretable.
+    """
+    spheres = [(np.asarray(c, dtype=np.float64), float(r)) for c, r in obstacle_spheres]
+
+    def guidance_source(obs_dict):
+        state = np.asarray(obs_dict["observation/state"], dtype=np.float64).ravel()
+        ee = state[:3]
+        # Skip episodes/queries where nothing is close enough for one action step to reach.
+        reach = dt * 1.0 + r_ee + margin
+        if not any(np.linalg.norm(ee - c) - r <= reach for c, r in spheres):
+            return None
+        return make_sphere_guidance_fn(ee, spheres, r_ee=r_ee, action_scale=action_scale,
+                                       dt=dt, margin=margin, n_guide=n_guide, decay=decay,
+                                       stats=stats)
+
+    return guidance_source
