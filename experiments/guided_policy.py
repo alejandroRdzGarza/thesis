@@ -103,9 +103,13 @@ class GuidedPolicy:
                 g_norms.append(0.0)
 
             self._rng, step_rng = jax.random.split(self._rng)
+            # KEYWORDS, not positional. The JAX and numpy versions of this function take their
+            # arguments in DIFFERENT orders — JAX is (..., noise_level, key, sde_type, ...) while
+            # the numpy reference is (..., noise_level, sde_type, sigma_max, prev_sample, rng).
+            # Calling positionally passed a sigma where sde_type was expected.
             x, lp, _, _ = _fsde.sde_step_with_logprob(
-                v, sig, sig_prev, x, self.noise_level, self.sde_type,
-                sigma_max, None, step_rng)
+                v, sig, sig_prev, x, self.noise_level, step_rng,
+                sde_type=self.sde_type, sigma_max=sigma_max, prev_sample=None)
             step_logp.append(np.asarray(lp))
             chain.append(np.asarray(x))
 
