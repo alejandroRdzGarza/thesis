@@ -200,6 +200,35 @@ training data at all). The measurement eliminates one of four hypotheses.
 The prediction was recorded before the planner number was computed, so this is a genuine refutation
 rather than a post-hoc reinterpretation.
 
+## Rejected hypothesis: generative uncertainty does not predict collisions
+
+pi0.5 produces each action by integrating a flow ODE over ~10 denoising steps, and every trace
+stores that chain. If the policy were less certain in states where safe and unsafe behaviours are
+both plausible, the chain geometry would carry a risk signal — and a runtime monitor built on it
+would need no barrier, no obstacle geometry and no extra sensing. Tested with
+`experiments/uncertainty_monitor.py`, scoring per-episode chain statistics as AUC for predicting
+collision (AUC validated on synthetic data: 1.000 separable, 0.451 noise, 0.000 inverted).
+
+| signal | base, no shield (99 collisions) | r1, no shield (23 collisions) |
+|---|---|---|
+| denoising path length (mean) | 0.461 | 0.388 |
+| terminal step size (mean) | 0.495 | **0.350** |
+| chain spread (mean) | 0.461 | 0.373 |
+
+`logp` is degenerate in all 240 episodes and is excluded: the evaluations ran at `--noise-level 0`,
+a deterministic ODE with zero sampling variance, so per-step log-probabilities carry no information
+by construction.
+
+**No usable signal.** Base is indistinguishable from chance. The distilled policy shows a consistent
+INVERTED association across all three measures — AUC 0.35 inverts to 0.65, i.e. LOWER denoising
+uncertainty is associated with collision — but on 23 collision episodes that is roughly two standard
+errors from chance, and 0.65 is far short of a deployable monitor.
+
+Reported as negative. The suggestive reading, if the inversion is real, is that the distilled
+policy's failures are CONFIDENT ones: it commits decisively to a trajectory that happens to
+collide, rather than hesitating in ambiguous states. That would mean uncertainty-based monitoring is
+structurally unsuited to this failure mode, which is worth knowing before building one.
+
 ## Other limitations
 
 **The shield is end-effector only.** The barrier constrains EE spheres against obstacle spheres
