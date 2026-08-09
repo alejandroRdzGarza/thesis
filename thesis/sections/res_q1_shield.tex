@@ -1,0 +1,12 @@
+\section{Does the shield make \pizero{} safe?}\label{sec:res:shield}
+% base, no shield : TSR 58.3 [49.4, 66.8]   collision 82.5 [74.7, 88.3]   CAR 17.5
+% base + shield   : TSR 71.7 [63.0, 79.0]   collision 13.3 [ 8.4, 20.6]   CAR 86.7
+%
+% Note the shield RAISES success here (58.3 -> 71.7): collisions derail episodes, so preventing
+% them helps the task. Contrast with Sec.~\ref{sec:res:internalise}, where stacking the shield on an
+% already-avoidant policy COSTS success --- the two are consistent and worth explaining together.
+%
+% CAVEAT TO STATE YOURSELF: the barrier uses privileged ground-truth obstacle geometry, which
+% removes the perception gap a deployed system would face. Say this before a marker finds it.
+% Cross-check: base+shield CAR 86.7 against the AEGIS-matched reference of 87.5 --- agreement
+% within 0.8 points on an independently published baseline.

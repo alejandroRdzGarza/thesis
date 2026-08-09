@@ -1,0 +1,18 @@
+\section{Does the source of the demonstrations matter?}\label{sec:res:source}
+% THE BOUNDARY RESULT. Same benchmark, same student, same eval code, same held-out inits,
+% matched gradient budget (15{,}988 vs 16{,}140 steps).
+%
+% base+noCBF       TSR 58.3 [49.4, 66.8]   collision 82.5 [74.7, 88.3]
+% planner_A+noCBF  TSR 54.2 [45.3, 62.8]   collision 80.0 [72.0, 86.2]   <- flat against base
+% r1+noCBF         TSR 82.5 [74.7, 88.3]   collision 19.2 [13.1, 27.1]
+%
+% Claim: distilling safety from a FOREIGN expert fails; distilling it from the policy's own
+% shielded rollouts succeeds. State the caveat yourself: 6 of 24 scenes had zero planner demos,
+% so ~30 of 120 rollouts measure teacher COVERAGE rather than distillation --- report the
+% 18-scene slice alongside the 24-scene headline. It does not rescue the result.
+%
+% Mechanism: NOT observation aliasing (measured and refuted, see Sec.~\ref{sec:res:mechanism}).
+% Surviving candidates: distribution shift, and action-distribution mismatch (the planner emits
+% saturated P-control/QP deltas against \pizero{}'s flow-matched chunks).
+%
+% SLOT: randomised-teacher ablation (shielded teacher + randomised layouts) goes here when run.

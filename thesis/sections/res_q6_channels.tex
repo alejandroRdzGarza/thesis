@@ -1,0 +1,17 @@
+\section{Are there other channels for safety?}\label{sec:res:channels}
+% Every mechanism above acts on the ACTION. This section covers channels that do not.
+%
+% SLOT 1 --- language conditioning. Identical checkpoint, seed, inits and code; the only
+% difference is a clause appended to the instruction. A lever a VLA has and a classical
+% controller does not. (Running.)
+%
+% SLOT 2 --- best-of-N selection. Sample K chunks, execute the safest. Every candidate is a
+% genuine policy sample, so nothing is off-manifold; and because candidates are only SCORED,
+% the criterion can be whole-body, unlike a barrier that must be differentiable/projectable.
+%
+% NEGATIVE (done) --- CBF-guided sampling. Steering the denoising velocity rather than projecting
+% the output. Implemented and verified (lambda=1 reproduces the projection's endpoint exactly on a
+% synthetic barrier). On level-II scenes it never activates: the EE's closest approach is 0.231\,m
+% against a 0.15\,m barrier while collisions still occur, caused by the carried object and arm
+% links. Guidance INHERITS the end-effector scope of the barrier it steers by. Ties directly to
+% Sec.~\ref{sec:res:scope}.

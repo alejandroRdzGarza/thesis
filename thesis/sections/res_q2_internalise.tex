@@ -1,0 +1,20 @@
+\section{Can the shield's safety be internalised?}\label{sec:res:internalise}
+% HEADLINE. Numbers verbatim from figures/results_shielded_distillation.md.
+%
+% base, no shield : TSR 58.3 [49.4, 66.8]  collision 82.5 [74.7, 88.3]  CAR 17.5  ETS 138.6
+% base + shield   : TSR 71.7 [63.0, 79.0]  collision 13.3 [ 8.4, 20.6]  CAR 86.7  ETS 160.6
+% r1,  no shield  : TSR 82.5 [74.7, 88.3]  collision 19.2 [13.1, 27.1]  CAR 80.8  ETS 157.3
+% r1  + shield    : TSR 70.8 [62.2, 78.2]  collision  8.3 [ 4.6, 14.7]  CAR 91.7  ETS 170.0
+% r2,  no shield  : TSR 80.8 [72.9, 86.9]  collision 17.5 [11.7, 25.3]  CAR 82.5  ETS 158.8
+% r2  + shield    : TSR 72.5 [63.9, 79.7]  collision  9.2 [ 5.2, 15.7]  CAR 90.8  ETS 176.7
+%
+% Points to make, in order:
+%  1. CAR 17.5 -> 82.5 SHIELD-FREE, with TSR 58.3 -> 80.8. Both intervals disjoint from base.
+%  2. The knee is r1: r1 and r2 overlap on both metrics. r2 does not erode either --- worth
+%     saying explicitly, since DAgger erosion sank an earlier experiment.
+%  3. Stacking the shield COSTS success (82.5 -> 70.8). Explain: once the policy already avoids,
+%     projection pushes a coherent action off the policy's manifold.
+%  4. Cost: ETS 138.6 -> 157.3, ~14\% slower. Report it; do not bury it.
+%  5. Training-data characterisation (belongs here or in Method): shield active on a median 32\%
+%     of control steps, median 51 activations/episode, minimum 9, 0/186 demos below 5,
+%     mean correction norm 0.33 against actions bounded at +-1.

@@ -140,32 +140,20 @@
 
 % ============================================================================
 \chapter{Experiments and Results}\label{ch:results}
-% BUDGET ~9 pages. Largest chapter. One section per question, each stating the
-% question, the setup, the numbers, and the reading.
+% BUDGET ~9 pages. Organised by QUESTION, not by experiment: questions are stable, experiments
+% accumulate under them. Each section follows the same template --- setup, table, how to read it,
+% caveat --- so a new result is a fill-in rather than a restructure. Sections live in
+% thesis/sections/ so adding one is a new file plus one \input line.
 
-\section{Experimental setup}
-% Held-out init split, episode counts, Wilson CIs, hardware.
+\input{sections/res_setup}
+\input{sections/res_q1_shield}
+\input{sections/res_q2_internalise}
+\input{sections/res_q3_source}
+\input{sections/res_q4_scope}
+\input{sections/res_q5_mechanism}
+\input{sections/res_q6_channels}
+\input{sections/res_benchmark}
 
-\section{Does the shield make \pizero{} safe?}
-% The AEGIS-matched baseline. This is where you can claim to match/exceed AEGIS,
-% WITH the caveat that privileged ground-truth geometry removes their perception
-% gap — state that caveat yourself before a marker finds it.
-
-\section{Can scalar-reward RL internalise safety?}
-% Experiments 001-004. A characterised negative result: the learning signal and
-% the destabilising signal are the same knob. Say why this is structural.
-
-\section{Can the shield be distilled by imitation?}
-% Exp 005/005b and the full-grid run. The headline table goes here.
-
-\section{Does a privileged scripted teacher do better?}
-% The per-scene teacher work. Honest answer: no, and the action-distribution
-% mismatch explains why.
-
-\section{Ablations}
-% Success filter on/off; shield-active filter; number of DAgger rounds.
-
-% ============================================================================
 \chapter{Discussion}\label{ch:discussion}
 % BUDGET ~3 pages. "Critical analysis of method and results" is an explicit
 % marking criterion — this chapter is worth real marks. Do not skip the

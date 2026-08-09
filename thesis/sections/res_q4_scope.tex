@@ -1,0 +1,26 @@
+\section{What can the shield not reach?}\label{sec:res:scope}
+% Culprit breakdown, recovered from the run log (no re-run needed).
+% scene_object excluded: it fires 120/120 on every arm --- the obstacle resting on its surface
+% registers a permanent contact. The `collided' column reproduces the headline table exactly,
+% which validates the parse.
+%
+% arm            episodes  collided   gripper   arm_link   held_object
+% base_nocbf          120        99        71         17          36
+% base_cbf            120        16         0         15           0
+% r1_nocbf            120        23         7         13           9
+% r1_cbf              120        10         0          8           1
+% r2_nocbf            120        21         8          8           7
+% r2_cbf              120        11         0          9           0
+%
+%  1. The shield eliminates the EE channel entirely: 71 -> 0, and ZERO gripper collisions across
+%     all 360 shielded episodes. base+shield's residual is 15 of 16 arm_link.
+%     => 13.3\% is a SCOPE LIMIT, not a leak. Corollary: r1 at 17.5\% shield-free is near the
+%     practical ceiling of the supervision it received, not a degraded copy of a perfect teacher.
+%  2. arm_link falls 17 -> 8 in a channel the CBF DOES NOT CONSTRAIN. That cannot be the shield;
+%     it is the selection filter. => two transfer channels, separable by filter authority.
+%     Caution: 14.2\% [9.0, 21.6] vs 6.7\% [3.4, 12.7] OVERLAP --- suggestive, not established.
+%     The gripper result (71 -> 0) is not in doubt.
+%  3. Corroborated independently: the guided-sampling probe measured the EE never closer than
+%     0.231\,m to the obstacle on an episode that still collided.
+%
+% SLOT: held-object barrier (Direction C) goes here when run.

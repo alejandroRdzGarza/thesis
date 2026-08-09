@@ -1,0 +1,28 @@
+\section{What explains the improvement?}\label{sec:res:mechanism}
+% The selection-vs-distillation confound, and two rejected alternatives.
+%
+% (a) distillation: the policy imitates the shield's corrections   <- the claim
+% (b) selection: training on one's own successful episodes improves a policy regardless, and
+%     successes correlate with not knocking things over            <- would make the shield incidental
+%
+% Evidence against (b) being the whole story:
+%   - demos are pervasively shield-shaped (32\% of steps, correction norm 0.33)
+%   - cbf|r| falls 0.533 -> 0.265 after distillation: the shield finds LESS to correct, which
+%     success-filtering alone does not predict
+%   - but arm_link 17 -> 8 shows (b) is real in a channel the shield cannot reach
+%   => both operate; what is unquantified is their relative contribution WITHIN the gripper channel.
+%
+% REJECTED HYPOTHESIS 1 --- observation aliasing. Predicted the failing teacher's data would be
+% more aliased. Measured at matched observation radius (a k-NN ratio conflates aliasing with
+% sampling density; the planner's neighbours sit 4x closer):
+%   radius  0.10  0.25  0.50  1.00
+%   shielded 0.103 0.174 0.237 0.376
+%   planner  0.051 0.093 0.118 0.174   <- ~2x LESS aliased, the REVERSE of the prediction
+% Prediction was recorded before the planner number was computed.
+%
+% REJECTED HYPOTHESIS 2 --- generative uncertainty as a collision predictor. AUC pooled 0.423;
+% base 0.461 (chance); r1 0.350 (inverted, ~0.65 flipped) on only 23 collision episodes, ~2 SE
+% from chance. logp degenerate at noise level 0 by construction. Suggestive reading: the distilled
+% policy's failures are CONFIDENT ones.
+%
+% SLOT: unshielded-success control ablation (running); seed replication.
