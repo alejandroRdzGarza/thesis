@@ -129,40 +129,68 @@ def make_sphere_guidance_fn(ee_pos, obstacle_spheres, r_ee: float, action_scale,
     return make_cbf_guidance_fn(project, action_scale, **kw)
 
 
-def extract_action_scale(policy, action_dim: int = 7):
-    """The normalisation scale applied to actions, for mapping a delta into latent space.
+def extract_action_scale(policy, action_dim: int = 7, verbose: bool = True):
+    """The scale a guidance delta must be divided by to reach latent space — MEASURED, not guessed.
 
-    A guidance delta is a DIFFERENCE, and normalisation is affine, so only the scale matters — the
-    mean cancels. Getting this wrong silently mis-scales every correction, so the value found (and
-    where it came from) is printed rather than assumed.
+    Reading a named field is fragile: the stats live on an inner Normalize transform inside a
+    CompositeTransform (not on the composite), and openpi's Normalize has both mean/std and
+    quantile paths, so which field is authoritative depends on config. Guessing wrong does not
+    crash — it silently mis-scales every correction, which presents as "guidance is too weak"
+    and sends you tuning lambda against a bug.
 
-    openpi stores per-key stats whose scale field is `std` for mean/std normalisation or
-    (q99 - q01) for quantile normalisation, depending on the config. Both are handled; a scalar
-    fallback of 1.0 is returned with a loud warning if neither is found.
+    So this probes the real transform instead. Normalisation is affine, so pushing two known
+    action vectors through it and taking the difference recovers the scale exactly:
+
+        latent = (env - mean) / scale   =>   d(latent)/d(env) = 1 / scale
+
+    The named fields are read too and reported when they disagree, since a mismatch is a useful
+    signal that the config uses quantile normalisation.
     """
-    ns = getattr(policy, "_norm_stats", None) or getattr(policy, "norm_stats", None)
-    if ns is None:
-        for attr in ("_output_transform", "_input_transform"):
+    import numpy as np
+
+    ah = getattr(getattr(policy, "_model", None), "action_horizon", 10)
+    z = np.zeros((224, 224, 3), dtype=np.uint8)
+
+    def _norm(a):
+        d = {"observation/image": z, "observation/wrist_image": z,
+             "observation/state": np.zeros(8), "prompt": "probe",
+             "actions": np.asarray(a, dtype=np.float32)}
+        return np.asarray(policy._input_transform(d)["actions"], dtype=np.float64)
+
+    n0 = _norm(np.zeros((ah, action_dim)))
+    n1 = _norm(np.ones((ah, action_dim)))
+    slope = (n1 - n0)[0, :action_dim]                 # d(latent)/d(env) for a unit env delta
+    slope = np.where(np.abs(slope) < 1e-12, 1.0, slope)
+    scale = 1.0 / slope
+
+    if verbose:
+        print(f"  action_scale (measured through the transform): {np.round(scale, 5)}")
+        # Cross-check against the declared fields; disagreement usually means quantile norm.
+        ns = None
+        for attr in ("_input_transform", "_output_transform"):
             t = getattr(policy, attr, None)
-            ns = getattr(t, "norm_stats", None)
-            if ns:
+            for f in (getattr(t, "transforms", None) or []):
+                if getattr(f, "norm_stats", None) and "actions" in f.norm_stats:
+                    ns = f.norm_stats["actions"]
+                    break
+            if ns is not None:
                 break
-    if ns and "actions" in ns:
-        st = ns["actions"]
-        for field in ("std", "scale"):
-            v = getattr(st, field, None)
-            if v is not None:
-                v = np.asarray(v, dtype=np.float64).ravel()[:action_dim]
-                print(f"  action_scale from norm_stats['actions'].{field}: {np.round(v, 4)}")
-                return v
-        q01, q99 = getattr(st, "q01", None), getattr(st, "q99", None)
-        if q01 is not None and q99 is not None:
-            v = (np.asarray(q99, float) - np.asarray(q01, float)).ravel()[:action_dim]
-            print(f"  action_scale from norm_stats['actions'] q99-q01: {np.round(v, 4)}")
-            return v
-    print("  WARNING: could not read action norm stats — falling back to scale 1.0. Guidance "
-          "magnitude will be wrong if actions are normalised. Inspect policy norm_stats manually.")
-    return np.ones(action_dim)
+        if ns is not None:
+            for name in ("std", "q99"):
+                v = getattr(ns, name, None)
+                if v is None:
+                    continue
+                v = np.asarray(v, float).ravel()[:action_dim]
+                if name == "q99":
+                    q01 = np.asarray(getattr(ns, "q01"), float).ravel()[:action_dim]
+                    v = v - q01
+                    name = "q99-q01"
+                agree = np.allclose(v, scale, rtol=0.02)
+                print(f"    vs norm_stats {name:<8}: {np.round(v, 5)}  "
+                      f"{'MATCHES' if agree else 'differs'}")
+        else:
+            print("    (no norm_stats found to cross-check against)")
+    return scale
 
 
 def make_guidance_source(obstacle_spheres, r_ee: float, action_scale, dt: float = 1.0,
