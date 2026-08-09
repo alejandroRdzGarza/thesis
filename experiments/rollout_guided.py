@@ -27,6 +27,7 @@ collision rate alone.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import sys
 import time
@@ -35,10 +36,13 @@ from pathlib import Path
 
 import numpy as np
 
-# JAX/flax emit hundreds of DeprecationWarnings per rollout, which bury the progress output and
-# any real error. None are actionable from here.
-warnings.filterwarnings("ignore", category=DeprecationWarning)
-warnings.filterwarnings("ignore", category=UserWarning)
+# JAX/flax emit hundreds of DeprecationWarnings per rollout, burying the progress line and any
+# real error. filterwarnings() alone does NOT hold — jax/absl reset the filters during import — so
+# PYTHONWARNINGS is set before those imports happen. Both are kept: the env var covers the import
+# phase, the filters cover anything that re-enables them later.
+import os as _os
+_os.environ.setdefault("PYTHONWARNINGS", "ignore")
+warnings.filterwarnings("ignore")
 
 
 def main():
@@ -122,23 +126,30 @@ def main():
             gs = stats.summary()
             el = time.time() - _t0
             done = _n[0] * args.replan
-            sys.stdout.write(
+            # STDERR, not stdout: the runner prints per-step lines to stdout, and its newlines
+            # break a \r-updated line. stderr stays clean and interleaves with nothing.
+            sys.stderr.write(
                 f"\r  ep{ep}  step {done:>4}/{args.horizon}  "
                 f"{done/max(args.horizon,1):>4.0%}  {el:5.0f}s  "
                 f"guidance {gs['fired']}/{gs['calls']} ({gs['fire_rate']:>4.0%})  "
                 f"mean|d| {gs['mean_norm']:.4f}   ")
-            sys.stdout.flush()
+            sys.stderr.flush()
             return out
 
-        m = run_libero_trial(
-            env=env, episode_idx=ep, instruction=lang, initial_states=inits,
-            obstacles=[], goal_pos=None, auto_goal=True, use_geo_success=False,
-            use_cbf=bool(args.project),          # projection baseline uses the existing shield
-            vla="pi05", auto_detect_obstacle=True, aegis_faithful=True,
-            replan_steps=args.replan, horizon=args.horizon,
-            policy_fn=policy_fn, record_policy_trace=False, scene_name=tag)
+        # The runner's per-step prints go to a log rather than the terminal, so the progress line
+        # is readable. Nothing is lost — runner.log holds the full detail for debugging.
+        _runlog = open(out / "runner.log", "a")
+        with contextlib.redirect_stdout(_runlog):
+            m = run_libero_trial(
+                env=env, episode_idx=ep, instruction=lang, initial_states=inits,
+                obstacles=[], goal_pos=None, auto_goal=True, use_geo_success=False,
+                use_cbf=bool(args.project),      # projection baseline uses the existing shield
+                vla="pi05", auto_detect_obstacle=True, aegis_faithful=True,
+                replan_steps=args.replan, horizon=args.horizon,
+                policy_fn=policy_fn, record_policy_trace=False, scene_name=tag)
+        _runlog.close()
 
-        sys.stdout.write("\n"); sys.stdout.flush()
+        sys.stderr.write("\n"); sys.stderr.flush()
         s = m.summary()
         gs = stats.summary()
         rows.append({"episode": ep, "success": int(bool(s["goal_reached"])),
