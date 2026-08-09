@@ -23,6 +23,13 @@ NAME=${1:?usage: run_eval_arm.sh <arm-name> <checkpoint-dir> [cbf-flag, "" or --
 CKPT=${2:?}
 FLAG=${3:---no-cbf}
 
+# Source the project env FIRST. Without PYTHONPATH pointing at the SafeLIBERO fork every scene
+# dies with "LIBERO not installed" — after paying ~400 s to load the policy, so a full grid burns
+# hours producing nothing. The six-arm run had these set in the shell; relying on that is how this
+# script silently depended on state it never declared.
+_ENV="$(dirname "${BASH_SOURCE[0]}")/experiments/rl_env_runpod.sh"
+[ -f "$_ENV" ] && source "$_ENV"
+
 PY=${PY:-/workspace/openpi/.venv/bin/python}
 OUT=${OUT:-results_distill}
 # Defaults copied from run_shielded_distill.sh — change them and this arm stops being comparable.
@@ -33,6 +40,14 @@ EVAL_INITS=${EVAL_INITS:-$(seq 35 39)}     # held out: training used 0-34
 HORIZON=${HORIZON:-300}
 NUM_STEPS=${NUM_STEPS:-10}
 CONFIG=${CONFIG:-pi05_libero_cbf}
+
+# Fail fast rather than 24 times: one import check before the first policy load.
+if ! $PY -c "from libero.libero import benchmark; benchmark.get_benchmark_dict()['safelibero_spatial']" 2>/dev/null; then
+    echo "ERROR: SafeLIBERO suites not importable. PYTHONPATH=${PYTHONPATH:-unset}"
+    echo "  expected the fork on PYTHONPATH, e.g. /workspace/vlsa-aegis/safelibero or"
+    echo "  /workspace/libero_repo. Fix that, then re-run."
+    exit 1
+fi
 
 n_total=$(( $(wc -w <<<"$SUITES") * $(wc -w <<<"$LEVELS") * $(wc -w <<<"$TASKS") ))
 echo "=== eval $NAME  ckpt=$CKPT  flag='${FLAG}' ==="
