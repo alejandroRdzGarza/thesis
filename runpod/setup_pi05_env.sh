@@ -68,9 +68,39 @@ if [ ! -d "$LIBERO_DIR" ]; then
 fi
 cd "$OPENPI_DIR"
 uv pip install -e "$LIBERO_DIR"
-uv pip install bddl easydict cloudpickle lxml h5py imageio imageio-ffmpeg PyYAML
+# The SIM stack must go in the SAME venv as openpi. An earlier version installed mujoco/
+# robosuite/bddl into $VENV but left this line with only the small extras, so importing
+# openpi and robosuite together failed. `future` is required by bddl==1.0.1 and was in
+# neither list.
+uv pip install mujoco==3.2.3 robosuite==1.4.1 bddl==1.0.1 numpy==1.26.4 \
+    scipy opencv-python matplotlib Pillow imageio imageio-ffmpeg h5py PyYAML tqdm \
+    easydict cloudpickle lxml future
 
 echo ""
+echo "=== openpi thesis patches (pi05_libero_cbf config, PolicyWithLogprob, flow_sde) ==="
+# The nested openpi checkout is git-ignored and NOT backed up, so a fresh clone is stock upstream
+# and has none of the thesis hooks. Without this there is no pi05_libero_cbf config and no
+# _build_flow_velocity_fn, and every experiment script fails on import.
+if ! grep -q "pi05_libero_cbf" "$OPENPI_DIR/src/openpi/training/config.py" 2>/dev/null; then
+    (cd "$OPENPI_DIR" && git apply "$THESIS/openpi_patches/flow_sde_grpo.patch") \
+        && echo "  patches applied" \
+        || echo "  WARNING: patch failed — apply openpi_patches/ by hand (see its README)"
+else
+    echo "  already patched"
+fi
+
+echo "=== SafeLIBERO ==="
+# SafeLIBERO is a FORK of LIBERO carrying the safelibero_* suites. Stock LIBERO does not have
+# them, so PYTHONPATH must point here or make_libero_env raises KeyError: 'safelibero_spatial'.
+if [ -d /workspace/vlsa-aegis/safelibero ]; then
+    echo "  found at /workspace/vlsa-aegis/safelibero"
+    echo "  export PYTHONPATH=/workspace/vlsa-aegis/safelibero   # NOT /workspace/LIBERO"
+else
+    echo "  NOT PRESENT. Copy it from a pod that has it (it is not on GitHub):"
+    echo "    rsync -avz -e 'ssh -p PORT -i KEY' root@OLD_POD:/workspace/vlsa-aegis /tmp/"
+    echo "    rsync -avz -e 'ssh -p PORT -i KEY' /tmp/vlsa-aegis root@NEW_POD:/workspace/"
+fi
+
 echo "=== Done! No separate venv needed — use openpi's .venv for everything ==="
 echo ""
 echo "=== Terminal 1 — start the π0.5 server (checkpoint auto-downloads ~10GB): ==="
