@@ -143,8 +143,10 @@ def extract_action_scale(policy, action_dim: int = 7, verbose: bool = True):
 
         latent = (env - mean) / scale   =>   d(latent)/d(env) = 1 / scale
 
-    The named fields are read too and reported when they disagree, since a mismatch is a useful
-    signal that the config uses quantile normalisation.
+    The named fields are read too and compared. On pi05_libero the measured slope matches
+    (q99-q01)/2 exactly — the config normalises by quantiles onto [-1, 1] — while `std` is 2.5x
+    smaller. Reading `std` would therefore have applied every correction at 40% of its intended
+    size: no crash, just guidance that looks too weak to work.
     """
     import numpy as np
 
@@ -182,9 +184,12 @@ def extract_action_scale(policy, action_dim: int = 7, verbose: bool = True):
                     continue
                 v = np.asarray(v, float).ravel()[:action_dim]
                 if name == "q99":
+                    # Quantile normalisation maps [q01, q99] -> [-1, 1], i.e.
+                    # x_norm = 2(x - q01)/(q99 - q01) - 1, so the scale is HALF the range.
+                    # Confirmed on pi05_libero: the measured slope equals (q99-q01)/2 exactly.
                     q01 = np.asarray(getattr(ns, "q01"), float).ravel()[:action_dim]
-                    v = v - q01
-                    name = "q99-q01"
+                    v = (v - q01) / 2.0
+                    name = "(q99-q01)/2"
                 agree = np.allclose(v, scale, rtol=0.02)
                 print(f"    vs norm_stats {name:<8}: {np.round(v, 5)}  "
                       f"{'MATCHES' if agree else 'differs'}")
