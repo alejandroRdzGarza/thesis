@@ -28,9 +28,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
+import time
+import warnings
 from pathlib import Path
 
 import numpy as np
+
+# JAX/flax emit hundreds of DeprecationWarnings per rollout, which bury the progress output and
+# any real error. None are actionable from here.
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
 
 
 def main():
@@ -103,7 +111,24 @@ def main():
         pol = GuidedPolicy(policy, num_steps=args.num_steps, noise_level=0.0, sde_type="cps",
                            seed=0, guidance_source=guidance_source,
                            lam=(0.0 if args.project else args.lam))
-        policy_fn = build_policy_fn(pol)
+        _inner = build_policy_fn(pol)
+        _t0, _n = time.time(), [0]
+
+        def policy_fn(*a, **k):
+            """Live one-line progress. The runner's own per-step prints are interleaved with JAX
+            noise, so this is the only place a human can see whether the rollout is moving."""
+            out = _inner(*a, **k)
+            _n[0] += 1
+            gs = stats.summary()
+            el = time.time() - _t0
+            done = _n[0] * args.replan
+            sys.stdout.write(
+                f"\r  ep{ep}  step {done:>4}/{args.horizon}  "
+                f"{done/max(args.horizon,1):>4.0%}  {el:5.0f}s  "
+                f"guidance {gs['fired']}/{gs['calls']} ({gs['fire_rate']:>4.0%})  "
+                f"mean|d| {gs['mean_norm']:.4f}   ")
+            sys.stdout.flush()
+            return out
 
         m = run_libero_trial(
             env=env, episode_idx=ep, instruction=lang, initial_states=inits,
@@ -113,6 +138,7 @@ def main():
             replan_steps=args.replan, horizon=args.horizon,
             policy_fn=policy_fn, record_policy_trace=False, scene_name=tag)
 
+        sys.stdout.write("\n"); sys.stdout.flush()
         s = m.summary()
         gs = stats.summary()
         rows.append({"episode": ep, "success": int(bool(s["goal_reached"])),

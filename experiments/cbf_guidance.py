@@ -78,15 +78,22 @@ def make_cbf_guidance_fn(cbf_project, action_scale, n_guide: int = 3,
     scale = np.asarray(action_scale, dtype=np.float64)
     scale = np.where(np.abs(scale) < 1e-8, 1.0, scale)     # never divide by a degenerate scale
 
+    nd = len(scale)
+
     def guidance_fn(x0_pred, sigma):
         x0 = np.asarray(x0_pred, dtype=np.float64)
         flat = x0.reshape(-1, x0.shape[-1]) if x0.ndim > 1 else x0[None, :]
         g = np.zeros_like(flat)
 
+        # The LATENT action is zero-padded to the model's action_dim (32 for pi0.5) while the env
+        # action — and therefore the barrier and the scale — are 7-D. Slice to the real dims;
+        # broadcasting (32,) against (7,) raised inside the policy, and the runner caught it and
+        # silently held the last action, so guidance appeared to run while doing nothing at all.
         # Only the first action's safety is defined against the CURRENT state.
-        u_nom_env = flat[0] * scale
-        u_safe_env = np.asarray(cbf_project(u_nom_env), dtype=np.float64)
-        delta_latent = (u_safe_env - u_nom_env) / scale
+        u_nom_env = flat[0, :nd] * scale
+        u_safe_env = np.asarray(cbf_project(u_nom_env), dtype=np.float64)[:nd]
+        delta_latent = np.zeros(flat.shape[1], dtype=np.float64)
+        delta_latent[:nd] = (u_safe_env - u_nom_env) / scale
         n = float(np.linalg.norm(delta_latent))
         if stats is not None:
             stats.note(n)
