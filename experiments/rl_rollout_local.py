@@ -74,6 +74,11 @@ def main():
                          "partial load handles a base checkpoint at round 0")
     ap.add_argument("--checkpoint", required=True,
                     help="checkpoint dir (contains params/ + assets/) — base or LoRA-updated")
+    ap.add_argument("--prompt-suffix", default="",
+                    help="text appended to the task instruction, e.g. \" without touching the "
+                         "pitcher\". Tests whether the LANGUAGE channel can carry a safety "
+                         "constraint — a lever a VLA has and a classical controller does not. "
+                         "Costs nothing at train or inference time; the policy is untouched.")
     ap.add_argument("--suite", default="safelibero_object",
                     help="LIBERO/SafeLIBERO suite name")
     ap.add_argument("--level", default="II", choices=["I", "II"], help="SafeLIBERO safety level")
@@ -156,7 +161,7 @@ def main():
 
     run_kwargs = dict(
         obstacles=[],
-        instruction=_lang,
+        instruction=(_lang + args.prompt_suffix),
         goal_pos=None,
         auto_goal=True,          # resolve BDDL goal for distance shaping in the reward
         use_geo_success=False,   # success = env.check_success ONLY (authoritative)
