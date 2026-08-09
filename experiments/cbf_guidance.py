@@ -207,6 +207,7 @@ def extract_action_scale(policy, action_dim: int = 7, verbose: bool = True):
 
 def make_guidance_source(obstacle_spheres, r_ee: float, action_scale, dt: float = 1.0,
                          margin: float = 0.0, n_guide: int = 3, decay: float = 0.5,
+                         enable_radius: float = 0.30,
                          stats: GuidanceStats | None = None):
     """A `guidance_source(obs_dict) -> guidance_fn` for GuidedPolicy.
 
@@ -223,9 +224,12 @@ def make_guidance_source(obstacle_spheres, r_ee: float, action_scale, dt: float 
     def guidance_source(obs_dict):
         state = np.asarray(obs_dict["observation/state"], dtype=np.float64).ravel()
         ee = state[:3]
-        # Skip episodes/queries where nothing is close enough for one action step to reach.
-        reach = dt * 1.0 + r_ee + margin
-        if not any(np.linalg.norm(ee - c) - r <= reach for c, r in spheres):
+        # Gate on `enable_radius`, NOT on dt. These are different quantities: dt scales the
+        # DISPLACEMENT ESTIMATE (how far one action moves the EE), while the gate only asks
+        # whether the obstacle is near enough to be worth consulting. Deriving the gate from dt
+        # meant that correcting dt from 1.0 to 0.05 shrank it from 1.05 m to 0.10 m and guidance
+        # stopped being called at all — 0/0, which reads as "inert wiring", not "nothing to do".
+        if not any(np.linalg.norm(ee - c) - r <= enable_radius for c, r in spheres):
             return None
         return make_sphere_guidance_fn(ee, spheres, r_ee=r_ee, action_scale=action_scale,
                                        dt=dt, margin=margin, n_guide=n_guide, decay=decay,

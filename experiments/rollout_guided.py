@@ -63,6 +63,10 @@ def main():
     ap.add_argument("--margin", type=float, default=0.0,
                     help="extra clearance beyond r_ee + r_obstacle, in metres")
     ap.add_argument("--r-ee", type=float, default=0.05, help="EE bounding-sphere radius")
+    ap.add_argument("--enable-radius", type=float, default=0.30,
+                    help="consult the barrier when the obstacle surface is within this many metres "
+                         "of the EE. Independent of --dt: dt scales the displacement estimate, this "
+                         "only decides when guidance is worth evaluating.")
     ap.add_argument("--dt", type=float, default=1.0,
                     help="action-to-displacement scale used by the barrier. The env action is an "
                          "OSC delta, so this converts it to the metres the EE would move.")
@@ -110,7 +114,8 @@ def main():
                 spheres = [(np.asarray(ob.pos, float), float(ob.safety_radius))]
                 guidance_source = make_guidance_source(
                     spheres, r_ee=args.r_ee, action_scale=scale, dt=args.dt,
-                    margin=args.margin, n_guide=args.n_guide, stats=stats)
+                    margin=args.margin, n_guide=args.n_guide,
+                    enable_radius=args.enable_radius, stats=stats)
 
         pol = GuidedPolicy(policy, num_steps=args.num_steps, noise_level=0.0, sde_type="cps",
                            seed=0, guidance_source=guidance_source,
