@@ -57,6 +57,17 @@ class GuidedPolicy:
         self.guidance_source = guidance_source
         self._rng = jax.random.key(seed)
 
+        # Compile the two halves of the forward ONCE. Calling _build_flow_velocity_fn's closure
+        # directly runs the transformer eagerly — measured at 4.3 s per denoising step, ~30x the
+        # jitted path. Wrapping that closure in jit does not help: it is rebuilt per query, so every
+        # query is a fresh compilation cache entry. Passing the cache as an argument instead means
+        # one compile total, reused across all queries (shapes are constant).
+        from openpi.shared import nnx_utils
+        from experiments import pi0_velocity_jit
+        pi0_velocity_jit.install()
+        self._jit_prefix = nnx_utils.module_jit(self._model.prefix_cache)
+        self._jit_vel = nnx_utils.module_jit(self._model.velocity_from_cache)
+
     def infer_with_logprob(self, obs: dict, *, noise=None) -> dict:
         import jax
         import jax.numpy as jnp
@@ -78,7 +89,9 @@ class GuidedPolicy:
             n = jnp.asarray(noise)
             x = n[None, ...] if n.ndim == 2 else n
 
-        velocity_fn = self._model._build_flow_velocity_fn(observation)
+        kv_cache, prefix_mask = self._jit_prefix(observation)
+        def velocity_fn(x_t, sigma):
+            return self._jit_vel(observation, kv_cache, prefix_mask, x_t, sigma)
         sigmas = _fsde.make_sigmas(self.num_steps)
         sigma_max = float(sigmas[1]) if len(sigmas) > 1 else 1.0
 
