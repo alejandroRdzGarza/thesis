@@ -85,7 +85,17 @@ keep = random.sample(rows, min($N, len(rows)))
 out = pathlib.Path("$MATCHED_DEMOS"); out.mkdir(parents=True, exist_ok=True)
 with open(out / "manifest.csv", "w", newline="") as f:
     w = csv.DictWriter(f, fieldnames=rows[0].keys()); w.writeheader(); w.writerows(keep)
-print(f"  matched set: {len(keep)} demos")
+# flow_bc_train GLOBS *_trace.npz inside the round dir and only then filters by the manifest, so a
+# directory holding just a manifest yields zero traces ("no *_trace.npz under ..."). Symlink the
+# kept traces in: Path.resolve() follows the link back to the original, so the manifest's absolute
+# paths still match and nothing is copied.
+n_link = 0
+for r in keep:
+    src = pathlib.Path(r["trace_path"])
+    dst = out / src.name
+    if src.exists() and not dst.exists():
+        dst.symlink_to(src); n_link += 1
+print(f"  matched set: {len(keep)} demos ({n_link} traces symlinked)")
 EOF
 
 # ── 3. train both arms, identical settings ───────────────────────────────────────────────
