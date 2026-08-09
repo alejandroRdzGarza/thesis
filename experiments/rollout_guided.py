@@ -137,7 +137,8 @@ def main():
                 f"\r  ep{ep}  step {done:>4}/{args.horizon}  "
                 f"{done/max(args.horizon,1):>4.0%}  {el:5.0f}s  "
                 f"guidance {gs['fired']}/{gs['calls']} ({gs['fire_rate']:>4.0%})  "
-                f"mean|d| {gs['mean_norm']:.4f}   ")
+                f"mean|d| {gs['mean_norm']:.4f}  "
+                f"min_gap {gs['min_gap'] if gs['min_gap'] is None else round(gs['min_gap'], 3)}   ")
             sys.stderr.flush()
             return out
 
@@ -179,9 +180,11 @@ def main():
     print(f"\n  TSR {succ}/{n} = {summary['tsr']:.0%}   CAR {summary['car']:.0%}   "
           f"guidance fired {fired}/{calls} ({summary['guidance_fire_rate']:.0%})")
     if calls and fired == 0:
-        print("  WARNING: guidance never fired. A null result here says the wiring is inert, not "
-              "that the method failed — check obstacle detection, --dt and --margin before "
-              "concluding anything.")
+        _mg = summary["rows"][0].get("g_min_gap")
+        print(f"  WARNING: guidance never fired. Closest the predicted EE came to the obstacle "
+              f"surface was {_mg} m.\n  If that is comfortably positive the EE genuinely never "
+              f"threatened the obstacle — the collision came from the held object or an arm link, "
+              f"which this\n  EE-only barrier cannot address. If it is near zero, raise --margin.")
     print(f"  -> {out}/summary.json\n")
 
 

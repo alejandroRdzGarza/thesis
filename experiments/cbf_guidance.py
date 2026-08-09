@@ -41,9 +41,15 @@ class GuidanceStats:
     calls: int = 0
     fired: int = 0
     norms: list = field(default_factory=list)
+    # Closest the PREDICTED next EE position came to the obstacle surface. Without this, a 0%
+    # fire rate cannot be told apart from "the threshold is too tight" — both look identical in
+    # the headline numbers, and only one of them is a reason to change a flag.
+    min_gap: float = float("inf")
 
-    def note(self, delta_norm: float):
+    def note(self, delta_norm: float, gap: float | None = None):
         self.calls += 1
+        if gap is not None:
+            self.min_gap = min(self.min_gap, float(gap))
         if delta_norm > 1e-9:
             self.fired += 1
             self.norms.append(float(delta_norm))
@@ -55,6 +61,7 @@ class GuidanceStats:
             "fire_rate": (self.fired / self.calls) if self.calls else 0.0,
             "mean_norm": float(np.mean(self.norms)) if self.norms else 0.0,
             "max_norm": float(np.max(self.norms)) if self.norms else 0.0,
+            "min_gap": (float(self.min_gap) if self.min_gap < 1e8 else None),
         }
 
 
@@ -124,6 +131,10 @@ def make_sphere_guidance_fn(ee_pos, obstacle_spheres, r_ee: float, action_scale,
     def project(u_env):
         u = np.asarray(u_env, dtype=np.float64).copy()
         nxt = ee + dt * u[:3]
+        if kw.get("stats") is not None:
+            g = min(float(np.linalg.norm(nxt - np.asarray(c, float))) - (r_ee + float(r) + margin)
+                    for c, r in obstacle_spheres)
+            kw["stats"].min_gap = min(kw["stats"].min_gap, g)
         for c_j, r_j in obstacle_spheres:
             d = nxt - np.asarray(c_j, dtype=np.float64)
             dist = float(np.linalg.norm(d))
