@@ -219,10 +219,113 @@ Three independent measurements now point at the same conclusion.
 
 ## 4.6 What explains the improvement?
 
-PENDING — control ablation running. Draft the confound framing, the two rejected hypotheses
-(aliasing; generative uncertainty), and leave the control result as a gap to fill.
+Section 4.3 showed that distilling the shielded policy's own clean rollouts makes it dramatically
+safer without the shield. It does not, on its own, establish *why*. The demonstrations were
+filtered on three properties at once — the shield fired, the episode succeeded, and nothing was
+displaced — and two mechanisms are bundled inside that filter.
+
+Under the first, **distillation**, the policy imitates the shield's avoidance corrections. This is
+the claim of this work. Under the second, **selection**, the improvement comes from training a
+policy on its own successful episodes, which is a known self-improvement effect requiring no shield
+at all; successful episodes also happen to be the ones in which nothing was knocked over. If the
+second mechanism accounts for the result, the shield is incidental and the contribution is a
+rediscovery of filtered behaviour cloning.
+
+Nothing in the six-arm evaluation distinguishes them, so a matched control was run.
+
+### The matched control
+
+Demonstrations were collected with the shield **switched off**, filtered by exactly the same
+criteria — succeeded and displaced nothing — and used to train a student with identical
+hyperparameters. The shielded pool was then subsampled to the same size, so the two arms differ in
+one respect only: whether the shield was active while the demonstrations were being generated.
+
+| arm | demos | shield during collection | TSR (95% CI) | collision (95% CI) |
+|---|---|---|---|---|
+| undistilled base | — | — | 58.3% [49.4, 66.8] | 82.5% [74.7, 88.3] |
+| control | 85 | **off** | 50.0% [41.2, 58.8] | **84.2% [76.6, 89.6]** |
+| matched | 85 | **on** | 75.8% [67.4, 82.6] | **26.7% [19.6, 35.2]** |
+
+**Success-filtering alone achieves nothing.** The control sits at 84.2% collision, statistically
+indistinguishable from the undistilled base policy at 82.5%. Training a policy on its own
+successful, collision-free episodes did not make it safer on this benchmark.
+
+**The shield's corrections are what transfers.** At the same demonstration count and under the same
+filter, the shielded arm reaches 26.7%, with a confidence interval disjoint from the control's. The
+difference between the two arms is attributable to the shield and to nothing else in the pipeline.
+
+This is the experiment that answers the most natural objection to Section 4.3, and it answers it
+directly rather than by argument.
+
+### Two further pieces of evidence
+
+The conclusion is corroborated by two measurements taken for other purposes. First, the CBF
+activation proxy falls from 0.533 to 0.265 between the shielded base and the shielded distilled
+policy: after distillation the shield finds materially less to correct. Success-filtering alone
+does not predict this — a policy that merely completes tasks more often would not require *less*
+safety intervention. Second, the demonstrations are pervasively shield-shaped, with the barrier
+active on a median 32% of control steps and a mean correction norm of 0.33 against actions bounded
+at ±1, so the imitated action distribution differs substantially from the base policy's own.
+
+### A nuance worth preserving
+
+The control is not uniformly inert. Its per-body attribution shows arm-link collisions falling from
+17 to 6 while gripper collisions remained high at 44, which is why the total did not move. Outcome
+selection therefore *does* transfer avoidance in the channel the barrier cannot express — exactly
+the second transfer channel identified in Section 4.5 — but it is not sufficient on its own. The
+two mechanisms are complementary rather than competing, and only one of them addresses the
+end-effector channel that dominates the collision count.
+
+### The cost of collecting without a shield
+
+One further number deserves reporting. The unshielded collection retained 85 usable demonstrations
+from 480 rollouts, a yield of 18%, against 39% for the shielded collection. Safe demonstrations are
+roughly twice as expensive to obtain without a shield. This is a second, independent sense in which
+the shield earns its place: beyond supplying the corrections that transfer, it makes the collection
+of a safe demonstration set tractable in the first place.
 
 ---
+
+### Two alternative explanations tested and rejected
+
+Section 4.4 established that distilling from a foreign expert fails while self-distillation
+succeeds. Two explanations for that boundary were tested directly, and both were rejected.
+
+**Observation aliasing.** Earlier analysis in this project attributed the failure to the policy's
+observation space: π0.5 sees an image and eight proprioceptive dimensions, with no joint angles, so
+a correction depending on the full arm configuration is not a function of anything the policy
+observes, and behaviour cloning would average contradictory targets. This was asserted but never
+measured, and it is measurable from the demonstration files alone. For each dataset, samples whose
+observations are near neighbours were found and the disagreement between their target actions
+measured, normalised by the disagreement between random pairs. Comparison is made at matched
+observation radius rather than matched neighbour count, because a nearest-neighbour ratio conflates
+aliasing with sampling density and the planner's trajectories are far denser.
+
+| radius (z-scored) | shielded (distils) | planner (does not) |
+|---|---|---|
+| 0.10 | 0.103 | 0.051 |
+| 0.25 | 0.174 | 0.093 |
+| 0.50 | 0.237 | 0.118 |
+| 1.00 | 0.376 | 0.174 |
+
+The ordering is the reverse of the prediction. The planner's demonstrations are roughly twice as
+*well* determined by the observation at every radius: the teacher that fails to distil has the
+cleaner observation-to-action mapping, and the teacher that succeeds is the more aliased of the
+two. In hindsight the direction is unsurprising — a scripted planner is close to a deterministic
+function of state — but it means aliasing is not the binding constraint, and the prior explanation
+does not survive contact with the data. The prediction was recorded before the planner figure was
+computed. The surviving candidates are distribution shift and action-distribution mismatch.
+
+**Generative uncertainty as a collision predictor.** π0.5 produces each action by integrating a
+flow ODE, and every rollout stores that denoising chain. If the policy were less certain in states
+where safe and unsafe behaviours are both plausible, the chain geometry would carry a risk signal,
+and a runtime monitor could use it with no barrier and no obstacle geometry. Scored as AUC for
+predicting whether an episode collided, the result is negative: 0.461 for the base policy, at
+chance. The distilled policy shows a consistent inverted association across all three chain
+statistics (AUC 0.350, i.e. 0.65 when flipped — lower uncertainty associated with collision), but
+on 23 collision episodes that is roughly two standard errors from chance and far short of
+deployable. The suggestive reading, if real, is that the distilled policy's failures are *confident*
+ones, which would make uncertainty-based monitoring structurally unsuited to this failure mode.
 
 ## 4.7 Are there other channels for safety?
 
@@ -318,5 +421,31 @@ PENDING — not yet run.
 
 ## 4.8 Two defects in the benchmark
 
-PENDING — non-determinism from contact-buffer overflow (23% of episodes), and phantom collisions
-from unsettled objects (102 mm). Both fixed; both affect anyone else's level-II numbers.
+Two defects in SafeLIBERO were found while establishing the measurements above. Both affect any
+level-II result produced with the unmodified benchmark, so they are reported here rather than
+buried in an appendix.
+
+**Non-determinism from contact-buffer overflow.** SafeLIBERO parks the obstacles not used by the
+current episode off-scene, in a heap. Left collidable, that heap overflows MuJoCo's contact buffer,
+and on overflow MuJoCo discards contacts in an order-dependent way. The consequence is that
+identical episodes score differently: re-running 26 episodes produced a different success or
+collision verdict in 6 of them, a 23% disagreement rate. Since single-episode outcomes feed every
+aggregate reported here, this had to be fixed before any number could be trusted. Clearing the
+collision flags on parked bodies removes the overflow, after which repeated runs are byte-identical
+— verified across five repetitions.
+
+**Phantom collisions from unsettled objects.** Several scenes spawn objects in unsupported poses,
+which then fall under gravity while the arm is stationary. A moka pot was measured falling 102 mm
+in this way. Because the collision metric is defined as obstacle displacement beyond one
+millimetre, that motion is attributed to the robot, and the episode is scored as a collision before
+the policy has acted. Allowing the scene to settle for 60 steps before measurement begins reduces
+the residual displacement to 0.00 mm.
+
+The ordering of the two fixes matters: settling must run *after* the parked obstacles have been
+made non-collidable, or the settling steps themselves overflow the contact buffer and reintroduce
+the non-determinism they were meant to precede.
+
+Neither defect is exotic, and neither announces itself — the first produces plausible but
+irreproducible numbers, the second produces plausible but inflated ones. Both are reported so that
+level-II results from this benchmark can be compared on a common footing.
+
