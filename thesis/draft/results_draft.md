@@ -232,10 +232,23 @@ a channel none of these use, and one a classical controller does not possess at 
 instruction itself. This section asks whether safety can be requested in language.
 
 The experiment is minimal by design. The same checkpoint, the same seed, the same held-out initial
-states and the same evaluation code were used for both arms; the only difference is a clause
-appended to the task instruction, ", being careful not to touch or knock over any other objects".
-Twelve level-II scenes were evaluated at five initial states each, giving n = 60 per arm. Level II
-was chosen because collisions concentrate there, making it the sensitive test.
+states and the same evaluation code were used for both arms; the only difference is a single clause
+appended to the task instruction. Twelve level-II scenes were evaluated at five initial states
+each, giving n = 60 per arm. Level II was chosen because collisions concentrate there, making it
+the sensitive test.
+
+The exact strings were, for a representative scene:
+
+> **plain:** `pick up the black bowl between the plate and the ramekin and place it on the plate`
+>
+> **safety:** `pick up the black bowl between the plate and the ramekin and place it on the plate,
+> being careful not to touch or knock over any other objects`
+
+The suffix is reproduced verbatim because the result is a negative, and a negative about language
+is only as strong as the language tested. The phrasing chosen is generic: it names no object, gives
+no spatial reference, and states the constraint as a manner adverbial ("being careful not to")
+rather than as a hard prohibition. Each of those is a design choice that could plausibly matter,
+and none was varied.
 
 | condition | n | TSR (95% CI) | collision (95% CI) | ETS |
 |---|---|---|---|---|
@@ -267,8 +280,28 @@ assumed to transfer into safe behaviour without verification.
 
 *Caveats.* Confidence intervals for TSR overlap, so the capability cost is suggestive rather than
 established. ETS is computed over successful rollouts only, so with different success counts the
-two means are not taken over the same episodes. A single phrasing was tested; a clause naming the
-specific obstacle might ground better than a generic one, and that remains untested.
+two means are not taken over the same episodes.
+
+Most importantly, **one phrasing was tested, and the result is a claim about that phrasing.** The
+conclusion supported is that this generic clause does not ground; the conclusion NOT supported is
+that language cannot carry a safety constraint. Several variations are untested and each attacks a
+different hypothesis about why it failed:
+
+- **Naming the obstacle** — `without touching the wine bottle` rather than "any other objects". If
+  the failure is that the policy cannot resolve which objects are meant, naming should fix it, and
+  the object names are available from the scene.
+- **Spatial grounding** — `the wine bottle on your left`. Tests whether the model can bind a
+  constraint to a referent it must locate visually, which is the harder and more useful case.
+- **Prohibition rather than manner** — `do not touch anything else` instead of "being careful not
+  to". The observed effect was a general slowdown, which is what a manner adverbial would predict;
+  an imperative might elicit avoidance instead of hesitancy.
+- **Positive rather than negative framing** — `keep clear of the other objects`. Negation is known
+  to be handled poorly by language-conditioned models, and the tested phrasing contains two
+  negations ("not to touch or knock over").
+
+That last point is the one I would test first. The measured behaviour — slower, less successful,
+equally collision-prone — is precisely what one would expect if the model registered the clause's
+cautious register while failing to parse its negated content.
 
 ### CBF-guided sampling: steering generation rather than correcting it
 
