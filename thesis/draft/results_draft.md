@@ -226,8 +226,60 @@ PENDING — control ablation running. Draft the confound framing, the two reject
 
 ## 4.7 Are there other channels for safety?
 
-PENDING — prompt experiment running; best-of-N not yet implemented.
-CBF-guided sampling is a completed negative and can be written now.
+Every mechanism examined so far acts on the action: a shield projects it, a guided sampler steers
+it, behaviour cloning reshapes the policy that produces it. A vision-language-action model exposes
+a channel none of these use, and one a classical controller does not possess at all — the
+instruction itself. This section asks whether safety can be requested in language.
+
+The experiment is minimal by design. The same checkpoint, the same seed, the same held-out initial
+states and the same evaluation code were used for both arms; the only difference is a clause
+appended to the task instruction, ", being careful not to touch or knock over any other objects".
+Twelve level-II scenes were evaluated at five initial states each, giving n = 60 per arm. Level II
+was chosen because collisions concentrate there, making it the sensitive test.
+
+| condition | n | TSR (95% CI) | collision (95% CI) | ETS |
+|---|---|---|---|---|
+| plain instruction | 60 | 66.7% [54.1, 77.3] | 70.0% [57.5, 80.1] | 132.4 |
+| safety clause appended | 60 | 55.0% [42.5, 66.9] | 68.3% [55.8, 78.7] | 162.4 |
+
+**The clause produces no safety benefit.** Collisions fall by 1.7 percentage points, with
+confidence intervals that are almost coincident. Whatever the policy does in response to the
+instruction, it does not avoid the obstacle more often.
+
+**But the policy is not ignoring the text.** Execution time rises from 132.4 to 162.4 steps, a 23%
+slowdown, and success falls by 11.7 points. The per-body attribution shows no meaningful
+redistribution either (gripper 4 to 7, arm link 8 to 5, held object 5 to 6, all within noise). The
+policy responds to the safety clause by acting more slowly and completing fewer tasks, without
+touching anything less often.
+
+The natural reading is that the safety language elicits a general behavioural prior — hesitancy,
+reduced speed — rather than a grounded avoidance behaviour. The model has learned that
+safety-flavoured instructions correspond to cautious-looking motion, but that association is not
+connected to the geometry of the scene. It produces the appearance of caution without its
+substance.
+
+This is a characterised negative rather than an empty one, and the distinction matters: it
+separates "the model ignores safety language" from "the model responds to safety language but does
+not ground it in collision avoidance", and only the second tells you anything about what such
+models have learned. It also bears directly on any pipeline that plans to encode operator
+knowledge as natural-language annotations — safety intent expressed in language should not be
+assumed to transfer into safe behaviour without verification.
+
+*Caveats.* Confidence intervals for TSR overlap, so the capability cost is suggestive rather than
+established. ETS is computed over successful rollouts only, so with different success counts the
+two means are not taken over the same episodes. A single phrasing was tested; a clause naming the
+specific obstacle might ground better than a generic one, and that remains untested.
+
+### CBF-guided sampling: steering generation rather than correcting it
+
+PENDING — write up as a scope-limited negative. lambda=1 reproduces the projection endpoint exactly
+on a synthetic barrier; on level-II scenes guidance never activates because the end-effector's
+closest approach is 0.231 m against a 0.15 m barrier while collisions still occur. Guidance
+inherits the end-effector scope of the barrier it steers by. Ties to Section 4.5.
+
+### Best-of-N selection
+
+PENDING — not yet run.
 
 ---
 
