@@ -72,7 +72,8 @@ def main():
 
     from openpi.training import config as _config
     from openpi.policies.policy_logprob import PolicyWithLogprob
-    from experiments.libero_runner import make_libero_env, run_libero_trial
+    from experiments.libero_runner import (make_libero_env, run_libero_trial,
+                                           detect_safelibero_obstacle)
     from experiments.load_policy import create_policy_partial
     from experiments.rl_rollout_local import build_policy_fn
     from experiments.best_of_n import BestOfNSelector, verify_state_restore
@@ -100,8 +101,12 @@ def main():
 
     rows = []
     for ep in args.episodes:
+        env.reset(); obs0 = env.set_init_state(inits[ep])
+        ob = detect_safelibero_obstacle(env, obs0)
+        body = getattr(ob, "body_name", None) or getattr(ob, "name", None) if ob else None
+        print(f"  ep{ep}: obstacle body = {body}", flush=True)
         sel = BestOfNSelector(env, base_policy_fn, k=args.k, exec_steps=args.replan,
-                              score_full_chunk=args.score_full_chunk)
+                              score_full_chunk=args.score_full_chunk, obstacle_body=body)
 
         # Candidate diversity on the first few queries: if every query yields K safe or K unsafe,
         # selection cannot act and the NOISE LEVEL is wrong — a property of the setup, not a
@@ -111,8 +116,8 @@ def main():
             r = inner(*a, **k)
             if seen["n"] < 3:
                 ks = sel.stats["k_safe"][-1]
-                print(f"    [diversity] query {seen['n']+1}: {ks}/{args.k} candidates safe",
-                      flush=True)
+                sys.stderr.write(f"    [diversity] query {seen['n']+1}: "
+                                 f"{ks}/{args.k} candidates safe\n"); sys.stderr.flush()
                 seen["n"] += 1
             return r
 

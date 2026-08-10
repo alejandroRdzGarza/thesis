@@ -181,22 +181,46 @@ class BestOfNSelector:
     """
 
     def __init__(self, env, policy_fn, k: int = 4, exec_steps: int = 5,
-                 score_full_chunk: bool = False, obstacle_pos=None, goal_pos=None):
+                 score_full_chunk: bool = False, obstacle_body: str | None = None,
+                 obstacle_pos=None, goal_pos=None, thresh: float = 1e-3):
         self.env, self.policy_fn, self.k = env, policy_fn, int(k)
+        self.thresh = float(thresh)
+        # Track ONLY the obstacle body. Comparing whole-qpos against a baseline counts the ROBOT's
+        # own joint motion, which is centimetres every step, so every candidate scores as unsafe
+        # and no_safe_rate reads 100% with 0.00/K safe — the signature of a broken measurement
+        # rather than a hard scene.
+        self._obs_bid = None
+        sim = _sim_of(env)
+        if obstacle_body and sim is not None:
+            try:
+                self._obs_bid = sim.model.body_name2id(obstacle_body)
+            except Exception:
+                for i in range(sim.model.nbody):
+                    nm = sim.model.body_id2name(i) or ""
+                    if obstacle_body in nm:
+                        self._obs_bid = i
+                        break
         self.exec_steps = int(exec_steps)
         self.score_full_chunk = bool(score_full_chunk)
         self.obstacle_pos = None if obstacle_pos is None else np.asarray(obstacle_pos, float)
         self.goal_pos = None if goal_pos is None else np.asarray(goal_pos, float)
         self.stats = {"queries": 0, "no_safe": 0, "k_safe": [], "picked_rank": []}
 
-    def _obstacle_moved(self, base_qpos) -> float:
+    def _obstacle_xpos(self):
         sim = _sim_of(self.env)
-        return float(np.max(np.abs(np.array(sim.get_state().qpos) - base_qpos)))
+        if self._obs_bid is None:
+            return None
+        return np.array(sim.data.body_xpos[self._obs_bid], copy=True)
+
+    def _obstacle_moved(self, base_xpos) -> float:
+        cur = self._obstacle_xpos()
+        if cur is None or base_xpos is None:
+            return 0.0
+        return float(np.linalg.norm(cur - base_xpos))
 
     def _simulate(self, chunk, n_exec):
         """Execute a candidate and report (max obstacle displacement, final EE position)."""
-        sim = _sim_of(self.env)
-        base = np.array(sim.get_state().qpos, copy=True)
+        base = self._obstacle_xpos()
         worst = 0.0
         for a in chunk[:n_exec]:
             self.env.step(np.asarray(a, float))
@@ -227,7 +251,7 @@ class BestOfNSelector:
 
         # Safety FILTERS, progress only breaks ties. A weighted sum would let a large progress
         # gain buy a collision, and rewarding safety alone makes standing still optimal.
-        safe = [c for c in cands if c["disp"] <= 1e-3]     # the benchmark's own 1 mm threshold
+        safe = [c for c in cands if c["disp"] <= self.thresh]   # benchmark's own 1 mm threshold
         self.stats["queries"] += 1
         self.stats["k_safe"].append(len(safe))
         if safe:
