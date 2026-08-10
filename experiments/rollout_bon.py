@@ -102,9 +102,34 @@ def main():
     rows = []
     for ep in args.episodes:
         env.reset(); obs0 = env.set_init_state(inits[ep])
+        # Settle before detecting. SafeLIBERO parks unused obstacles far below the table, where
+        # they free-fall forever — a parked body's position changes by metres every step under
+        # gravity, so scoring against it makes EVERY candidate look unsafe. Detecting on the
+        # unsettled scene returned exactly such a body (moka_pot_obstacle_1 at z = -306).
+        _z = np.zeros(7); _z[6] = -1.0
+        for _ in range(60):
+            env.step(_z)
         ob = detect_safelibero_obstacle(env, obs0)
         body = getattr(ob, "body_name", None) or getattr(ob, "name", None) if ob else None
-        print(f"  ep{ep}: obstacle body = {body}", flush=True)
+
+        # Guard: refuse to score against an off-scene body rather than silently reporting
+        # "no candidate is ever safe", which is what that produces and which reads as a result.
+        if body is not None:
+            from experiments.best_of_n import _sim_of
+            _sim = _sim_of(env)
+            try:
+                _bid = _sim.model.body_name2id(body)
+                _z_obs = float(_sim.data.body_xpos[_bid][2])
+            except Exception:
+                _z_obs = 0.0
+            if _z_obs < 0.3:
+                print(f"  ep{ep}: detected obstacle {body} is PARKED (z={_z_obs:.1f}) — "
+                      f"skipping episode rather than scoring against a free-falling body",
+                      flush=True)
+                continue
+            print(f"  ep{ep}: obstacle body = {body}  (z={_z_obs:.3f})", flush=True)
+        else:
+            print(f"  ep{ep}: no obstacle detected — selection will be inert", flush=True)
         sel = BestOfNSelector(env, base_policy_fn, k=args.k, exec_steps=args.replan,
                               score_full_chunk=args.score_full_chunk, obstacle_body=body)
 
