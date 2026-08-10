@@ -148,6 +148,11 @@ def main():
                          "underfits reads as 'this data teaches nothing' whatever the data is, "
                          "which is how a bad default fakes an experimental conclusion.")
     ap.add_argument("--minibatch", type=int, default=8)
+    ap.add_argument("--seed", type=int, default=0,
+                    help="seeds BOTH the data shuffle and the JAX key. Both were hardcoded to 0, so "
+                         "every arm in this project is a single training run — the softest "
+                         "methodological point in the results. Vary this to measure how much of a "
+                         "reported difference is training-seed variance rather than the treatment.")
     ap.add_argument("--success-only", action="store_true",
                     help="imitate ONLY traces whose rollout succeeded AND stayed collision-free "
                          "(via manifest.csv) — the automated expert filter; guards against BC "
@@ -243,8 +248,9 @@ def main():
           flush=True)
 
     n_full = (n_examples // args.minibatch) * args.minibatch
-    rng = np.random.default_rng(0)
-    jax_rng = jax.random.key(0)
+    rng = np.random.default_rng(args.seed)
+    jax_rng = jax.random.key(args.seed)
+    print(f"  seed = {args.seed} (data shuffle + JAX key)", flush=True)
 
     # Group example rows by trace so an epoch loads each trace's images exactly once (streaming),
     # while still shuffling trace order + within-trace rows. build_bc_batch needs the obs, which we
