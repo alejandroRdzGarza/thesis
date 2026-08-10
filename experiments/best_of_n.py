@@ -87,12 +87,27 @@ def save_full_state(env):
         v = getattr(d, k, None)
         if v is not None:
             extra[k] = np.array(v, copy=True)
-    # robosuite robots keep recent-value deques that some controllers read back.
-    deques = []
+    # Snapshot the ROBOT and GRIPPER objects wholesale, not just recent_* deques. Measured: the
+    # divergence is largest at the FIRST step (5.96e-3) and then SHRINKS (3.77e-3 by step five),
+    # i.e. a transient the controller damps out — so unrestored state is read immediately rather
+    # than accumulating. The sim.data diffs were all efc_*/island_* constraint-solver scratch with
+    # magnitudes like 6e306, i.e. uninitialised memory, so the loss is outside sim.data. The
+    # gripper holds `current_action`, which the first step reads.
+    objs = []
     for r in getattr(env, "robots", []) or []:
-        deques.append({k: _copy.deepcopy(v) for k, v in r.__dict__.items()
-                       if k.startswith("recent_")})
-    return {"sim": sim.get_state(), "ctrl": ctrl_snap, "extra": extra, "deques": deques,
+        for o in (r, getattr(r, "gripper", None)):
+            if o is None:
+                continue
+            snap_o = {}
+            for k, v in o.__dict__.items():
+                if k.startswith("__") or callable(v):
+                    continue
+                try:
+                    snap_o[k] = v.copy() if isinstance(v, np.ndarray) else _copy.deepcopy(v)
+                except Exception:
+                    pass          # unpicklable handles (sim, model refs) are shared, not state
+            objs.append((o, snap_o))
+    return {"sim": sim.get_state(), "ctrl": ctrl_snap, "extra": extra, "objs": objs,
             "timestep": getattr(env, "timestep", None)}
 
 
@@ -108,9 +123,12 @@ def restore_full_state(env, snap):
     for c, d in zip(_controllers(env), snap["ctrl"]):
         for k, v in d.items():
             setattr(c, k, v.copy() if isinstance(v, np.ndarray) else v)
-    for r, d in zip(getattr(env, "robots", []) or [], snap.get("deques", [])):
+    for o, d in snap.get("objs", []):
         for k, v in d.items():
-            setattr(r, k, _copy.deepcopy(v))
+            try:
+                setattr(o, k, v.copy() if isinstance(v, np.ndarray) else _copy.deepcopy(v))
+            except Exception:
+                pass
     if snap["timestep"] is not None:
         env.timestep = snap["timestep"]
 
