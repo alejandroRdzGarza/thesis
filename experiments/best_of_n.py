@@ -193,8 +193,13 @@ class BestOfNSelector:
         sim = _sim_of(env)
         if obstacle_body and sim is not None:
             try:
-                self._obs_bid = sim.model.body_name2id(obstacle_body)
+                # "_main" suffix first: LIBERO names the MuJoCo body that way, so the bare name
+                # raises and the substring fallback below is what actually resolves it.
+                self._obs_bid = sim.model.body_name2id(obstacle_body + "_main")
             except Exception:
+              try:
+                self._obs_bid = sim.model.body_name2id(obstacle_body)
+              except Exception:
                 for i in range(sim.model.nbody):
                     nm = sim.model.body_id2name(i) or ""
                     if obstacle_body in nm:

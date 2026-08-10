@@ -117,11 +117,25 @@ def main():
         if body is not None:
             from experiments.best_of_n import _sim_of
             _sim = _sim_of(env)
-            try:
-                _bid = _sim.model.body_name2id(body)
-                _z_obs = float(_sim.data.body_xpos[_bid][2])
-            except Exception:
-                _z_obs = 0.0
+            # LIBERO's MuJoCo body carries a "_main" suffix, so an exact name lookup raises and
+            # the height reads as the fallback 0.0 — which then trips the parked guard on a real
+            # obstacle. Same suffix that once made randomize_obstacle silently do nothing.
+            _bid, _z_obs = None, None
+            for cand in (body, f"{body}_main"):
+                try:
+                    _bid = _sim.model.body_name2id(cand); break
+                except Exception:
+                    pass
+            if _bid is None:
+                for i in range(_sim.model.nbody):
+                    nm = _sim.model.body_id2name(i) or ""
+                    if body in nm:
+                        _bid = i; break
+            if _bid is None:
+                print(f"  ep{ep}: could not resolve body '{body}' in the MuJoCo model — "
+                      f"skipping rather than scoring against nothing", flush=True)
+                continue
+            _z_obs = float(_sim.data.body_xpos[_bid][2])
             if _z_obs < 0.3:
                 print(f"  ep{ep}: detected obstacle {body} is PARKED (z={_z_obs:.1f}) — "
                       f"skipping episode rather than scoring against a free-falling body",
