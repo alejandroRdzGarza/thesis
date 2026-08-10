@@ -52,6 +52,46 @@ def _sim_of(env):
     return _sim_of(e) if e is not None else None
 
 
+def _controllers(env):
+    """Every OSC controller on the env, in a version-tolerant way."""
+    out = []
+    for r in getattr(env, "robots", []) or []:
+        c = getattr(r, "controller", None)
+        if c is not None:
+            out.append(c)
+    return out
+
+
+def save_full_state(env):
+    """Sim state AND controller internals.
+
+    sim.set_state() restores physics but NOT the OSC controller, which holds its own goal pose and
+    orientation reference. Rewinding physics alone leaves the controller servoing toward stale
+    targets, so the next step applies a different torque than it did the first time — measured at
+    1.9e-2 of qpos drift over five steps, which is three orders of magnitude above float noise and
+    would make every best-of-N candidate incomparable.
+    """
+    sim = _sim_of(env)
+    ctrl_snap = []
+    for c in _controllers(env):
+        ctrl_snap.append({k: (v.copy() if isinstance(v, np.ndarray) else v)
+                          for k, v in c.__dict__.items()
+                          if not k.startswith("__") and not callable(v)})
+    return {"sim": sim.get_state(), "ctrl": ctrl_snap,
+            "timestep": getattr(env, "timestep", None)}
+
+
+def restore_full_state(env, snap):
+    sim = _sim_of(env)
+    sim.set_state(snap["sim"])
+    sim.forward()
+    for c, d in zip(_controllers(env), snap["ctrl"]):
+        for k, v in d.items():
+            setattr(c, k, v.copy() if isinstance(v, np.ndarray) else v)
+    if snap["timestep"] is not None:
+        env.timestep = snap["timestep"]
+
+
 def verify_state_restore(env, n_steps: int = 5, tol: float = 1e-9) -> bool:
     """Rewind must be exact, or every candidate is scored from a different world.
 
@@ -68,17 +108,17 @@ def verify_state_restore(env, n_steps: int = 5, tol: float = 1e-9) -> bool:
     acts = [rng.uniform(-0.3, 0.3, 7) for _ in range(n_steps)]
     acts = [np.concatenate([a[:6], [-1.0]]) for a in acts]      # keep the gripper open
 
-    st = sim.get_state()
+    st = save_full_state(env)
     for a in acts:
         env.step(a)
     q1 = np.array(sim.get_state().qpos, copy=True)
 
-    sim.set_state(st); sim.forward()
+    restore_full_state(env, st)
     for a in acts:
         env.step(a)
     q2 = np.array(sim.get_state().qpos, copy=True)
 
-    sim.set_state(st); sim.forward()
+    restore_full_state(env, st)
     d = float(np.max(np.abs(q1 - q2)))
     ok = d <= tol
     print(f"  state restore: max|qpos delta| over {n_steps} steps = {d:.3e} -> "
@@ -128,8 +168,7 @@ class BestOfNSelector:
         return worst, ee
 
     def __call__(self, img, wrist, state, instruction, num_actions):
-        sim = _sim_of(self.env)
-        saved = sim.get_state()
+        saved = save_full_state(self.env)
         n_exec = None if self.score_full_chunk else self.exec_steps
 
         cands = []
@@ -138,12 +177,12 @@ class BestOfNSelector:
             arr = np.asarray(chunk, float)
             ne = len(arr) if n_exec is None else min(n_exec, len(arr))
             disp, ee = self._simulate(arr, ne)
-            sim.set_state(saved); sim.forward()          # rewind before the next candidate
+            restore_full_state(self.env, saved)          # rewind physics AND controller
             prog = (float(np.linalg.norm(ee - self.goal_pos))
                     if (ee is not None and self.goal_pos is not None) else 0.0)
             cands.append({"chunk": chunk, "trace": trace, "disp": disp, "prog": prog})
 
-        sim.set_state(saved); sim.forward()
+        restore_full_state(self.env, saved)
 
         # Safety FILTERS, progress only breaks ties. A weighted sum would let a large progress
         # gain buy a collision, and rewarding safety alone makes standing still optimal.
