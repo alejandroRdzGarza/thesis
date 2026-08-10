@@ -71,23 +71,46 @@ def save_full_state(env):
     1.9e-2 of qpos drift over five steps, which is three orders of magnitude above float noise and
     would make every best-of-N candidate incomparable.
     """
+    import copy as _copy
     sim = _sim_of(env)
     ctrl_snap = []
     for c in _controllers(env):
         ctrl_snap.append({k: (v.copy() if isinstance(v, np.ndarray) else v)
                           for k, v in c.__dict__.items()
                           if not k.startswith("__") and not callable(v)})
-    return {"sim": sim.get_state(), "ctrl": ctrl_snap,
+    # MjSimState carries time/qpos/qvel/act but NOT these. qacc_warmstart seeds the constraint
+    # solver, so restoring without it makes the next solve start from a different guess and
+    # converge slightly differently; ctrl is the actuator command still latched from the last step.
+    d = sim.data
+    extra = {}
+    for k in ("ctrl", "qacc_warmstart", "act", "qfrc_applied", "xfrc_applied"):
+        v = getattr(d, k, None)
+        if v is not None:
+            extra[k] = np.array(v, copy=True)
+    # robosuite robots keep recent-value deques that some controllers read back.
+    deques = []
+    for r in getattr(env, "robots", []) or []:
+        deques.append({k: _copy.deepcopy(v) for k, v in r.__dict__.items()
+                       if k.startswith("recent_")})
+    return {"sim": sim.get_state(), "ctrl": ctrl_snap, "extra": extra, "deques": deques,
             "timestep": getattr(env, "timestep", None)}
 
 
 def restore_full_state(env, snap):
+    import copy as _copy
     sim = _sim_of(env)
     sim.set_state(snap["sim"])
+    for k, v in snap.get("extra", {}).items():
+        tgt = getattr(sim.data, k, None)
+        if tgt is not None:
+            tgt[:] = v
     sim.forward()
     for c, d in zip(_controllers(env), snap["ctrl"]):
         for k, v in d.items():
             setattr(c, k, v.copy() if isinstance(v, np.ndarray) else v)
+    for r, d in zip(getattr(env, "robots", []) or [], snap.get("deques", [])):
+        for k, v in d.items():
+            setattr(r, k, _copy.deepcopy(v))
     if snap["timestep"] is not None:
         env.timestep = snap["timestep"]
 
