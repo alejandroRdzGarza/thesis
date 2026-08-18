@@ -38,13 +38,13 @@ controller would reach ~100% success and ~100% collision avoidance.
 
 A sampling-based expert was built properly — RRT-Connect in joint space with clearance inflation,
 IK, and playback as OSC deltas — and iterated through seven versions with measured diagnostics at
-each step. Final yield over the full grid: **318 usable demonstrations from 840 rollouts (38%)**.
+each step. Final yield over the full grid: **318 usable demonstrations from 864 rollouts (37%)**.
 
 The distribution is the interesting part. It is **not uniformly mediocre — it is bimodal**:
 
-| scene | clean demos / 35 |
+| scene | clean demos / 36 |
 |---|---|
-| object LI t3 | **35 (100%)** |
+| object LI t3 | **35 (97%)** |
 | goal LI t0 | 26 |
 | object LII t0 | 14 |
 | spatial LII t2 | 14 |
@@ -211,7 +211,7 @@ scored ~79% collision, but so did the *original* r1 checkpoint when re-evaluated
 (17.5% on pod 1 vs 79.2% on pod 2, same weights). So this is a **cross-environment discrepancy, not
 a failed replication** — and it is currently unresolved. Pod 1 is authoritative for every number in
 the thesis: it produced all six arms, and its baseline agrees with the AEGIS-matched published
-reference (CAR 86.7% vs 87.5%).
+baseline: unshielded π0.5 measured CAR 17.5% / TSR 58.3% against their published 17.3% / 58.9%.
 *Proposed handling: state seed variance as unquantified, with the replication attempt and the
 discrepancy described honestly.*
 
@@ -230,8 +230,14 @@ teacher coverage rather than distillation. Both the 24-scene and 18-scene slices
 - **Vanilla LIBERO**: the same checkpoint and evaluation code score **5/5 success, 0/5 collision**
   on obstacle-free LIBERO-Spatial. The degraded SafeLIBERO figures reflect task difficulty, not a
   broken pipeline.
-- **AEGIS agreement**: base + shield measured CAR **86.7%** against the published **87.5%** — 0.8
-  points apart on an independently reported baseline.
+- **Published-baseline agreement**: unshielded π0.5 measured CAR **17.5%** / TSR **58.3%** against
+  the published **17.3%** / **58.9%** (their Table I, full action space, averaged over the three
+  suites used here). Sub-point agreement on both.
+  *Note: the shielded comparison is NOT agreement — this shield reaches CAR 86.7% against their
+  71.9%, roughly 15 points safer at 3 points lower TSR, almost certainly because it uses
+  ground-truth geometry while theirs works from vision-language safety assessment. An earlier
+  version of this brief cited "87.5%" as a published figure; that number was our own earlier
+  measurement, not theirs.*
 - **Determinism**: after the contact fix, five repeated runs of the same episodes are byte-identical.
 
 ---

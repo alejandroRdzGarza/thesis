@@ -67,8 +67,11 @@ addresses.
 
 **[SOURCE] AEGIS.** Threat model, method, benchmark, headline numbers. This matters more than the
 other citations for two reasons: SafeLIBERO and the collision metric come from this line of work,
-and this thesis reproduces its baseline (measured CAR 86.7% against the reported 87.5%, agreement
-within 0.8 points — a genuine external validation worth stating explicitly).
+and this thesis reproduces its unshielded baseline closely (measured CAR 17.5% / TSR 58.3% against
+their reported 17.3% / 58.9%, averaged over the three suites used here). State that agreement
+explicitly — it is real external validation. Do NOT claim agreement on the shielded figures: this
+shield reaches CAR 86.7% against their 71.9%, and the likely reason is that it uses ground-truth
+geometry while theirs works from vision-language safety assessment.
 
 **[SOURCE] Other runtime safety filtering for learned policies.** Shielded RL, safe MPC, and
 action-space filtering more broadly.

@@ -65,10 +65,22 @@ estimate that geometry from sensors, and would inherit the resulting error. The 
 should therefore be read as an upper bound on what this class of shield achieves, with the
 perception gap removed by construction.
 
-As an external check, the shielded baseline can be compared against the AEGIS-matched reference
-for the same configuration, which reports CAR 87.5%. The measurement here is 86.7% — agreement
-within 0.8 percentage points on an independently published baseline, which supports the view
-that the pipeline is behaving as intended rather than producing an artefact.
+As an external check, the base policy can be compared against the figures reported for π0.5 on
+SafeLIBERO by the work that introduced the benchmark. Averaging their per-suite results over the
+three suites used here (spatial, goal, object; their averages additionally include a Long suite),
+the reported unshielded π0.5 achieves CAR 17.3% and TSR 58.9% in the full action space. The
+measurements here are CAR 17.5% and TSR 58.3% — agreement to within a fraction of a point on both
+metrics, which supports the view that the evaluation pipeline reproduces the published baseline
+rather than producing an artefact.
+
+The shielded comparison differs, and the difference is worth stating rather than smoothing. On the
+same three suites the published safety layer reaches CAR 71.9% at TSR 74.6%, whereas the shield
+used here reaches CAR 86.7% at TSR 71.7% — roughly fifteen points safer and three points less
+successful. The most likely explanation is the information available to the constraint: the barrier
+here is built from ground-truth obstacle geometry read from the simulator, while the published
+layer derives its constraints through vision-language safety assessment and must therefore absorb
+perception error. The figures reported in this chapter should accordingly be read as an upper bound
+for this class of filter, not as a like-for-like improvement over it.
 
 ---
 
