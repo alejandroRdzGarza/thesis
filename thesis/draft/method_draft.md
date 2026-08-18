@@ -15,9 +15,10 @@ scenes, and each provides 50 randomised initial states.
 
 The robot is a 7-DOF Franka Panda under operational-space control. The policy emits seven-dimensional
 actions — three translation deltas, three rotation deltas, and a gripper command — which the
-controller converts to joint torques. Observations are two 224x224 RGB images (a static scene
-camera and a wrist camera), an eight-dimensional proprioceptive vector comprising end-effector
-position, axis-angle orientation and gripper state, and a natural-language instruction.
+controller converts to joint torques. Observations are two RGB images resized to 224x224 (a static scene camera and a wrist camera), an
+eight-dimensional proprioceptive vector, and a natural-language instruction. The proprioceptive
+vector follows the LIBERO convention used by the policy: end-effector position, axis-angle
+orientation, and the two gripper joint positions.
 
 That the proprioceptive vector contains no joint angles becomes relevant later. The shield has
 access to the full configuration through the simulator and constrains the arm links accordingly
@@ -28,20 +29,30 @@ pose and images alone.
 
 **Task success rate (TSR)** is the benchmark's own success predicate.
 
-**Collision** is defined as displacement of the obstacle by more than one millimetre over the
-episode, which is the quantity reported by AEGIS and is adopted here for comparability.
-**Collision-avoidance rate (CAR)** is its complement. This definition is deliberately strict and
-worth stating plainly: it counts the obstacle being *moved*, by any means, and does not require
-that the robot touched it directly. An object knocked into the obstacle by the carried payload
-counts.
+**Collision** is recorded when the obstacle's position departs from its position at the start of
+the episode by more than one millimetre, measured as the sum of absolute component differences,
 
-**Execution time to success (ETS)** is the mean number of control steps to completion, computed
-over successful rollouts only. A failed rollout has no completion time, and including the horizon
-would make a policy appear faster the more often it fails.
+    sum_k | p_k(t) - p_k(0) |  >  0.001 m
 
-**CBF activation rate** records how frequently the shield intervened, and serves as an independent
-signal of whether a policy has internalised avoidance: a policy that needs less correction is
-behaving more safely, regardless of what the collision count says.
+and the episode is marked collided if this holds at any step. The threshold is matched to the
+AEGIS/VLSA definition for comparability. **Collision-avoidance rate (CAR)** is its complement.
+
+Two properties of this definition matter. It is a **cumulative displacement** test against the
+episode's initial pose, not a per-step contact test, so an obstacle nudged early stays flagged.
+And it counts the obstacle being *moved* by any means: it does not require that the robot touched
+it, so an object pushed into the obstacle by the carried payload counts. The reference pose is
+taken after the settling procedure of Section 3.6, without which gravity alone would trip the
+threshold.
+
+**Execution time to success (ETS)** is the control step at which the success predicate first
+holds, averaged over successful rollouts only. A failed rollout has no completion time, and
+substituting the horizon would make a policy appear faster the more often it fails.
+
+**CBF activation rate** is the fraction of control steps on which the shield altered the action,
+counted when the projected action differs from the nominal one by more than 1e-4. It is an
+independent signal of whether a policy has internalised avoidance: a policy that needs less
+correction is behaving more safely, whatever the collision count says. Chapter 4 also reports a
+related reward-term proxy where the per-step rate was not recorded.
 
 ### Evaluation protocol
 
@@ -179,9 +190,10 @@ is itself a result.
 
 ## 3.6 Distillation
 
-Retained demonstrations are behaviour-cloned into the policy's action head using the model's native
-flow-matching loss, with the vision-language backbone frozen and a LoRA adapter trained on the
-action head alone. The imitation target is the sequence of actions actually executed — that is,
+Retained demonstrations are behaviour-cloned using the model's native flow-matching loss. Only the
+parameters selected by the training configuration's trainable filter receive gradients — a LoRA
+adapter on the action head — while the vision-language backbone is frozen; the saved artefact is
+the adapter alone, reapplied over the base checkpoint at load time. The imitation target is the sequence of actions actually executed — that is,
 post-shield — so the policy learns the corrected behaviour rather than its own original proposals.
 Actions are normalised by passing them through the policy's own input transform, so the target
 matches the distribution the model was pretrained on rather than a hand-rolled normalisation.
