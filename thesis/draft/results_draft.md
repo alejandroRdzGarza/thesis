@@ -174,7 +174,7 @@ corrections depend on state the policy cannot observe — was tested and rejecte
 The shield reduces collisions to 13.3% but not to zero. This section identifies what the residual
 consists of, using per-body collision attribution recovered from the evaluation logs. Contacts
 attributed to other scene objects are excluded throughout: that category fires on every episode
-of every arm, including collision-free ones, because the obstacle resting on its supporting
+of every condition, including collision-free ones, because the obstacle resting on its supporting
 surface registers a permanent contact.
 
 | policy | episodes | collided | gripper | arm link | held object |
@@ -231,16 +231,16 @@ at all; successful episodes also happen to be the ones in which nothing was knoc
 second mechanism accounts for the result, the shield is incidental and the contribution is a
 rediscovery of filtered behaviour cloning.
 
-Nothing in the six-arm evaluation distinguishes them, so a matched control was run.
+Nothing in the six-condition evaluation distinguishes them, so a matched control was run.
 
 ### The matched control
 
 Demonstrations were collected with the shield **switched off**, filtered by exactly the same
 criteria — succeeded and displaced nothing — and used to train a student with identical
-hyperparameters. The shielded pool was then subsampled to the same size, so the two arms differ in
+hyperparameters. The shielded pool was then subsampled to the same size, so the two conditions differ in
 one respect only: whether the shield was active while the demonstrations were being generated.
 
-| arm | demos | shield during collection | TSR (95% CI) | collision (95% CI) |
+| condition | demos | shield during collection | TSR (95% CI) | collision (95% CI) |
 |---|---|---|---|---|
 | undistilled base | — | — | 58.3% [49.4, 66.8] | 82.5% [74.7, 88.3] |
 | control | 85 | **off** | 50.0% [41.2, 58.8] | **84.2% [76.6, 89.6]** |
@@ -251,8 +251,8 @@ indistinguishable from the undistilled base policy at 82.5%. Training a policy o
 successful, collision-free episodes did not make it safer on this benchmark.
 
 **The shield's corrections are what transfers.** At the same demonstration count and under the same
-filter, the shielded arm reaches 26.7%, with a confidence interval disjoint from the control's. The
-difference between the two arms is attributable to the shield and to nothing else in the pipeline.
+filter, the shielded condition reaches 26.7%, with a confidence interval disjoint from the control's. The
+difference between the two conditions is attributable to the shield and to nothing else in the pipeline.
 
 This is the experiment that answers the most natural objection to Section 4.3, and it answers it
 directly rather than by argument.
@@ -335,9 +335,9 @@ a channel none of these use, and one a classical controller does not possess at 
 instruction itself. This section asks whether safety can be requested in language.
 
 The experiment is minimal by design. The same checkpoint, the same seed, the same held-out initial
-states and the same evaluation code were used for both arms; the only difference is a single clause
+states and the same evaluation code were used for both conditions; the only difference is a single clause
 appended to the task instruction. Twelve level-II scenes were evaluated at five initial states
-each, giving n = 60 per arm. Level II was chosen because collisions concentrate there, making it
+each, giving n = 60 per condition. Level II was chosen because collisions concentrate there, making it
 the sensitive test.
 
 The exact strings were, for a representative scene:
