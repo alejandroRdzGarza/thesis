@@ -125,10 +125,16 @@ episodes of every arm because the obstacle resting on its surface registers a pe
 **The shield eliminates the end-effector channel entirely** — 71 → 0, and zero across all 360
 shielded episodes. Of its 16 residual collisions, 15 are arm links.
 
-**So the 13.3% floor is a scope limit, not a leak.** The barrier constrains end-effector spheres;
-arm links and the carried object are not in it, while the metric scores every body. The corollary
-matters for reading the headline: **r1's 17.5% shield-free is within a few points of the practical
-ceiling of the supervision it received**, not a degraded copy of a perfect teacher.
+**So the 13.3% floor is a FIDELITY limit, not an absence of authority.** Arm links ARE constrained
+(links 3-7 plus the hand, three point samples each, mapped through a damped Jacobian
+pseudo-inverse) — but far more coarsely than the end-effector, which gets three fitted spheres, and
+their velocity is *inferred* rather than being the quantity the QP optimises. Collisions vanish
+where the robot model is precise and the velocity is controlled; they persist where the model is
+coarse and the velocity is estimated. Corollary for the headline: **r1's 17.5% shield-free is
+within a few points of what its teacher actually achieved**, not a degraded copy of a perfect one.
+
+*(Correction made 2026-08-18 after re-reading the implementation: an earlier version of this brief
+described the barrier as end-effector-only. It is not.)*
 
 **A second transfer channel.** Arm-link collisions fall 17 → 8, in a channel the barrier does not
 constrain (the shielded baseline still shows 15). That must come from the selection criterion, not
@@ -171,7 +177,9 @@ Four mechanisms were tried and did not work. All are characterised rather than b
 | approach | result |
 |---|---|
 | **Scalar-reward RL** (flow-SDE GRPO) | Failed. The learning signal and the destabilising signal are the same knob. |
-| **CBF-guided sampling** — steer the denoising velocity instead of projecting the output | Implemented and verified (λ=1 reproduces the projection's endpoint exactly on a synthetic barrier). Never activates in practice: the EE's closest approach is **0.231 m** against a 0.15 m barrier on episodes that still collide. **Guidance inherits the barrier's end-effector scope.** |
+| **CBF-guided sampling** — steer the denoising velocity instead of projecting the output | Implemented and verified (λ=1 reproduces the projection's endpoint exactly on a synthetic barrier). Never activates in practice: the EE's closest approach is **0.231 m** against a 0.15 m barrier on episodes that still collide. The guided sampler used a SIMPLER single-sphere end-effector barrier than the shield's full
+constraint set, so this is a negative about that implementation's collision model rather than about
+the shield's coverage. |
 | **Safety via the language channel** — a clause appended to the instruction | No safety benefit (collision 70.0% → 68.3%, near-coincident intervals) but a **23% slowdown** and ~12 points of lost success. The policy responds to the text without grounding it geometrically — the appearance of caution without its substance. |
 | **Best-of-N selection** — sample K chunks, simulate each, execute the safest | Negative as a method, but the measurement is a finding. The fraction of safe candidates *equals* the fraction of queries where all K are safe, at every K and noise level tested — so candidates are **near-perfectly correlated** in safety outcome. **Safety is state-determined, not sample-determined.** Doubling K bought 8.8 points; maxing noise bought 3.7. |
 

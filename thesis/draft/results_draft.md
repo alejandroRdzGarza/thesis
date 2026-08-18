@@ -187,20 +187,29 @@ surface registers a permanent contact.
 | round 2 + shield | 120 | 11 | **0** | 9 | 0 |
 
 **The shield eliminates the end-effector channel completely.** Gripper collisions fall from 71 to
-zero, and across all 360 shielded episodes there is not a single one. Of the 16 residual
-collisions in the shielded baseline, 15 involve an arm link.
+zero, and across all 360 shielded episodes there is not a single one. Of the 16 residual collisions
+in the shielded baseline, 15 involve an arm link.
 
-This reframes the 13.3% floor. The barrier constrains end-effector spheres against obstacle
-spheres; arm links and the carried object are not represented in it at all, while the collision
-metric scores every body. The shield is therefore not leaking — it is working perfectly within an
-end-effector-only scope, and the residual consists entirely of bodies it was never given
-authority over. The corollary matters for reading Section 4.3: the distilled policy's 17.5%
-shield-free is within a few points of the practical ceiling of the supervision it received,
-rather than a degraded approximation of a perfect teacher.
+**The residual is a fidelity limit, not a scope limit.** Arm links are not absent from the barrier —
+links 3 to 7 and the hand are constrained (Section 3.2). But they are represented far more coarsely
+than the end-effector: three point samples per link carrying a single sphere radius, against three
+fitted spheres for the hand and fingers. More importantly, an arm link's velocity is not the
+quantity the QP optimises. The program solves for an end-effector velocity and infers link motion
+through a damped Jacobian pseudo-inverse, so the constraint is enforced against a *predicted* link
+velocity that diverges from the realised one wherever the inverse is ill-conditioned or the
+controller's null-space motion differs from the minimum-norm solution.
+
+The pattern in the table is therefore the expected one: collisions are eliminated exactly where the
+barrier's model of the robot is precise and its velocity is the controlled variable, and they
+persist where the model is coarse and the velocity is estimated. The corollary for reading Section
+4.3 still holds — the distilled policy's 17.5% shield-free is within a few points of what its
+teacher actually achieved, not a degraded approximation of a perfect one — but the teacher's own
+ceiling is set by approximation error in the constraint, not by an absence of authority.
 
 **A second transfer channel.** Arm-link collisions fall from 17 to 8 between the base and
-twice-distilled policies. The barrier cannot have caused this, since it does not constrain arm
-links and the shielded baseline still shows 15. That improvement must come from the selection
+twice-distilled policies, while the shielded baseline — with the arm-link constraints active —
+still shows 15. So the improvement is not simply inherited from the barrier's own arm-link
+performance, which is worse. That improvement must come from the selection
 criterion: demonstrations were retained only if nothing at all was displaced, arm links included,
 and the student learned that. Safety therefore transfers through two distinguishable channels —
 imitation of the filter's corrections where the filter has authority, and outcome selection where

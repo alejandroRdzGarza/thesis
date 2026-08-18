@@ -19,9 +19,10 @@ controller converts to joint torques. Observations are two 224x224 RGB images (a
 camera and a wrist camera), an eight-dimensional proprioceptive vector comprising end-effector
 position, axis-angle orientation and gripper state, and a natural-language instruction.
 
-That the proprioceptive vector contains no joint angles becomes relevant later: any safety
-behaviour that depends on the arm's configuration rather than its end-effector pose is conditioned
-on information the policy does not receive.
+That the proprioceptive vector contains no joint angles becomes relevant later. The shield has
+access to the full configuration through the simulator and constrains the arm links accordingly
+(Section 3.2); the policy imitating it does not, and must reproduce that behaviour from end-effector
+pose and images alone.
 
 ### Metrics
 
@@ -59,41 +60,78 @@ poorly at rates near zero and one for n = 120.
 
 ## 3.2 Obstacle geometry and the barrier
 
-The obstacle's collision geometry is taken from the simulator as a mesh, from which a point cloud
-is sampled and decomposed into a small set of spheres. The barrier is then defined pairwise between
-end-effector spheres and obstacle spheres:
+The obstacle's collision mesh is read from the simulator, sampled into a point cloud, and
+decomposed into a small set of spheres. Sphere decomposition is used rather than a single bounding
+volume because a bounding sphere over a non-convex object is a poor approximation — an earlier
+version of this work measured a 5.5 cm carton as 16 cm across, which was enough to distort the
+grasp it produced.
 
-    h = || c_ee - c_obs ||^2 - ( r_ee + r_obs )^2
+The robot is represented by spheres on both sides of the barrier.
 
-with h > 0 denoting the safe set. Sphere decomposition is used rather than a single bounding volume
-because a bounding sphere over a non-convex object is a poor approximation — an early version of
-this work measured a 5.5 cm carton as 16 cm across, which was enough to distort the grasp.
+**End-effector.** Three spheres in the end-effector frame approximate the Franka hand: a palm
+sphere of radius 4.8 cm at 5.6 cm behind the grasp site, and two finger-pad spheres of radius 2.0 cm
+offset 3.6 cm either side at 10.5 cm depth. A single sphere would either miss the fingers or
+inflate the palm.
 
-Two consequences of this construction matter for the results and are stated here rather than
-discovered later. First, the barrier is defined **over the end-effector only**: arm links and any
-carried object do not appear in it, while the collision metric of Section 3.1 scores every body.
-Second, the geometry is **privileged** — read directly from the simulator rather than estimated from
-the policy's observations — so the shield operates with information a deployed system would have to
-perceive.
+**Arm links.** Links 3 through 7 and the hand body are each assigned a radius (5.5 cm to 9.0 cm,
+set from each link's maximum transverse extent plus a 15–21 mm margin) and sampled at three
+positions along the link axis, so that a long link is not represented by its origin alone.
+
+For each (robot sphere i, obstacle sphere j) pair the barrier is
+
+    h_ij = || p_i - c_j ||^2 - ( r_i + r_j )^2
+
+with h > 0 the safe set. Differentiating along the rigid-body velocity gives the constraint row
+
+    [ 2 * scale * (p_i - c_j)^T R_1 ] u  +  k h_ij  >=  0,      k = 10
+
+where u is the commanded end-effector velocity in the body frame and R_1 its rotation. For arm
+links, whose velocity is not the commanded one, the mapping v_link ~= J_link J_ee^+ (scale R_1 u)
+is used, with J_ee^+ a damped pseudo-inverse (lambda = 1e-3).
+
+Three properties of this construction matter for interpreting Chapter 4, and are stated here rather
+than discovered later.
+
+*The robot model is approximate, and unevenly so.* The end-effector is covered by three spheres
+fitted to the hand geometry; each arm link is covered by three point samples carrying one sphere
+radius. The end-effector is therefore represented considerably more faithfully than the links.
+
+*Links 1 and 2 are not constrained at all*, being close to the base and rarely near the obstacle in
+these scenes.
+
+*Arm-link velocities are estimated, not commanded.* The QP optimises an end-effector velocity, and
+each link's motion is inferred through a damped Jacobian pseudo-inverse. Where that inverse is
+ill-conditioned — near singularities, or when the null-space motion the OSC controller actually
+applies differs from the minimum-norm solution — the predicted link velocity and the realised one
+diverge, and the constraint is enforced against the prediction.
+
+*The geometry is privileged.* Obstacle poses and sizes are read from the simulator rather than
+estimated from the policy's observations, so the shield operates on information a deployed system
+would have to perceive. The reported figures are an upper bound for this class of filter.
 
 ---
 
 ## 3.3 The CBF shield
 
-At each control step the policy's proposed action is treated as a nominal end-effector velocity and
-projected onto the safe set by solving a quadratic program that minimises deviation from the
-nominal action subject to the barrier's decrease condition. When the nominal action is already safe
-the constraint is inactive and the action passes through unchanged; when it is not, the QP returns
-the nearest action satisfying the constraint.
+At each control step the policy's proposed translation is treated as a nominal end-effector
+velocity u_nom, and the shield solves
 
-Two practical adjustments were required. The barrier is enforced in discrete time while the
-guarantee is continuous-time, so a lag buffer inflates the effective radius to account for the
-distance travelled between control steps and for inverse-kinematics tracking error. Where the QP
-solver is unavailable the implementation falls back to an unconstrained action rather than
-failing; this is recorded, because a silent fallback would otherwise be indistinguishable from a
-shield that never needed to act.
+    min_u || u - u_nom ||^2      s.t.   a_m^T u + b_m >= 0  for every constraint row m
 
----
+a quadratic program in three variables whose rows are the end-effector/obstacle pairs and the
+arm-link pairs of Section 3.2. When no constraint is active the solution is u_nom and the action
+passes through unchanged. The problem is solved with OSQP through CVXPY; where CVXPY is unavailable
+the implementation falls back to SLSQP and, if that fails, to the unconstrained action, emitting a
+warning — a silent fallback would be indistinguishable from a shield that was never needed.
+
+An intervention is recorded when the returned action differs from the nominal by more than 1e-4,
+which is what the CBF activation rate of Section 3.1 counts.
+
+Two discrete-time adjustments are required because the barrier's guarantee is continuous-time. The
+effective radius is inflated by a lag buffer covering the distance travelled between control steps
+and the inverse-kinematics tracking error; this value was tuned upward during development after
+collisions were observed at nominally safe margins. Rotation is not constrained: the barrier acts
+on the translational channel only.
 
 ## 3.4 Collision attribution
 
