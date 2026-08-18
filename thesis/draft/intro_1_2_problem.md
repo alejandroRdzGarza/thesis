@@ -36,5 +36,5 @@ simulator. A deployed system would estimate that geometry from perception and in
 error, so the figures reported here are an upper bound for this class of filter.
 
 *Statistical.* Each trained policy is a single training run; seed variance is unquantified.
-Evaluation uses held-out initial states throughout, with 120 rollouts per arm and 95% confidence
+Evaluation uses held-out initial states throughout, with 120 rollouts per evaluated policy and 95% confidence
 intervals.
