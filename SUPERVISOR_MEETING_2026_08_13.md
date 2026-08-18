@@ -8,7 +8,7 @@ Every number below is measured. Where something is uncertain or unresolved it sa
 ## 1. The headline
 
 Evaluated on **held-out initial states** (training used inits 0–34, evaluation uses 35–39), across
-all 24 SafeLIBERO scenes, 5 rollouts each → **n = 120 per arm**. 95% Wilson intervals.
+all 24 SafeLIBERO scenes, 5 rollouts each → **n = 120 per condition**. 95% Wilson intervals.
 
 | policy | TSR | collision | CAR | ETS |
 |---|---|---|---|---|
@@ -113,7 +113,7 @@ about it being imperfect.
 ## 3. What the shield can and cannot reach
 
 Per-body attribution, recovered from evaluation logs. `scene_object` excluded: it fires on 120/120
-episodes of every arm because the obstacle resting on its surface registers a permanent contact.
+episodes of every condition because the obstacle resting on its surface registers a permanent contact.
 
 | policy | collided | gripper | arm link | held object |
 |---|---|---|---|---|
@@ -136,9 +136,9 @@ within a few points of what its teacher actually achieved**, not a degraded copy
 *(Correction made 2026-08-18 after re-reading the implementation: an earlier version of this brief
 described the barrier as end-effector-only. It is not.)*
 
-**A second transfer channel.** Arm-link collisions fall 17 → 8, in a channel the barrier does not
-constrain (the shielded baseline still shows 15). That must come from the selection criterion, not
-the corrections. Safety transfers two ways: imitation where the filter acts, outcome selection
+**A second transfer channel.** Arm-link collisions fall 17 → 8, while the shielded baseline — with
+its arm-link constraints active — still shows 15. So the improvement is not inherited from the
+barrier's own arm-link performance, which is worse; it comes from the selection criterion. Safety transfers two ways: imitation where the filter acts, outcome selection
 where it does not. *Caution: those intervals overlap (14.2% [9.0, 21.6] vs 6.7% [3.4, 12.7]), so
 this is suggestive; the gripper result is not in doubt.*
 
