@@ -179,6 +179,15 @@ percent, and are evaluated by the same code on the same 24 scenes and the same h
 states. The only difference is where the demonstrations came from. Distilling safety from a
 foreign expert failed; distilling it from the policy's own shielded rollouts succeeded.
 
+The conclusion to draw from this is about state coverage rather than about the teacher's identity,
+and the distinction is not merely cautious. A foreign expert *can* teach safety: SAFE-GIL clones an
+MPC or PID controller and obtains substantially safer policies, having first used reachability
+analysis to force that fixed expert to demonstrate recovery from the states a learner's errors
+would produce. The planner tested here received no such treatment. Its trajectories were generated
+from its own initial conditions and were never conditioned on where $\pi_{0.5}$ fails, so the
+states it labelled and the states the student needed labelled did not overlap. That, rather than
+its foreignness, is what the contrast isolates.
+
 **Caveat.** Six of the 24 scenes contained no planner demonstrations, so roughly 30 of the 120
 evaluation rollouts test the expert's coverage rather than the distillation itself. Restricting
 to the 18 scenes with training data does not rescue the result — the pooled figure is already

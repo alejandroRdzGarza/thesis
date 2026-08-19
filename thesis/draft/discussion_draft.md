@@ -23,9 +23,29 @@ the policy to be evaluated in regions it never reaches.
 
 The measured contrast in Section 4.4 sharpens this. Cross-policy distillation, where the targets
 were dense and per-step but came from a *foreign* expert, failed as completely as RL did. Dense
-supervision is therefore not sufficient on its own — it must also be supervision the policy could
-plausibly have produced. Both failures are consistent with a single account: what transfers is
-correction of the policy's own behaviour, not instruction from outside it.
+supervision is therefore not sufficient on its own — it must also be supervision at states the
+policy actually reaches.
+
+It is tempting to state this more strongly, as the claim that what transfers is correction of the
+policy's own behaviour and never instruction from outside it. That claim would be false, and the
+literature already falsifies it. SAFE-GIL trains a behaviour-cloning policy on demonstrations from
+an MPC or PID expert — foreign controllers, not the learner — and obtains substantially safer
+policies than vanilla behaviour cloning. What makes those demonstrations work is not the teacher's
+identity but where they are collected: Hamilton-Jacobi reachability is used to compute the
+disturbance that most steers the system toward failure, that disturbance is injected during
+collection, and the fixed expert is thereby forced to demonstrate recovery from precisely the
+states a learner's errors would produce. Their ablation confirms that this targeting is the active
+ingredient, since Gaussian noise, uniform noise and DART all fail to reproduce the benefit.
+
+The correct reading of Section 4.4 is therefore narrower and more useful. The planner did not fail
+because it was foreign. It failed because its trajectories were generated from its own initial
+conditions and were never conditioned on where $\pi_{0.5}$ goes wrong, so the states it labelled
+and the states the student needed labelled did not overlap. The shield succeeded because its
+corrections are applied, by construction, at states the policy reached on its own. What the two
+results share with SAFE-GIL is a single account: the operative variable is the *state distribution
+the supervision covers*, and self-distillation is one way — not the only way — of guaranteeing that
+coverage. Its practical advantage over the adversarial route is that no disturbance model is needed,
+because the policy visits its own failure states unprompted.
 
 ---
 
