@@ -37,6 +37,14 @@ collection, and the fixed expert is thereby forced to demonstrate recovery from 
 states a learner's errors would produce. Their ablation confirms that this targeting is the active
 ingredient, since Gaussian noise, uniform noise and DART all fail to reproduce the benefit.
 
+IntervenGen reaches the same place by a different route. It rolls out the *current* policy in new
+scene configurations so that the mistakes it records are that policy's genuine failures rather than
+replayed ones, detects each mistake on contact, and transforms a *human* recovery segment onto the
+state reached. The recovery actions are again foreign to the policy; only the states are its own.
+Two methods, with different teachers — an optimal controller in one case, a human operator in the
+other — and different means of arriving at the failure states, therefore locate the active
+ingredient in the same place.
+
 The correct reading of Section 4.4 is therefore narrower and more useful. The planner did not fail
 because it was foreign. It failed because its trajectories were generated from its own initial
 conditions and were never conditioned on where $\pi_{0.5}$ goes wrong, so the states it labelled
