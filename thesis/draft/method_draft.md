@@ -1,10 +1,22 @@
 # Chapter 3 — Method (DRAFT)
 
+<!-- MARKER CONVENTIONS USED IN THIS FILE
+     [CITE: bibkey — what it is being cited *for*, plus verification status]
+     [FIGURE X.Y — <title>. What it shows | where the data/asset comes from | STATUS]
+       STATUS is one of: EXISTS <path>  |  TO MAKE  |  OPTIONAL
+     [TABLE X.Y — ...] likewise. Every marker names the claim it supports, so a
+     figure that turns out to support nothing can be cut without argument. -->
+
 Plain prose. Describes only what Chapter 4 uses.
 
 ---
 
 ## 3.1 The SafeLIBERO benchmark
+
+[TABLE 3.1 — The benchmark grid: 3 suites x 2 obstacle levels x 4 tasks = 24 scenes, 50 initial
+states each, with the train/held-out split (0-34 / 35-49) shown explicitly. Cheap to produce and it
+prevents the reader from having to reconstruct the design from prose. | From the suite definitions.
+| TO MAKE]
 
 SafeLIBERO extends the LIBERO manipulation benchmark by introducing an obstacle into each scene,
 turning a pure task-completion problem into one where the policy must reach a goal without
@@ -82,6 +94,15 @@ volume because a bounding sphere over a non-convex object is a poor approximatio
 version of this work measured a 5.5 cm carton as 16 cm across, which was enough to distort the
 grasp it produced.
 
+[FIGURE 3.1 — Sphere decomposition of the robot and an obstacle. Three panels: (a) a SafeLIBERO
+obstacle mesh beside its sphere set, with the bounding-sphere alternative overlaid to show the
+5.5 cm carton measured as 16 cm across; (b) the three-sphere end-effector model with radii and
+offsets annotated; (c) the arm-link spheres on links 3-7 and the hand, in a representative
+configuration. This is the most load-bearing figure in the chapter: Section 4.5's culprit analysis
+is unreadable without it, and panel (c) is what distinguishes this barrier from AEGIS's
+end-effector-only formulation. | Render from the MuJoCo model plus the decomposition code that
+produces the sphere sets. | TO MAKE]
+
 The robot is represented by spheres on both sides of the barrier.
 
 **End-effector.** Three spheres in the end-effector frame approximate the Franka hand: a palm
@@ -137,14 +158,27 @@ baseline, and Section 4.2 reports its effect.
 
 ## 3.3 The CBF shield
 
+[FIGURE 3.2 — The shield as a block diagram. Observation into pi0.5, nominal action out, QP
+projection against the active constraint rows, executed action to the simulator, and the corrected
+action tapped off as the distillation target. One arrow should be marked as the difference between
+this work and a runtime filter: the tap exists, and at deployment the QP block is deleted. If only
+one diagram survives into the thesis, this is the one, because it carries the whole argument. |
+Draw. | TO MAKE]
+
 At each control step the policy's proposed translation is treated as a nominal end-effector
 velocity u_nom, and the shield solves
 
     min_u || u - u_nom ||^2      s.t.   a_m^T u + b_m >= 0  for every constraint row m
 
 a quadratic program in three variables whose rows are the end-effector/obstacle pairs and the
-arm-link pairs of Section 3.2. When no constraint is active the solution is u_nom and the action
-passes through unchanged. The problem is solved with OSQP through CVXPY; where CVXPY is unavailable
+arm-link pairs of Section 3.2  [CITE: cbf_theory — cite the *formulation*: safety as forward
+invariance of a superlevel set, enforced as an affine inequality in the control, with the QP
+returning the minimum-norm admissible departure from the nominal action. This is the standard form
+being instantiated, so cite it here rather than deriving it. CITE: collision_cbf_ellipsoidal — cite
+only if the sphere-pair distance construction of 3.2 is presented as following theirs; if the
+spheres are this work's own simplification, say so and do not cite it as a source]. When no constraint is active the solution is u_nom and the action
+passes through unchanged. The problem is solved with OSQP through CVXPY  [CITE: osqp, cvxpy — software citations, needed for
+reproducibility; neither is a claim]; where CVXPY is unavailable
 the implementation falls back to SLSQP and, if that fails, to the unconstrained action, emitting a
 warning — a silent fallback would be indistinguishable from a shield that was never needed.
 
@@ -189,6 +223,9 @@ trained.
 
 ### 3.5.2 A privileged scripted expert
 
+[CITE: liu2023libero — cite for LIBERO, the task definitions and the BDDL scene specification that
+the planner reads object and goal poses from. CITE: rrt_connect — cite the planner algorithm itself.]
+
 The second teacher is a sampling-based motion planner with full access to scene geometry:
 RRT-Connect in joint space with clearance inflation applied to the robot's links and to any carried
 object, followed by inverse kinematics and playback as operational-space deltas. Unlike the
@@ -203,7 +240,19 @@ is itself a result.
 
 ## 3.6 Distillation
 
-Retained demonstrations are behaviour-cloned using the model's native flow-matching loss. Only the
+[FIGURE 3.3 — The two teachers and the two data paths, side by side. Left: shielded self-distillation
+— pi0.5 rolls out, the shield corrects, the corrected actions at the states the policy reached become
+targets. Right: the privileged planner — RRT-Connect plans from its own initial conditions and
+produces trajectories at states the policy may never visit. The figure should make the state-coverage
+difference visible, since that is the mechanism Chapters 4 and 5 argue for and it is far easier to
+see than to read. | Draw, optionally overlaying real end-effector traces from the two demo sets to
+show the distributions genuinely differ. | TO MAKE — high value, this is the figure that explains the
+thesis's central negative result.]
+
+Retained demonstrations are behaviour-cloned using the model's native flow-matching loss  [CITE:
+physicalintelligence2025pi05 — cite for the *architecture and objective*: PaliGemma backbone, the
+flow-matching action expert, and action chunking, all of which are inherited rather than designed
+here. CITE: pi0 — cite for the flow-matching action-expert formulation that pi0.5 derives from]. Only the
 parameters selected by the training configuration's trainable filter receive gradients — a LoRA
 adapter on the action head — while the vision-language backbone is frozen; the saved artefact is
 the adapter alone, reapplied over the base checkpoint at load time. The imitation target is the sequence of actions actually executed — that is,

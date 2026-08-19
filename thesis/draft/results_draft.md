@@ -1,5 +1,9 @@
 # Chapter 4 — Experiments and Results (DRAFT)
 
+<!-- MARKER CONVENTIONS: [CITE: key — what it is cited *for* + verification status]
+     [FIGURE X.Y — title. What it shows | data/asset source | EXISTS <path> / TO MAKE / OPTIONAL]
+     Every marker names the claim it supports. -->
+
 Plain prose, no formatting. Iterate here, port to LaTeX when settled.
 Numbers are final unless marked PENDING.
 
@@ -41,6 +45,16 @@ trained for 16,140 and 15,988 steps respectively, a difference of under one perc
 ---
 
 ## 4.2 Does the shield make π0.5 safe?
+
+[FIGURE 4.1 — Shield efficacy: TSR and collision rate, base vs shielded, per suite and pooled, with
+Wilson 95% intervals. | figures/fig2_safety_analysis.pdf — CHECK it plots this comparison and carries
+the intervals; regenerate if not. | EXISTS figures/fig2_safety_analysis.pdf]
+
+[TABLE 4.1 — The external-validation table. This work's unshielded baseline (CAR 17.5% / TSR 58.3%)
+beside AEGIS's reported 17.3% / 58.9% on the same three suites, and this work's shielded figures
+beside theirs, with the two reasons for the shielded gap footnoted. Worth its own table rather than
+prose: reproducing a published baseline to within a point is real external validation and should be
+impossible to miss. | Numbers already in the text. | TO MAKE]
 
 The first question is whether a control barrier function shield, applied as a runtime filter,
 makes a pretrained VLA safe on this benchmark at all.
@@ -94,6 +108,18 @@ like-for-like improvement over it.
 ---
 
 ## 4.3 Can the shield's safety be internalised?
+
+[FIGURE 4.2 — THE HEADLINE FIGURE. Base, shielded, and self-distilled (shield-free) on TSR and
+collision rate, held-out initial states, n=120 per condition, Wilson intervals. The one figure a
+reader who skims will look at, so it must state the whole result on its own: safety up, success up,
+no shield at inference. | figures/fig1_tsr_comparison.pdf — CHECK it has the distilled arm and the
+held-out split; regenerate if it predates them. | EXISTS figures/fig1_tsr_comparison.pdf]
+
+[FIGURE 4.3 — Qualitative filmstrip: the same scene and initial state under base pi0.5 (collides)
+and the distilled policy (avoids), four or five frames each, contact frame marked. Every quantitative
+figure here reports rates; none shows the behaviour. This is the cheapest large improvement available
+to the chapter, and the video assets already exist. | videos/ — pick a representative held-out
+episode. | TO MAKE — high value, low effort.]
 
 A runtime filter must run forever. It occupies inference budget on every control step, requires
 obstacle geometry at deployment, and is a component that can fail. The central question of this
@@ -154,6 +180,13 @@ substantially — the imitated action distribution differs materially from the b
 
 ## 4.4 Does the source of the demonstrations matter?
 
+[FIGURE 4.4 — State coverage, the mechanism made visible. End-effector position density for (a) the
+policy's own shielded rollouts and (b) the planner's demonstrations, on the same scene, with the
+states where the base policy collides marked. If the two distributions visibly fail to overlap at
+the collision states, this figure carries Section 5.1's entire argument in one image and answers the
+obvious objection that the planner simply produced worse trajectories. | Trajectories already in
+demos_classical/ and the shielded demo set. | TO MAKE — highest-value unmade figure in the thesis.]
+
 Section 4.3 distilled the policy from its own shielded rollouts. An obvious alternative is to
 distil from a stronger, purpose-built expert. This section reports that comparison, and it is the
 sharpest result in this chapter.
@@ -200,6 +233,11 @@ corrections depend on state the policy cannot observe — was tested and rejecte
 ---
 
 ## 4.5 What can the shield not reach?
+
+[FIGURE 4.5 — Residual collisions by culprit body: end-effector, each arm link, hand. Base, shielded,
+and distilled side by side. Shows that residual contact concentrates on arm links, which is what
+licenses the comparison against AEGIS's end-effector-only formulation and what Section 4.2's
+explanation of the CAR gap depends on. | experiments/culprits_from_log.py output. | TO MAKE]
 
 The shield reduces collisions to 13.3% but not to zero. This section identifies what the residual
 consists of, using per-body collision attribution recovered from the evaluation logs. Contacts
@@ -271,6 +309,11 @@ second mechanism accounts for the result, the shield is incidental and the contr
 rediscovery of filtered behaviour cloning.
 
 Nothing in the six-condition evaluation distinguishes them, so a matched control was run.
+
+[FIGURE 4.6 — The matched control as a three-bar comparison: base, success-filtered-only, and
+shielded-distilled, on both metrics. The selection-vs-correction confound is the first thing a
+careful examiner will raise, so the answer should be visible rather than buried in prose. | Numbers
+already in this section. | TO MAKE — OPTIONAL if the table beneath it is clear enough.]
 
 ### The matched control
 
@@ -367,6 +410,11 @@ deployable. The suggestive reading, if real, is that the distilled policy's fail
 ones, which would make uncertainty-based monitoring structurally unsuited to this failure mode.
 
 ## 4.7 Are there other channels for safety?
+
+[TABLE 4.2 — The four rejected mechanisms in one table: mechanism, what was tested, budget, outcome,
+and the scope the negative is claimed at. Four characterised negatives are a genuine contribution but
+they are currently spread across several pages of prose, where they read as a list of things that did
+not work rather than as a bounded result. | This section. | TO MAKE]
 
 Every mechanism examined so far acts on the action: a shield projects it, a guided sampler steers
 it, behaviour cloning reshapes the policy that produces it. A vision-language-action model exposes

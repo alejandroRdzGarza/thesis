@@ -51,6 +51,12 @@ because the policy visits its own failure states unprompted.
 
 ## 5.2 The cost of internalised caution (~250 words)
 
+[FIGURE 5.1 — Shield stacking. TSR and collision for the distilled policy with and without the shield
+still running, against the base policy under both. Shows that re-applying the shield to a policy that
+no longer needs it costs success, which is the concrete measurement behind AEGIS's own
+"safety-induced distribution shift" and behind this section's argument. | figures/fig3_summary.pdf —
+CHECK whether it already contains the stacked arm. | EXISTS-OR-MAKE figures/fig3_summary.pdf]
+
 Internalised safety is not free, and this work measured its price in two forms.
 
 The first is time. The distilled policy takes 157.3 control steps to complete a task against 138.6
@@ -81,6 +87,11 @@ eroded performance, in contrast to an earlier DAgger-style experiment in this pr
 across rounds. One round was sufficient, and iterating was not harmful.
 
 ---
+
+[FIGURE 5.2 — OPTIONAL. Per-scene scatter of collision rate before vs after distillation, one point
+per scene, diagonal marked. Would show whether the improvement is uniform or driven by a subset,
+which is the question a sceptical reader asks of any pooled 82.5% to 19.2%. |
+figures/fig4_episode_scatter.pdf may already be close. | EXISTS-OR-ADAPT figures/fig4_episode_scatter.pdf]
 
 ## 5.3 Limitations (~300 words)
 
