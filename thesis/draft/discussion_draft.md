@@ -49,6 +49,13 @@ that were already both safe and competent, displacing them from the distribution
 trained to produce. The result is an action that satisfies the barrier and no longer executes a
 well-formed grasp.
 
+This effect is not peculiar to the setup here. The authors of the benchmark report the same
+phenomenon independently, observing that enforcing safety with their layer "can drive the system
+into out-of-distribution states" in which "the policy may behave erratically and fail to recover".
+That an author-acknowledged limitation of runtime shielding is precisely what distillation removes
+is, if anything, the clearest argument for internalisation: the distilled policy is safe without
+ever being pushed off its own distribution.
+
 Notably, the anticipated cost did not appear. A second distillation round neither improved nor
 eroded performance, in contrast to an earlier DAgger-style experiment in this project that degraded
 across rounds. One round was sufficient, and iterating was not harmful.

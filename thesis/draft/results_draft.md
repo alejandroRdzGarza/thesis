@@ -76,11 +76,20 @@ rather than producing an artefact.
 The shielded comparison differs, and the difference is worth stating rather than smoothing. On the
 same three suites the published safety layer reaches CAR 71.9% at TSR 74.6%, whereas the shield
 used here reaches CAR 86.7% at TSR 71.7% — roughly fifteen points safer and three points less
-successful. The most likely explanation is the information available to the constraint: the barrier
-here is built from ground-truth obstacle geometry read from the simulator, while the published
-layer derives its constraints through vision-language safety assessment and must therefore absorb
-perception error. The figures reported in this chapter should accordingly be read as an upper bound
-for this class of filter, not as a like-for-like improvement over it.
+successful. Two differences in the constraint account for this, and both are deliberate.
+
+The published formulation, by its authors' own statement, "solely constrains the end-effector", and
+its limitations section notes that unconstrained kinematic links may consequently collide. The
+barrier used here additionally constrains links three through seven and the hand body
+(Section 3.2). Section 4.5 shows that arm links are exactly where residual collisions concentrate,
+so extending the constraint to them is the most likely source of the gap.
+
+The second difference is the information available. The barrier here is built from ground-truth
+obstacle geometry read from the simulator, while the published layer derives its constraints
+through vision-language grounding and fused depth, and attributes its own residual collisions
+primarily to that upstream perception pipeline rather than to the controller. The figures reported
+in this chapter should accordingly be read as an upper bound for this class of filter, not as a
+like-for-like improvement over it.
 
 ---
 
