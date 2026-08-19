@@ -38,3 +38,24 @@ error, so the figures reported here are an upper bound for this class of filter.
 *Statistical.* Each trained policy is a single training run; seed variance is unquantified.
 Evaluation uses held-out initial states throughout, with 120 rollouts per evaluated policy and 95% confidence
 intervals.
+
+
+---
+
+[CITE — Chapter 1 placement, from papers/paper_relevance_matrix.csv]
+
+- **CITE: aegis2025** — the introduction's motivating fact: runtime shielding works and carries a
+  permanent deployment burden. This is the setting the thesis inherits, not a competitor.
+- **CITE: rt_vla** — deployment-efficiency motivation for distillation generally. Matrix caution,
+  which applies directly here: use only if measured latency or compute savings are reported.
+  Otherwise say the shield is *absent*, not that a speedup was demonstrated. No latency was
+  measured in this work, so the weaker phrasing is the correct one.
+- **CITE: vita_vla** — establishes that action-level knowledge can be distilled into a VLM at all,
+  which makes the premise plausible before any safety claim is made. Do not cite it for safety.
+- **CITE: physicalintelligence2025pi05, pi0** — identify the base policy and its lineage.
+- **CITE: liu2023libero** — the benchmark family.
+
+[FIGURE 1.1 — OPTIONAL but strong as a frontispiece: the same scene under base pi0.5 (collides),
+shielded pi0.5 (avoids, shield running), and the distilled policy (avoids, no shield). Three
+columns, one row. States the thesis in a single image before any prose. Shares assets with
+Figure 4.3. | videos/ | TO MAKE]

@@ -134,7 +134,23 @@ interpreted.
 
 ---
 
+[CITE — placement taken from papers/paper_relevance_matrix.csv, which assigns each paper to the
+sections it belongs in. Limitations must carry: CITE: il_with_cbf for the *formal* boundary — their
+input-to-state-safety result holds only under explicit robustness and learning conditions, so state
+plainly that the unshielded student is not shown to inherit forward invariance; CITE: safedojo and
+CITE: safevla to scope the RL negative, since neither is scalar-reward RL and SafeDojo evaluates on
+SafeLIBERO directly; CITE: conbat and CITE: latentpolicybarrier as learned-safety alternatives that
+keep an inference-time correction, which is the property this work removes rather than the
+representation it learns.]
+
 ## 5.4 Future work (~150 words)
+
+[CITE: intervengen — future work should cite their *scaling argument*: corrective coverage
+synthesised from a small seed set, ten interventions outperforming a hundred at 12% of the
+collection cost. The analogous move here is generating shielded corrective coverage without
+re-running the shield online for every episode. CITE: safedojo for the comparison worth running
+next — learned imagined safety costs against distilled corrections. CITE: conbat, latentpolicybarrier
+for perception-grounded or learned barriers replacing the privileged-geometry dependency.]
 
 The most direct extension is a **whole-body barrier with a faithful robot model** — proper link
 geometry and directly constrained link velocities rather than a pseudo-inverse estimate. Section
