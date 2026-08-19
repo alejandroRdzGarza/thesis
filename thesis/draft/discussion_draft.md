@@ -26,6 +26,34 @@ were dense and per-step but came from a *foreign* expert, failed as completely a
 supervision is therefore not sufficient on its own — it must also be supervision at states the
 policy actually reaches.
 
+There is a sharper control on this point in the literature, and it is the reason the result reported
+here is not a foregone conclusion. Guerrier et al. train a reinforcement-learning agent with a CBF
+filter active throughout training and then remove it, which is superficially the same protocol used
+here. Their agent does not internalise the constraint: with the filter disabled it collides, and
+their critic visualisation shows high positive value *inside* the obstacle, meaning the policy never
+represented the hazard at all. The shield had been present for the entire training run.
+
+The difference is what the policy was trained on. Their agent's actions are overridden by the filter
+but the learning signal remains a scalar reward; no gradient ever points toward the corrected action.
+The method here behaviour-clones the corrected action itself, so the correction is the target rather
+than an intervention the policy is merely subjected to. Their result therefore establishes something
+this work depends on: exposure to a shield during training does not by itself transfer safety, and
+the imitation objective is doing the work. It also disposes of the obvious deflationary reading of
+Chapter 4 — that any policy trained under a shield would end up safe.
+
+Their curriculum variant, in which the executed action is a blend of filter and policy with the
+filter's weight decayed to zero, does internalise both goal-reaching and obstacle avoidance, and the
+behaviour survives removal. That is a second route to the same destination, reached without
+imitation, and it suggests the present result is an instance of something more general rather than a
+property of behaviour cloning specifically  [CITE: guidedbyguardrails — VERIFIED against the PDF.
+Cite their *CBF Filter negative*: safety is not retained when the filter is removed, with the critic
+assigning high value inside the obstacle. Cite their *CBF Decay* result as the curriculum
+alternative. Cite their *scalar-reward findings* — SAC alone and CBF Reward both fail to learn, and
+they conclude scalar rewards may be insufficient — in support of Section 4.7's RL negative. Note the
+*scale caveat*: a unicycle model in a 1.5 m arena with SAC over 10 seeds, sim2real to a four-wheel
+robot, not a VLA. Note also that their future work proposes supplying CBF interventions as privileged
+information during training, which is close to what this thesis implements].
+
 It is tempting to state this more strongly, as the claim that what transfers is correction of the
 policy's own behaviour and never instruction from outside it. That claim would be false, and the
 literature already falsifies it. SAFE-GIL trains a behaviour-cloning policy on demonstrations from
