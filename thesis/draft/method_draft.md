@@ -34,8 +34,11 @@ the episode by more than one millimetre, measured as the sum of absolute compone
 
     sum_k | p_k(t) - p_k(0) |  >  0.001 m
 
-and the episode is marked collided if this holds at any step. The threshold is matched to the
-AEGIS/VLSA definition for comparability. **Collision-avoidance rate (CAR)** is its complement.
+and the episode is marked collided if this holds at any step. The benchmark's originating work
+defines collision avoidance as the proportion of *strictly collision-free* episodes without stating
+a numeric tolerance; the one-millimetre L1 threshold used here is this work's operationalisation of
+that definition, chosen to be strict enough that a genuine contact cannot pass it while remaining
+above simulator noise. **Collision-avoidance rate (CAR)** is its complement.
 
 Two properties of this definition matter. It is a **cumulative displacement** test against the
 episode's initial pose, not a per-step contact test, so an obstacle nudged early stays flagged.
@@ -46,7 +49,9 @@ threshold.
 
 **Execution time to success (ETS)** is the control step at which the success predicate first
 holds, averaged over successful rollouts only. A failed rollout has no completion time, and
-substituting the horizon would make a policy appear faster the more often it fails.
+substituting the horizon would make a policy appear faster the more often it fails. Note that the
+originating work uses the same name for a different quantity — mean episode length including
+timeouts — so ETS values here are internally comparable but should not be read against theirs.
 
 **CBF activation rate** is the fraction of control steps on which the shield altered the action,
 counted when the projected action differs from the nominal one by more than 1e-4. It is an
@@ -118,7 +123,15 @@ diverge, and the constraint is enforced against the prediction.
 
 *The geometry is privileged.* Obstacle poses and sizes are read from the simulator rather than
 estimated from the policy's observations, so the shield operates on information a deployed system
-would have to perceive. The reported figures are an upper bound for this class of filter.
+would have to perceive. The originating work instead derives obstacle geometry through
+vision-language grounding and fused depth, and attributes its residual collisions primarily to that
+upstream perception pipeline rather than to the controller. The figures reported here are therefore
+an upper bound for this class of filter.
+
+*Arm links are constrained here but not in the originating work*, whose formulation "solely
+constrains the end-effector" and which notes that its unconstrained kinematic links may
+consequently collide. Extending the barrier to the links is a deliberate difference from that
+baseline, and Section 4.2 reports its effect.
 
 ---
 
