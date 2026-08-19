@@ -182,6 +182,25 @@ of state space." That contrasts usefully with this thesis's geometric, privilege
 needs less supervision but yields no geometric guarantee; this one needs ground-truth geometry but
 produces an interpretable constraint.
 
+## 8. Latent Policy Barrier (NeurIPS 2025, Sun & Song) — VERIFIED 2026-08-19
+*Closes the remaining half of risk C1.*
+
+**Confirmed: it retains inference-time steering, and says so as a selling point.** Abstract: "At
+inference time, the dynamics model predicts future latent states and optimizes them to stay within
+the expert distribution." Related work: "Our method differs from these strategies by performing
+inference-time steering in latent space." It advertises "plug-and-play compatibility with
+off-the-shelf pre-trained policies, improving their robustness without requiring policy retraining
+or fine-tuning" — **the exact inverse of this thesis**, which fine-tunes precisely so the runtime
+machinery can be discarded. C1 is closed: both learned-barrier comparators keep the online step.
+
+Closest point of contact: their rollout data is collected "by executing intermediate checkpoints
+saved during base policy training" and "naturally covers diverse deviations around the policy's own
+distribution without requiring explicit success labels, task rewards, or additional human
+teleoperation." Same instinct as this thesis on the data source; opposite conclusion on deployment.
+They decouple precise imitation (base diffusion policy on expert data only) from OOD recovery
+(dynamics model on expert + suboptimal rollouts), which is a cleaner statement of a tension this
+thesis resolves by a single distillation pass.
+
 ---
 
 # Part B — Rewrite-risk register
@@ -195,7 +214,7 @@ writing the prose that depends on them.**
 | C1 | Distilling a CBF shield into a VLA and **removing it at deployment** is new | A paper that already distils a safety filter and drops it at inference | §1.3, §2.3, Ch 6 ¶1 | ~~ConBaT~~ (confirmed retains online optimization), **Latent Policy Barrier** | **HALF-CLOSED** |
 | C2 | The student does **not** inherit formal forward invariance — an empirical result only | Their conditions turn out to be satisfiable here | Ch 6 ¶2, §5.3 | IL_with_CBF | **CLOSED** — none of their three conditions hold here; §5.3 can now name them |
 | C3 | The scalar-RL negative is about the tested reward design, not safe RL as a class | A SafeLIBERO safe-RL result that makes our RL arm look under-tuned rather than scoped | §4.7, Ch 6 ¶4 | **SafeDojo** (evaluates on SafeLIBERO) | **HIGH** |
-| C4 | Supervision transfers by **state coverage**, not teacher identity | A paper where a foreign teacher on foreign states transfers safety anyway | §4.4, §5.1, Ch 6 ¶3 | LPB, SafeVLA | MEDIUM |
+| C4 | Supervision transfers by **state coverage**, not teacher identity | A paper where a foreign teacher on foreign states transfers safety anyway | §4.4, §5.1, Ch 6 ¶3 | ~~LPB~~ (uses policy's own rollouts, consistent), SafeVLA | **LOW** — two verified papers now support it |
 | C5 | Shield exposure alone does not internalise safety; the imitation objective does | Already resolved — Guided by Guardrails **confirms** it | §5.1 | — | **CLOSED** |
 | C6 | The arm-link constraint extends AEGIS's end-effector-only barrier | Already resolved — quoted from their limitations | §3.2, §4.2, §4.5 | — | **CLOSED** |
 | C7 | Language cannot carry the safety constraint | Already corroborated by ROAD-VLA's three text variants | §4.7 | — | **CLOSED** |
@@ -203,12 +222,26 @@ writing the prose that depends on them.**
 
 ## Reading order dictated by the register
 
-1. **IL_with_CBF** (7 pp) — C2. Guards the thesis's most important *negative* claim.
-2. **Latent Policy Barrier** (19 pp) — C1 + C4. "Very close to your focus on the policy's own
-   rollout distribution"; the question is whether it removes the runtime step or keeps it.
-3. **ConBaT** (8 pp) — C1. Same question.
-4. **SafeDojo** (20 pp) — C3. The only other SafeLIBERO method here; its numbers may need reporting.
-5. SafeVLA (32 pp) — C4, positioning only.
+~~1. IL_with_CBF~~ — **DONE**, C2 closed.
+~~2. Latent Policy Barrier~~ — **DONE**, C1 closed.
+~~3. ConBaT~~ — **DONE**, C1 closed.
+
+**4. SafeDojo (20 pp) — the only RISK: HIGH item still open (C3).** It is the one other method in
+this literature evaluated on SafeLIBERO, so its numbers may need to appear in Chapter 4 for the
+comparison to be complete, and its existence is what keeps the scalar-RL negative honest. Chapter 6
+and Section 4.7 are already phrased to survive whatever it says — the negative is scoped to the
+reward design tested — so this cannot force a rewrite, only an addition. Read before submission,
+not before writing.
+
+5. SafeVLA (32 pp) — C4, positioning only, now LOW risk.
+
+## Residual exposure after this session
+
+**All claims that could force a structural rewrite are now verified.** C1, C2, C5, C6, C7, C8 are
+closed; C4 is LOW with two independent confirmations. C3 remains open but is bounded: SafeDojo can
+require an added comparison, not a retraction, because the RL negative is already scoped to the
+tested reward design rather than to safe RL as a class. Chapter 2 was written only after this state
+was reached.
 
 ## Low-risk remainder — read only if time allows
 
