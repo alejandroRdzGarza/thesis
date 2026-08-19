@@ -436,6 +436,24 @@ That last point is the one I would test first. The measured behaviour — slower
 equally collision-prone — is precisely what one would expect if the model registered the clause's
 cautious register while failing to parse its negated content.
 
+There is direct external support for this negative, and it favours a different explanation than
+either of the above. ROAD-VLA tests three text-based privileged contexts as teachers for VLA
+adaptation — a retrieved action hint, an egocentric spatial description, and a task plan combined
+with that description — and all three underperform, the spatial variants catastrophically (4.68%
+against 91.5% for their action-space teacher; their Table 2). They attribute the failure to two
+causes: that embodied post-training on instruction-action pairs erodes the backbone's ability to
+exploit in-context language hints, and that "a modality gap prevents the discrete text from
+providing the precise grounding required for continuous control."
+
+Their second cause is the more troubling one here, because it does not depend on phrasing. If the
+obstruction is the gap between discrete text and continuous control rather than the parse of any
+particular clause, then all four rewordings proposed above would fail as well, and the negative
+reported in this section is a property of the channel rather than of the prompt. Notably their
+spatial variant — which supplied exactly the referent grounding that the "naming the obstacle" and
+"spatial grounding" tests above are designed to provide — was their *worst* condition. The
+rewordings remain worth running, since they are nearly free, but the prior on their succeeding
+should be low.
+
 ### CBF-guided sampling: steering generation rather than correcting it
 
 PENDING — write up as a scope-limited negative. lambda=1 reproduces the projection endpoint exactly

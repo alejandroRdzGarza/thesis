@@ -70,8 +70,19 @@ other citations for two reasons: SafeLIBERO and the collision metric come from t
 and this thesis reproduces its unshielded baseline closely (measured CAR 17.5% / TSR 58.3% against
 their reported 17.3% / 58.9%, averaged over the three suites used here). State that agreement
 explicitly — it is real external validation. Do NOT claim agreement on the shielded figures: this
-shield reaches CAR 86.7% against their 71.9%, and the likely reason is that it uses ground-truth
-geometry while theirs works from vision-language safety assessment.
+shield reaches CAR 86.7% against their 71.9%, and there are now two verified reasons rather than
+one. First, their formulation "solely constrains the end-effector" by their own statement, and
+their limitations section notes that unconstrained kinematic links may consequently collide; the
+barrier here also constrains links 3–7 and the hand, and Section 4.5 shows arm links are exactly
+where residual collisions concentrate. Second, this barrier reads ground-truth geometry while
+theirs works from vision-language grounding and fused depth, to which they attribute their own
+residual failures. Both differences favour this shield, so the comparison is an upper bound for the
+class rather than an improvement over their method.
+
+Also state, because Section 4.7 depends on it, that AEGIS independently reports "safety-induced
+distribution shift": enforcement can drive the policy into out-of-distribution states where it
+behaves erratically and fails to recover. That is the same effect measured here as the
+shield-stacking success loss, and it is the strongest available argument for internalisation.
 
 **[SOURCE] Other runtime safety filtering for learned policies.** Shielded RL, safe MPC, and
 action-space filtering more broadly.
@@ -81,9 +92,33 @@ established. Its cost is that it is permanent: inference budget on every step, o
 required at deployment, an additional failure point, and — as Section 4.3 measures — a *capability*
 cost once the policy no longer needs it, since projection displaces competent actions off the
 policy's distribution. The question this thesis asks is whether the behaviour can be moved into the
-policy instead. That question does not appear to have been asked for VLAs. **[VERIFY: search for
-prior safety-filter distillation work before claiming novelty — this is the single most important
-literature check in the chapter.]**
+policy instead.
+
+**[RESOLVED — novelty check completed 2026-08-19.]** The two closest candidates were read directly
+and neither forecloses the claim, but each narrows how it should be phrased.
+
+*AEGIS* retains its constraint layer at inference by construction; the amortization question is
+simply not asked there. Its QP runs every step. Nothing in that work bears on what the corrections
+would teach if used as training data.
+
+*ROAD-VLA* is the closer call and the more instructive one. It builds an advantage-guided teacher
+and distils it into the policy, so at the level of "distil a corrective signal into a VLA" it is
+prior art and must be cited as such. Two features keep the contribution here distinct. Its teacher
+is a logit-perturbed copy of the *student itself* (their Eq. 10), so no foreign controller appears
+anywhere in the work; and its policy-improvement bound is explicitly conditional on the teacher
+remaining proximal to the current policy. The three privileged teachers it rejects are all
+*textual* — its Section 4.2.1 is titled "Text-guided $\mathcal{I}$", and the rejected variants are
+language templates scoring 75.8% (MCTS PI, against a PPO baseline of 87.2%) and 4.68% (RelSpatial
+and Plan+RelSpatial), against 91.5% for the full method.
+
+So the honest positioning is: ROAD-VLA's proximity principle *predicts* the planner-distillation
+failure reported in Section 4.6, but the paper never tests a foreign low-level controller supplying
+well-formed actions. That experiment is this thesis's contribution, and it should be presented as
+filling a gap their framework anticipates rather than as a disagreement with it. Chapter 1.3 must
+be phrased to match — claim the empirical boundary, not the idea of distilling corrections.
+
+What remains genuinely unclaimed by either: distilling a *control-theoretic safety filter* into a
+VLA and removing it at deployment.
 
 ---
 
@@ -101,6 +136,14 @@ trajectories (STaR, RAFT, rejection-sampling fine-tuning). This is the alternati
 Section 4.6's control ablation exists to rule out, so the reader must meet it here to appreciate
 why that control was necessary.
 
+**[SOURCE] Policy-proximal corrective supervision.** SAFE-GIL, IntervenGen, and ROAD-VLA. This is
+the lineage Section 5.1's explanation belongs to and it currently has no home in the chapter, which
+is a gap: the thesis's central mechanism claim — that supervision must correct errors on or near
+the learner's own rollout distribution — is presented in Chapter 5 as though it were novel, when it
+is the shared premise of three prior methods. Presenting it here as established, and Chapter 5's
+contribution as *testing* it against a privileged planner, is both more accurate and a stronger
+position. SAFE-GIL and IntervenGen still need verifying against their PDFs before this is written.
+
 **[SOURCE] RL for VLAs.** Flow-GRPO and related on-policy methods for flow-matching policies; what
 they achieve and at what compute cost. Chapter 5 argues these fail here for a structural reason
 (exploration and credit assignment share the sampling-noise knob) — that argument needs the method
@@ -116,7 +159,13 @@ methodological novelty here would be both wrong and easy to falsify.
 ## Checklist before this chapter is finished
 
 - [ ] Every **[SOURCE]** replaced by prose written from the actual paper
-- [ ] The **[VERIFY]** novelty check in 2.3 completed, and the claim in 1.3 adjusted to match
-- [ ] AEGIS's collision metric confirmed to match the L1 >1 mm test of Section 3.1
+- [x] The **[VERIFY]** novelty check in 2.3 completed — AEGIS and ROAD-VLA both read directly.
+      Chapter 1.3 still needs adjusting to match: claim the empirical boundary, not the idea of
+      distilling corrections, which ROAD-VLA has prior art on.
+- [x] AEGIS's collision metric checked — it does **not** match. Their CAR is "the percentage of
+      strictly collision-free episodes", with no numeric threshold, and their ETS is "the average
+      episode length (including timeouts)", a different quantity from the first-success-step-over-
+      successes used here. Section 3.1 now presents the L1 >1 mm test as this work's own
+      operationalisation rather than as theirs.
 - [ ] SafeDAgger cited explicitly as the method's ancestor, in 2.4 and again in Chapter 3
 - [ ] Forward-invariance preconditions written in 2.2, since 4.5 depends on them
