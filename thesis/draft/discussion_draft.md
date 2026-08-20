@@ -11,8 +11,11 @@ responsible. In a flow-matching policy the only lever available for that inferen
 noise: exploration and credit assignment are the same knob. Increasing the noise enough to
 distinguish good actions from bad also degrades the actions being evaluated, so the signal that
 drives learning is the signal that destabilises it. This is not a tuning difficulty but a
-structural one, and it is consistent with what was observed: the RL attempts in this project did
-not converge to a policy that was both safer and competent.
+structural one, and Section 4.7 brackets it from both sides: the single configuration that moved
+the policy's behaviour collapsed it to inaction, with success reaching zero even in the shielded
+condition, while every configuration stable enough to preserve the task left the unshielded
+collision rate pinned near 1.0 across six rounds. Those are not two tuned settings with a working
+point between them; they are the two sides of one knob.
 
 Imitation replaces the scalar with a dense, per-step target. The shield does not report that a
 trajectory was unsafe; it reports what should have been done instead, at every control step where

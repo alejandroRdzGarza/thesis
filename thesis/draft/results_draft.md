@@ -416,6 +416,93 @@ and the scope the negative is claimed at. Four characterised negatives are a gen
 they are currently spread across several pages of prose, where they read as a list of things that did
 not work rather than as a bounded result. | This section. | TO MAKE]
 
+### Scalar-reward reinforcement learning: the attempt that motivated everything else
+
+Reinforcement learning was tried first, and its failure is what motivated the imitation approach
+that the rest of this chapter evaluates. It is reported here rather than in passing because the
+failure is structural, and because four runs are needed to establish that.
+
+The setup was flow-SDE GRPO on $\pi_{0.5}$'s flow-matching action head: the deterministic sampling
+ODE is converted to an equivalent SDE so that log-probabilities exist and a policy gradient can be
+taken  [CITE: flow_grpo for the ODE-to-SDE construction; CITE: grpo for the group-relative
+objective. Implementation lineage only]. A LoRA adapter on the action head received gradients with
+the backbone frozen, matching the trainable surface used for distillation in Section 4.3, so the
+comparison between the two learning signals is not confounded by capacity. Rollouts used the cps
+sampler at noise 0.7 with 10 denoising steps, clipping 0.2, on `safelibero_object` level II task 0,
+episodes 0-3, with $K=8$ rollouts per group (32 per round) over six rounds. The reward combined
+success, direct collision, CBF activation rate and progress terms.
+
+Four configurations were run, and they bracket the failure from both sides.
+
+**Too weak: the signal does not move the policy.** With the shield active on every rollout
+(Exp 001-002), collisions never enter the reward directly — the shield prevents them — so the only
+safety signal is the CBF activation penalty. Raising the learning rate to $5\times10^{-5}$ and the
+activation weight to 1.5 left the policy flat: CBF reliance did not fall.
+
+**Too strong: the policy reward-hacks to inaction.** Running half of each group's rollouts
+unshielded (Exp 003) puts real collisions into the reward, widening the within-group spread to
+roughly $\Delta = 1.0$ between an unshielded-safe success and an unshielded collision. The safety
+metric improved immediately and the task collapsed with it.
+
+| Round | shielded success | overall success | unshielded collision | no-CBF collision |
+|---|---|---|---|---|
+| 0 | 0.94 | 0.91 | 1.00 | 0.94 |
+| 1 | 0.94 | 0.81 | 0.94 | 0.88 |
+| 2 | **0.00** | 0.00 | 0.63 | 0.00 |
+| 3 | 0.00 | 0.00 | 0.00 | 0.00 |
+| 5 | 0.00 | 0.00 | 0.06 | 0.00 |
+
+Collisions reached zero, but success reached zero as well — and did so *in the shielded condition
+too*, which the shield alone cannot cause. The policy found the trivial zero-collision optimum: do
+nothing. Two causes compound here. The adapter diverged, since the mixed reward is a far
+higher-variance signal than the flat one of Exp 002 at the same learning rate; and the collision
+penalty punishes progress, because in these scenes the obstacle lies between the gripper and the
+goal, so nearly all forward motion collides early in training. Suppressing it suppresses
+goal-directed behaviour.
+
+**Stable but flat.** Exp 004 lowered the learning rate to $2\times10^{-5}$ and annealed the shield
+probability from 0.85 to 0.40 over six rounds, introducing the collision gradient gently.
+
+| Round | shield prob | shielded success | unshielded collision | no-CBF collision |
+|---|---|---|---|---|
+| 0 | 0.85 | 0.75 | 1.00 | 0.94 |
+| 2 | 0.67 | 0.80 | 1.00 | 1.00 |
+| 3 | 0.58 | 0.70 | 1.00 | 0.94 |
+| 5 | 0.40 | 0.83 | 1.00 | 0.88 |
+
+The collapse was fixed — shielded success held between 0.70 and 0.88 with no divergence — but
+nothing was learned. The unshielded collision rate stayed pinned near 1.0 and CBF activation stayed
+flat across all six rounds.
+
+**What the bracket establishes.** The only configuration that moved the policy's behaviour
+collapsed it; every configuration stable enough to preserve the task learned no avoidance. That is
+not a gap between two tuned settings but the two sides of a single one. The learning signal and the
+destabilising signal are the same knob, for two compounding reasons. A single scalar episode reward
+gives no per-step spatial credit, so the policy cannot separate "detour around the obstacle" from
+"stop moving toward the goal" when the obstacle lies on the path to the goal. And in a flow-matching
+policy, exploration is sampling noise, which is also what degrades the actions being evaluated —
+raising it enough to distinguish good actions from bad also makes them worse.
+
+This is what the shield supplies and the reward does not. The CBF already computes the correct
+action at every step it intervenes, in the same space the policy emits, so the credit assignment
+the reward could not infer is simply given. That observation is the pivot to Section 4.3, and
+Section 5.1 develops it.
+
+**Scope of this negative.** The claim is about scalar-reward flow-GRPO under the reward design,
+budget and single scene tested — six rounds on one task, not a hyperparameter search. It is not a
+claim about safe reinforcement learning as a class, and two methods in the literature make richer
+use of constraint information: a constrained-MDP formulation, and a model-based approach that
+estimates imagined task progress and safety cost separately inside a video world model and is
+evaluated on this same benchmark  [CITE: safevla; CITE: safedojo — cite both as scope control, and
+state explicitly that neither is scalar-reward RL. SafeDojo's SafeLIBERO numbers should be reported
+here if the comparison is to be complete]. Notably, an independent study of CBF-guided reinforcement
+learning reaches the same conclusion about the reward channel, finding that unterminated continuous
+negative rewards leave the agent unable to learn the task at all  [CITE: guidedbyguardrails — their
+SAC and CBF-Reward conditions both attain near-zero return, and they conclude scalar rewards may be
+insufficient. VERIFIED].
+
+---
+
 Every mechanism examined so far acts on the action: a shield projects it, a guided sampler steers
 it, behaviour cloning reshapes the policy that produces it. A vision-language-action model exposes
 a channel none of these use, and one a classical controller does not possess at all — the
