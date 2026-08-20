@@ -238,6 +238,28 @@ is itself a result.
 
 ---
 
+### Why $\pi_{0.5}$, and what was tried first
+
+The base policy was not the first choice, and the reason for changing it bears on how the results
+should be read. The work began on OpenVLA-7B with a Cartesian CBF filter, and the first distillation
+attempt collected CBF-corrected demonstrations and fine-tuned that model through LoRA. It produced
+no useful learning signal.
+
+Two causes were identified, and only one is about the model. The shield was mis-configured at the
+time of collection, so the "corrected" actions differed only marginally from the base policy's own
+proposals — the dataset nominally contained corrections but carried almost no correction signal, a
+failure mode invisible to any check that counts demonstrations rather than measuring how much they
+were changed. Separately, OpenVLA-7B's base competence on LIBERO is low enough that safety and
+capability failures are difficult to separate: a policy that rarely completes the task provides
+little opportunity to observe whether it completes it *safely*.
+
+Both considerations pointed to the same change. $\pi_{0.5}$ has substantially stronger base LIBERO
+performance, which makes the safety question well-posed, and it is the policy the runtime-shielding
+baseline evaluates, which makes the comparison in Section 4.2 direct. The episode is recorded
+because it is the origin of a check used throughout the rest of this work: demonstration sets are
+now audited for how much the shield actually changed them, not merely for whether they were
+collected successfully (Section 3.6).
+
 ## 3.6 Distillation
 
 [FIGURE 3.3 — The two teachers and the two data paths, side by side. Left: shielded self-distillation

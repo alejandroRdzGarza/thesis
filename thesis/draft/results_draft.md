@@ -212,6 +212,42 @@ percent, and are evaluated by the same code on the same 24 scenes and the same h
 states. The only difference is where the demonstrations came from. Distilling safety from a
 foreign expert failed; distilling it from the policy's own shielded rollouts succeeded.
 
+**An earlier attempt, and the diagnostic that located its failure.** Before the offline comparison
+reported above, the classical expert was distilled interactively in the DAgger manner: the student
+drives, the expert labels the states the student visits, and the aggregated dataset is retrained.
+This is the textbook remedy for exactly the coverage problem identified here, and it made matters
+worse. Collision rose monotonically across rounds, from 44% to 75%, with success pinned near zero.
+
+The cause was not the coverage principle but a violated precondition. DAgger's correctness argument
+requires a Markov oracle $\pi^*(s)$ — the expert's label must be a function of the state it is
+shown. The classical expert was implemented as a latched phase machine carrying hidden internal
+state, so when the student drove erratically the expert's phase desynchronised from the observation
+and the same image received contradictory labels across rounds. Behaviour cloning averaged them.
+
+Isolating this required ruling out the alternative, that the imitation machinery itself was broken.
+Hard-overfitting behaviour cloning on a single clean demonstration and evaluating on that same
+episode returned success 1.0 with zero collisions, establishing that normalisation, the observation
+pipeline and adapter capacity were all sound, and that the fault lay in the labels. The expert was
+then rewritten as a stateless reactive oracle, inferring its phase from observables at every call —
+grasp from the measured gripper finger separation, transport from end-effector height — and
+validated against the original on the same episodes, where it produced identical outcomes
+episode-for-episode.
+
+The rewrite made the expert Markov, and distillation still failed. That is what moved the
+investigation from the interactive protocol to the teacher itself, and ultimately to the matched
+offline comparison reported above. It is recorded here because the negative is easy to misattribute:
+an interactive method failing against a non-Markov expert is a statement about the expert, not about
+DAgger or about coverage.
+
+**Why the classical expert cannot teach what the shield teaches.** A further measurement explains
+the difference directly. Running the classical expert as the driver on spatial task 0, with the
+shield active, gives 5/8 success and 0/8 collisions. Running the same expert unshielded gives 7/8
+success and **5/8 collisions**, with contact from arm links, gripper, held object and scene objects
+alike. The expert is not self-safe: its demonstrations are safe only because the shield is
+correcting them, and those corrections depend on the full joint configuration, which is not part of
+what the student observes. The student is therefore asked to reproduce a behaviour whose safety is
+not a function of its own inputs.
+
 The conclusion to draw from this is about state coverage rather than about the teacher's identity,
 and the distinction is not merely cautious. A foreign expert *can* teach safety: SAFE-GIL clones an
 MPC or PID controller and obtains substantially safer policies, having first used reachability
@@ -222,7 +258,13 @@ states it labelled and the states the student needed labelled did not overlap. T
 its foreignness, is what the contrast isolates.
 
 **Caveat.** Six of the 24 scenes contained no planner demonstrations, so roughly 30 of the 120
-evaluation rollouts test the expert's coverage rather than the distillation itself. Restricting
+evaluation rollouts test the expert's coverage rather than the distillation itself. That coverage
+gap is not random: per-task inspection on the spatial suite shows the expert succeeding 5/8 and 6/8
+on the two table-height tasks but **0/8** on the elevated-target task, where the goal sits on a
+stove and a moka pot obstructs the approach. Failures there occur across every phase rather than at
+one, which is the signature of a kinematic and controller-posture limit rather than of occlusion or
+collision avoidance. The teacher's competence is therefore geometry-dependent, and Section 5.3
+treats this as a limitation of the comparison rather than a property of privileged planners. Restricting
 to the 18 scenes with training data does not rescue the result — the pooled figure is already
 flat against base — but both slices should be reported, since the 24-scene number conflates two
 distinct failures.
@@ -411,10 +453,13 @@ ones, which would make uncertainty-based monitoring structurally unsuited to thi
 
 ## 4.7 Are there other channels for safety?
 
-[TABLE 4.2 — The four rejected mechanisms in one table: mechanism, what was tested, budget, outcome,
-and the scope the negative is claimed at. Four characterised negatives are a genuine contribution but
-they are currently spread across several pages of prose, where they read as a list of things that did
-not work rather than as a bounded result. | This section. | TO MAKE]
+[TABLE 4.2 — The rejected mechanisms in one table: mechanism, what was tested, budget, outcome, and
+the scope the negative is claimed at. Rows are scalar-reward flow-GRPO (four configurations,
+bracketed), language-expressed constraint, CBF-guided sampling, and best-of-$N$ selection — plus the
+two rejected *explanations* from Section 4.6 (observation aliasing, generative uncertainty) if they
+fit without crowding. These are characterised negatives rather than a list of things that did not
+work, but they currently read as the latter because they are spread over several pages. | This
+section. | TO MAKE — this table is what converts the negatives into a contribution.]
 
 ### Scalar-reward reinforcement learning: the attempt that motivated everything else
 
@@ -600,14 +645,73 @@ should be low.
 
 ### CBF-guided sampling: steering generation rather than correcting it
 
-PENDING — write up as a scope-limited negative. lambda=1 reproduces the projection endpoint exactly
-on a synthetic barrier; on level-II scenes guidance never activates because the end-effector's
-closest approach is 0.231 m against a 0.15 m barrier while collisions still occur. Guidance
-inherits the end-effector scope of the barrier it steers by. Ties to Section 4.5.
+The shield corrects an action after the policy has produced it. A flow-matching policy offers an
+earlier point of intervention: the action is generated by integrating an ODE over several denoising
+steps, so a barrier gradient can be injected *into* that integration, steering generation toward
+safe actions rather than projecting unsafe ones afterwards. The update takes the form
+$v' = v - (\lambda/\sigma)\,g$, where $g$ is the gradient of the barrier with respect to the
+candidate action and $\sigma$ is the noise level at that step.
 
-### Best-of-N selection
+The implementation was validated before deployment, which matters because two sign and scheduling
+conventions produce plausible-looking but incorrect behaviour. On a synthetic barrier with a known
+closed-form projection, $\lambda = 1$ reproduces the projection endpoint exactly, confirming that
+the guidance term is correctly signed and scaled.
 
-PENDING — not yet run.
+On real scenes it never fired. Across level-II episodes the end-effector's closest approach to the
+obstacle was 0.231 m against a barrier radius of 0.15 m — the guidance term was identically zero
+for the entire rollout — while those same episodes collided. The reason is the one Section 4.5
+identifies: the barrier is a function of the end-effector, and the contacts that occur are made by
+the arm links. Guidance inherits the scope of the barrier it steers by, so steering generation
+cannot reach a failure the barrier cannot see.
+
+This is a scope-limited negative rather than a refutation of guided sampling. It says that guidance
+built on an end-effector barrier is inert against arm-link collisions in this benchmark, and it
+would be worth revisiting on a barrier with the full arm-link constraint set of Section 3.2. What it
+does not say is that steering flow generation is ineffective in general.
+
+### Best-of-$N$ selection, and what it measured instead
+
+If safety varied across the actions a policy might sample from a given state, it could be obtained
+by rejection: draw $K$ candidate action chunks, simulate each, execute the safest. The sampler must
+be stochastic for the candidates to differ, so the matched control is $K=1$ at the same noise level
+rather than the deterministic policy used elsewhere in this chapter — otherwise selection would be
+confounded with simply turning sampling noise on.
+
+Making this measurement trustworthy required the simulator to be rewound exactly between
+candidates, since candidates scored from different worlds measure drift rather than safety. Snapshot
+and restore were verified to machine precision (maximum joint deviation $4.4\times10^{-16}$) before
+any result was recorded, and five further preconditions were checked in advance, each of which had
+previously produced a confident wrong answer rather than an error (Section 3.x / Appendix).
+
+| configuration | queries with no safe candidate | mean safe fraction | all-$K$-safe |
+|---|---|---|---|
+| $K=4$, noise 0.7 | 67.6% | 32.5% | 32% |
+| $K=4$, noise 1.0 | 63.9% | 36% | 36% |
+| $K=8$, noise 0.7 | 58.8% | 41% | 41% |
+
+As a method this is negative: on roughly 60% of queries no candidate was safe, and buying more
+candidates barely moved it — doubling $K$ from 4 to 8 recovered 8.8 percentage points for twice the
+compute, and raising the noise recovered 3.7.
+
+The measurement underneath it is the more interesting result. **The last two columns are identical
+in all three configurations.** The fraction of individually safe candidates equals the fraction of
+queries where *every* candidate is safe, which means outcomes are almost never mixed: a query is
+0-of-$K$ safe or all-of-$K$ safe, and rarely in between. The policy's samples from a given state are
+near-perfectly correlated in their safety outcome.
+
+Safety in this policy is therefore **state-determined rather than sample-determined**, at least in
+this benchmark. Once a state is reached, the die is largely cast, and no amount of choosing among
+actions recovers safety — the leverage lies in not reaching the state. This also explains a result
+that would otherwise look inconsistent: episode-level filtering worked (Section 4.6) while
+action-level selection cannot, because episode-level selection chooses between trajectories that
+reached *different states*, which is the axis along which variation actually exists.
+
+The correlation measurement is reported here as the contribution rather than the selection method.
+It is, as far as this work is aware, the first measurement of candidate-level safety correlation in
+a vision-language-action policy, and it is the sharpest available statement of the reachability
+theme that runs through Sections 4.5, 4.6 and 5.1  [CITE — this claim of novelty is narrow and
+should stay narrow: it concerns *measuring* within-state safety correlation, not the idea of
+best-of-$N$ sampling, which is standard.]
 
 ---
 
