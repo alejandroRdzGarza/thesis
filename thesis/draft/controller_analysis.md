@@ -96,3 +96,24 @@ address mechanism 3, which is where most of the lost yield sits. Neither would c
 distillation result, which concerns the teacher being *foreign* to the policy rather than being
 imperfect: the student trained on these 318 clean demonstrations is statistically indistinguishable
 from the undistilled base policy.
+
+## A physical constraint mistaken for a control failure
+
+One earlier failure is worth recording because of how it was diagnosed. Several bowl tasks sat at
+0% success with the end-effector stalling roughly 5 cm above the object centre, which reads as a
+controller or IK problem. It was neither. The akita bowl is 11 cm wide and the gripper opens to
+8 cm, so a top-down straddle grasp is *physically impossible* — no controller could have solved it.
+
+The fix was a change of grasp strategy rather than of control. Probing the gripper established that
+the fingers close along the world $y$ axis, so offsetting the grip point by 5 cm along that axis
+drops one finger inside the bowl and one outside, pinching the rim on close. Bowls are selected for
+this mode by name while cartons retain the top-down grasp, and the full three-dimensional grasp
+offset is tracked so that placement drives the *object* to the goal rather than the offset
+end-effector. A speed-capped, $xy$-locked descent was added alongside it to remove operational-space
+coupling drift. The spatial suite went from 0% to 69% with zero collisions.
+
+This is reported for two reasons. It is the clearest case in this project of a metric-level failure
+whose cause lay outside the system being tuned, and it bears on how Section 4.4's coverage gaps
+should be read: the teacher's remaining failures were investigated for this class of explanation and
+the elevated-target failures survived that check, which is what makes the kinematic-limit reading
+credible rather than merely convenient.
