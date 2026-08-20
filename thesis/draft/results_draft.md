@@ -18,9 +18,34 @@ training; states 35–49 are held out and used only for evaluation. Every result
 evaluates five held-out initial states per scene, giving n = 120 rollouts per policy.
 
 Rollouts run for a horizon of 300 control steps. The policy is queried every five steps and
-emits an action chunk, from which the next five actions are executed. Action sampling uses ten
-denoising steps at a noise level of zero, making the sampler a deterministic ODE; rollouts are
-therefore reproducible given the same initial state.
+emits an action chunk, from which the next five actions are executed before the next query.
+
+Each action chunk is produced by integrating $\pi_{0.5}$'s flow field. Under the linear flow
+$x_t = t\,\epsilon + (1-t)\,a$, the latent at $t=1$ is a Gaussian sample $\epsilon$ and the latent
+at $t=0$ is the action $a$, so generating an action means integrating the learned velocity field
+from one end of that path to the other. Ten Euler steps are used. Two distinct sources of
+randomness are available in this procedure and it is worth separating them, because the second is
+set to zero throughout this chapter and the terminology invites confusion.
+
+The first is the initial latent $\epsilon$, which seeds generation and is always present — without
+it the model has nothing to integrate from. The second is an optional per-step perturbation that
+converts the sampling ODE into an equivalent SDE, adding fresh noise at each of the ten steps. That
+term is scaled by a parameter this work calls the *noise level*, and it is set to zero everywhere
+except in the reinforcement-learning and best-of-$N$ experiments of Section 4.7. At zero the
+per-step standard deviation vanishes and the integrator reduces exactly to the deterministic ODE,
+so a given initial latent always yields the same action chunk and rollouts are reproducible from a
+fixed initial state.
+
+The distinction matters twice later. Section 4.7's reinforcement-learning experiments require a
+non-zero noise level not for exploration in the usual sense but because a deterministic sampler
+places all probability mass on a single point, leaving no action log-probability to differentiate
+and therefore no policy gradient at all. And best-of-$N$ selection requires it because at zero all
+$K$ sampled candidates are, by construction, the same action.
+
+Following the convention of the diffusion literature from which flow matching inherits its
+vocabulary, these integration steps are referred to as *denoising steps* throughout, though
+strictly the procedure transports a noise sample along a learned path rather than removing noise
+from a corrupted signal.
 
 Four metrics are reported. Task success rate (TSR) is the benchmark's own success predicate.
 Collision is raw obstacle displacement exceeding one millimetre, the same quantity reported by
