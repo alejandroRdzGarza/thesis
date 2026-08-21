@@ -2208,7 +2208,11 @@ def run_libero_trial(
                 _obs_key = f"{_obstacle_name}_pos"
                 if _obs_key in obs:
                     curr_obs_pos = np.array(obs[_obs_key], dtype=float)
-                    # Collision threshold matched to AEGIS/VLSA (>0.001 m displacement).
+                    # Collision threshold: >0.001 m cumulative L1 displacement from the
+                    # episode-start pose. NOT inherited from AEGIS/VLSA -- verified against
+                    # the paper 2026-08-18: they define collision avoidance as the fraction
+                    # of STRICTLY collision-free episodes and state no numeric tolerance.
+                    # This threshold is ours, set above simulator noise. See thesis 3.1.
                     if np.sum(np.abs(curr_obs_pos - _initial_obstacle_pos)) > 0.001:
                         _collision_flag = True
                         # Culprit = what's touching now, else the last body seen

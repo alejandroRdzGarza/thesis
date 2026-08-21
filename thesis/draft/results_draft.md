@@ -47,17 +47,59 @@ vocabulary, these integration steps are referred to as *denoising steps* through
 strictly the procedure transports a noise sample along a learned path rather than removing noise
 from a corrupted signal.
 
-Four metrics are reported. Task success rate (TSR) is the benchmark's own success predicate.
-Collision is raw obstacle displacement exceeding one millimetre, the same quantity reported by
-AEGIS, and collision-avoidance rate (CAR) is its complement. Execution time to success (ETS) is
-the mean number of control steps to completion, computed over successful rollouts only — a
-failed rollout has no completion time, and averaging in the horizon would make a policy appear
-faster the more often it fails. Finally, the CBF activation proxy reports how much the shield
-had to correct, and is used as an independent signal of whether a policy has internalised
-avoidance.
+Four metrics are reported, defined as follows.
 
-All proportions are reported with 95% Wilson confidence intervals rather than normal
-approximations, because rates near zero and one at n = 120 are poorly served by the latter.
+**Task success rate (TSR)** is the fraction of rollouts in which the benchmark's own goal
+predicate is satisfied at any point before the horizon expires. The predicate is the one compiled
+from each task's BDDL goal specification and evaluated by the environment itself, which is treated
+as authoritative throughout; no alternative or relaxed success criterion is substituted, and a
+geometric fallback used elsewhere in the codebase for logging is disabled for every number in this
+chapter. Success is binary per rollout.
+
+**Collision** is recorded when the obstacle's position departs from its position at the start of
+the episode by more than one millimetre in the $\ell_1$ sense,
+
+$$\sum_{k \in \{x,y,z\}} \left| p_k(t) - p_k(0) \right| > 0.001\ \text{m},$$
+
+and a rollout is marked as collided if this holds at any control step. Three properties of the
+definition should be read carefully. It is **cumulative against the episode's initial pose** rather
+than a per-step contact test, so an obstacle nudged early in a rollout remains flagged for the
+remainder of it. It measures the obstacle being *displaced* rather than being *touched by the
+robot*, so an obstacle knocked over by the carried payload counts, which is deliberate — the
+quantity of interest is disturbance of the scene, not contact with any particular body. And the
+reference pose $p(0)$ is taken after the settling procedure of Section 3.6, since objects dropped
+into a scene will otherwise cross the threshold under gravity alone before the policy has acted.
+**Collision-avoidance rate (CAR)** is the complement, $1 - \text{collision rate}$.
+
+The one-millimetre $\ell_1$ threshold is this work's operationalisation. The benchmark's
+originating work defines its collision metric as the proportion of *strictly collision-free*
+episodes and states no numeric tolerance, so the threshold here was chosen to sit above simulator
+noise while remaining strict enough that no genuine contact passes it. It is not inherited from
+that work and should not be presented as identical to it.
+
+**Execution time to success (ETS)** is the control step at which the success predicate first holds,
+averaged over successful rollouts only, and is reported in control steps rather than seconds.
+Failed rollouts are excluded rather than assigned the horizon: a rollout that never succeeds has no
+completion time, and substituting the horizon would make a policy appear *faster* the more often it
+fails. ETS is therefore conditional on success and must be read alongside TSR — a policy that
+succeeds rarely but quickly can post a low ETS. The originating work uses the same name for a
+different quantity, the mean episode length including timeouts, so values here are internally
+comparable across conditions but should not be compared against theirs.
+
+**CBF activation rate** is the fraction of control steps on which the shield altered the action,
+counted whenever the projected action differs from the nominal action by more than $10^{-4}$ in
+norm. It measures how *often* the shield intervened, not how large the corrections were. Its role
+is as an independent check on internalisation: a policy that has genuinely learned to avoid
+obstacles should require fewer corrections when the shield is re-attached, and this signal is
+available even when collision counts are too sparse to separate conditions. Where the per-step rate
+was not recorded, Chapter 4 reports a related reward-term proxy and says so explicitly at the point
+of use.
+
+All proportions are reported with 95% Wilson score confidence intervals rather than normal
+approximations. At $n = 120$ with rates close to zero or one — which is where several of these
+results sit — the normal approximation produces intervals that are too narrow and can extend below
+zero or above one, whereas the Wilson interval remains bounded and better calibrated in exactly
+that regime.
 
 **Comparing training runs.** Where two distilled policies are compared, they are matched on the
 number of gradient steps rather than the number of epochs. This matters because episode length
