@@ -112,27 +112,46 @@ in three was therefore modified by the barrier, and modified substantially: the 
 distribution differs materially from the base policy's own.
 
 % =====================================================================================
-%  FIGURE 4.3 — qualitative filmstrip.  NOT YET BUILDABLE.
+%  FIGURE 4.3 — qualitative filmstrip.  DEFERRED to the final pass (planned w/c 2026-08-24).
 %
-%  Intent: same scene and same held-out initial state, base pi0.5 (collides) above and the
-%  distilled policy (avoids) below, 4-5 frames each, contact frame boxed or arrowed. Every other
-%  figure in this chapter reports a rate; none shows the behaviour, so this is the largest
-%  qualitative gain available to the chapter.
+%  Visible while \figuretodotrue (set in main.tex). Flip to \figuretodofalse for submission and
+%  this box disappears; replace it with the real figure environment commented out below.
 %
-%  BLOCKED ON: videos/ contains task3_ep0.mp4, task3_ep1.mp4, task3_ep3.mp4 with no record of
-%  which policy produced them, which scene they are, or whether any contains a collision. Pairing
-%  them by guesswork would risk captioning a distilled rollout as the base policy.
+%  BLOCKED ON PROVENANCE: videos/ holds task3_ep0.mp4, task3_ep1.mp4, task3_ep3.mp4 with no record
+%  of which policy, which scene, which init, or whether any contains a collision.
 %
-%  TO UNBLOCK, record for two rollouts of the SAME scene and SAME held-out init:
-%    (i) base policy, an episode that collides;  (ii) round-1 distilled, an episode that does not.
-%  Then:  PYTHONPATH=. python -m experiments.make_fig_filmstrip \
-%             --base <base.mp4> --distilled <distilled.mp4> --contact-frame <N>
-%  (that script does not exist yet either -- write it once the inputs are known.)
-%
+%  TO COLLECT NEXT WEEK -- record these four things per clip or the same problem recurs:
+%      policy checkpoint | suite/level/task | init index | collided yes/no + contact step
+%  Need two clips: SAME scene, SAME held-out init (35-49), base (collides) and round-1 (does not).
+% =====================================================================================
+
+\iffiguretodo
+\begin{figure}[htbp]
+  \centering
+  \fbox{\begin{minipage}{0.92\linewidth}
+    \vspace{2em}
+    \centering
+    \textbf{[FIGURE 4.3 --- qualitative filmstrip: TO BE COLLECTED]}\\[0.6em]
+    \begin{minipage}{0.85\linewidth}\small\raggedright
+      Same scene and same held-out initial state, base $\pi_{0.5}$ above (collides) and the
+      round-1 distilled policy below (avoids); four to five frames each, contact frame marked.
+      Every other figure in this chapter reports a rate; none shows the behaviour.\\[0.4em]
+      \emph{Blocked:} the existing clips in \texttt{videos/} carry no record of which policy,
+      scene, or initial state produced them. Requires a fresh paired collection.
+    \end{minipage}
+    \vspace{2em}
+  \end{minipage}}
+  \caption{Placeholder --- see collection note in the source.}
+  \label{fig:filmstrip}
+\end{figure}
+\fi
+
+%  THE REAL FIGURE, once the clips exist:
 %  \begin{figure}[htbp]
 %    \centering
 %    \includegraphics[width=\linewidth]{figures/fig_filmstrip.pdf}
-%    \caption{...}
+%    \caption[Qualitative comparison of base and distilled behaviour]{%
+%      The same scene and initial state under the base policy (top, collides at frame $N$) and the
+%      round-1 distilled policy (bottom, avoids). Contact is marked in red.}
 %    \label{fig:filmstrip}
 %  \end{figure}
-% =====================================================================================
