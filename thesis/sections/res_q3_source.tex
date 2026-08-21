@@ -1,18 +1,173 @@
-\section{Does the source of the demonstrations matter?}\label{sec:res:source}
-% THE BOUNDARY RESULT. Same benchmark, same student, same eval code, same held-out inits,
-% matched gradient budget (15{,}988 vs 16{,}140 steps).
+% =====================================================================================
+%  Section 4.4 — Does the source of the demonstrations matter?
+%  Self-contained. Nothing to \input.
 %
-% base+noCBF       TSR 58.3 [49.4, 66.8]   collision 82.5 [74.7, 88.3]
-% planner_A+noCBF  TSR 54.2 [45.3, 62.8]   collision 80.0 [72.0, 86.2]   <- flat against base
-% r1+noCBF         TSR 82.5 [74.7, 88.3]   collision 19.2 [13.1, 27.1]
+%  PREAMBLE (already in main.tex): graphicx, booktabs, multirow, threeparttable
+%  ASSET: figures/fig_state_coverage.pdf
+%    Regenerate:  PYTHONPATH=. python -m experiments.make_fig_state_coverage
 %
-% Claim: distilling safety from a FOREIGN expert fails; distilling it from the policy's own
-% shielded rollouts succeeds. State the caveat yourself: 6 of 24 scenes had zero planner demos,
-% so ~30 of 120 rollouts measure teacher COVERAGE rather than distillation --- report the
-% 18-scene slice alongside the 24-scene headline. It does not rescue the result.
+%  TWO RECONCILIATIONS APPLIED HERE -- do not silently revert either.
 %
-% Mechanism: NOT observation aliasing (measured and refuted, see Sec.~\ref{sec:res:mechanism}).
-% Surviving candidates: distribution shift, and action-distribution mismatch (the planner emits
-% saturated P-control/QP deltas against \pizero{}'s flow-matched chunks).
+%  (1) "the states it labelled and the states the student needed labelled did not overlap"
+%      was FALSE as written. Measured, the two demonstration sets overlap substantially:
+%      unmatched for sample size the coverage figures are 37.7% vs 32.8%, a near-tie. The
+%      defensible claim is that the planner covers the policy's states LESS WELL AT MATCHED
+%      SAMPLING (37.7% vs 22.8%, better in 15/18 scenes). Keep the qualifier.
 %
-% SLOT: randomised-teacher ablation (shielded teacher + randomised layouts) goes here when run.
+%  (2) The section previously asserted that the expert's corrections "depend on the full
+%      joint configuration, which is not part of what the student observes", and then closed
+%      by saying that exact explanation "was tested and rejected" in 4.6. Both cannot stand.
+%      The observation-aliasing test refuted it: the planner's demonstrations are roughly
+%      twice as well determined by the observation as the shielded ones at every radius. The
+%      driver A/B is retained as evidence that the expert is not self-safe, but the
+%      unobservability *mechanism* is no longer claimed from it.
+% =====================================================================================
+
+\section{Does the Source of the Demonstrations Matter?}\label{sec:res:source}
+
+Section~\ref{sec:res:internalise} distilled the policy from its own shielded rollouts. An obvious
+alternative is to distil from a stronger, purpose-built expert. This section reports that
+comparison, and it is the sharpest result in this chapter.
+
+A sampling-based motion planner was implemented as a privileged expert: RRT-Connect in joint space
+with clearance inflation, followed by inverse kinematics and playback as operational-space deltas.
+Unlike the shielded policy, this expert is self-safe by construction rather than by correction. It
+produced 318 demonstrations that succeeded and displaced nothing, across 18 of the 24 scenes~---
+six scenes it could not solve at all.
+
+\begin{table}[htbp]
+\centering
+\caption{Comparison of demonstration sources for policy distillation. $n = 120$ held-out rollouts
+  per row, pooled over 24 scenes; intervals are Wilson 95\%.}
+\label{tab:demo_source_comparison}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Policy} & \textbf{TSR (95\% CI)} & \textbf{Collision rate (95\% CI)} \\
+\midrule
+Base, no shield                     & 58.3\% [49.4, 66.8] & 82.5\% [74.7, 88.3] \\
+Planner-distilled, no shield        & 54.2\% [45.3, 62.8] & 80.0\% [72.0, 86.2] \\
+Self-distilled (round 1), no shield & \textbf{82.5\% [74.7, 88.3]} & \textbf{19.2\% [13.1, 27.1]} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The planner-distilled policy is statistically indistinguishable from the undistilled base policy on
+both metrics. It learned essentially nothing.
+
+This is a controlled contrast. Both students start from the same checkpoint, are trained with the
+same objective, learning rate and batch size, are matched on gradient steps to within one percent,
+and are evaluated by the same code on the same 24 scenes and the same held-out initial states. The
+only difference is where the demonstrations came from. Distilling safety from a foreign expert
+failed; distilling it from the policy's own shielded rollouts succeeded.
+
+\paragraph{Interactive distillation, and the diagnostic that located its failure.}
+Before the offline comparison reported above, the classical expert was distilled interactively in
+the DAgger manner: the student drives, the expert labels the states the student visits, and the
+aggregated dataset is retrained. This is the textbook remedy for exactly the coverage problem
+identified below, and it made matters worse. Collision rose monotonically across rounds, from 44\%
+to 75\%, with success pinned near zero.
+
+The cause was not the coverage principle but a violated precondition. DAgger's correctness argument
+requires a Markov oracle $\pi^{*}(s)$: the expert's label must be a function of the state it is
+shown. The classical expert was implemented as a latched phase machine carrying hidden internal
+state, so when the student drove erratically the expert's phase desynchronised from the observation
+and the same image received contradictory labels across rounds. Behaviour cloning averaged them.
+
+Isolating this required ruling out the alternative, that the imitation machinery itself was broken.
+Hard-overfitting behaviour cloning on a single clean demonstration and evaluating on that same
+episode returned success $1.0$ with zero collisions, establishing that normalisation, the
+observation pipeline and adapter capacity were all sound, and that the fault lay in the labels. The
+expert was then rewritten as a stateless reactive oracle, inferring its phase from observables at
+every call~--- grasp from the measured gripper finger separation, transport from end-effector
+height~--- and validated against the original on the same episodes, where it produced identical
+outcomes episode-for-episode.
+
+The rewrite made the expert Markov, and distillation still failed. That is what moved the
+investigation from the interactive protocol to the teacher itself, and ultimately to the matched
+offline comparison reported above. It is recorded here because the negative is easy to misattribute:
+an interactive method failing against a non-Markov expert is a statement about the expert, not about
+DAgger or about coverage.
+
+\paragraph{The expert is not self-safe.}
+One measurement sharpens what the planner's demonstrations actually contain. Running the classical
+expert as the driver on spatial task~0 with the shield active gives $5/8$ success and $0/8$
+collisions. Running the same expert unshielded gives $7/8$ success and $5/8$ collisions, with
+contact from arm links, gripper, held object and scene objects alike. The safety of its
+demonstrations is therefore a property of the shield correcting it, not of the expert itself, and
+the label ``safe by construction'' applies to the planned path rather than to the executed
+trajectory.
+
+It is tempting to conclude from this that the corrections depend on state the student cannot
+observe, and that behaviour cloning must therefore average contradictory targets. That explanation
+was tested directly and rejected (Section~\ref{sec:res:mechanism}): the planner's demonstrations
+are roughly twice as well determined by the observation as the shielded ones at every matching
+radius. The teacher that fails to distil has the \emph{cleaner} observation-to-action mapping. Some
+other account is required.
+
+\paragraph{The mechanism is state coverage.}
+The account that survives concerns where the supervision sits rather than who produced it, and it
+is measurable. Figure~\ref{fig:state_coverage} takes the base policy's own visited states and asks
+how closely each demonstration set approaches them.
+
+The comparison must control for sample density, and this is not a detail. Planner episodes run to
+horizon 900 against 300 for a shielded rollout, so per scene the planner contributes roughly thirty
+times more state points, and nearest-neighbour coverage rises monotonically with density. Compared
+without that control the two sets are nearly indistinguishable, at 37.7\% against 32.8\%.
+Subsampling both to equal size per scene, averaged over 30 resamples, separates them: the shielded
+rollouts cover 37.7\% of the policy's own states within 2\,cm against the planner's 22.8\%, and
+cover better in 15 of the 18 scenes holding both demonstration types.
+
+Panel~(b) of Figure~\ref{fig:state_coverage} shows the shape of the difference. The planner is a
+scripted controller and traces near-identical paths from a given initial condition, so its
+demonstrations form tight deterministic bands; the states the policy actually visits are diffuse
+and lie largely between and around them. The two distributions are not disjoint~--- the claim is
+not that the planner visits a different region of the workspace~--- but the planner's density is
+concentrated where the policy is not.
+
+This is the distinction the contrast isolates, and it is narrower than ``foreign experts cannot
+teach''. A foreign expert can teach safety: SAFE-GIL clones an MPC or PID controller and obtains
+substantially safer policies, having first used reachability analysis to force that fixed expert to
+demonstrate recovery from the states a learner's errors would produce. The planner tested here
+received no such treatment. Its trajectories were generated from its own initial conditions and
+were never conditioned on where $\pi_{0.5}$ fails. That, rather than its foreignness, is what
+separates the two teachers.
+
+Two caveats bound the measurement. Coverage is computed on end-effector position, three of the
+eight observed dimensions, so it does not speak to joint configuration. And it is a property of the
+demonstration sets rather than a demonstration that coverage is what the policy learned from~---
+the causal claim rests on the controlled contrast in Table~\ref{tab:demo_source_comparison}, with
+the coverage measurement as its most direct available evidence.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\linewidth]{figures/fig_state_coverage.pdf}
+  \caption[State coverage of the base policy's own trajectories]{%
+    The mechanism, measured. Coverage is the fraction of the base policy's visited
+    end-effector states lying within 2\,cm of some demonstration state, with both
+    demonstration sets subsampled to equal size per scene (30 resamples) so that the
+    comparison is not confounded by the planner's longer episodes.
+    \textbf{(a)} One point per scene: the shielded rollouts cover the policy's own states
+    better in 15 of 18 scenes, 37.7\% against 22.8\% pooled.
+    \textbf{(b)} The same comparison on the widest-gap scene. The planner's demonstrations
+    form tight, near-deterministic trajectory bands, while the states the policy actually
+    visits are diffuse and largely elsewhere.
+    Coverage is computed on end-effector position only --- three of the eight observed
+    dimensions, and not joint configuration --- so it supports the state-coverage account
+    without exhausting it.}
+  \label{fig:state_coverage}
+\end{figure}
+
+\paragraph{Coverage limitations of the teacher itself.}
+Six of the 24 scenes contained no planner demonstrations, so roughly 30 of the 120 evaluation
+rollouts test the expert's coverage rather than the distillation itself. That gap is not random:
+per-task inspection on the spatial suite shows the expert succeeding $5/8$ and $6/8$ on the two
+table-height tasks but $0/8$ on the elevated-target task, where the goal sits on a stove and a moka
+pot obstructs the approach. Failures there occur across every phase rather than at one, which is
+the signature of a kinematic and controller-posture limit rather than of occlusion or collision
+avoidance. The teacher's competence is therefore geometry-dependent, and this is a limitation of
+the comparison rather than a property of privileged planners in general.
+
+Restricting to the 18 scenes with training data does not rescue the result~--- the pooled figure is
+already flat against base~--- but both slices should be reported, since the 24-scene number
+conflates two distinct failures: scenes where the teacher had nothing to say, and scenes where it
+spoke and was not understood.
