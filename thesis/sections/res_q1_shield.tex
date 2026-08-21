@@ -1,12 +1,67 @@
-\section{Does the shield make \pizero{} safe?}\label{sec:res:shield}
-% base, no shield : TSR 58.3 [49.4, 66.8]   collision 82.5 [74.7, 88.3]   CAR 17.5
-% base + shield   : TSR 71.7 [63.0, 79.0]   collision 13.3 [ 8.4, 20.6]   CAR 86.7
-%
-% Note the shield RAISES success here (58.3 -> 71.7): collisions derail episodes, so preventing
-% them helps the task. Contrast with Sec.~\ref{sec:res:internalise}, where stacking the shield on an
-% already-avoidant policy COSTS success --- the two are consistent and worth explaining together.
-%
-% CAVEAT TO STATE YOURSELF: the barrier uses privileged ground-truth obstacle geometry, which
-% removes the perception gap a deployed system would face. Say this before a marker finds it.
-% Cross-check: base+shield CAR 86.7 against the AEGIS-matched reference of 87.5 --- agreement
-% within 0.8 points on an independently published baseline.
+\section{Does the Shield Make \texorpdfstring{$\pi_{0.5}$}{pi 0.5} Safe?}\label{sec:shield_efficacy}
+
+The first question is whether a control barrier function shield, applied as a runtime filter, makes
+a pretrained VLA safe on this benchmark at all. Table~\ref{tab:shield_efficacy} and
+Figure~\ref{fig:shield_efficacy} report the comparison.
+
+\begin{table}[htbp]
+\centering
+\caption{Safety and task performance for base $\pi_{0.5}$ with and without the CBF runtime shield.
+  Pooled over 24 scenes, $n = 120$ held-out rollouts per condition, Wilson 95\% intervals.}
+\label{tab:shield_efficacy}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Policy} & \textbf{TSR (95\% CI)} & \textbf{Collision rate (95\% CI)} & \textbf{CAR} \\
+\midrule
+Base, no shield & 58.3\% [49.4, 66.8] & 82.5\% [74.7, 88.3] & 17.5\% \\
+Base + shield   & 71.7\% [63.0, 79.0] & 13.3\% [\phantom{0}8.4, 20.6] & 86.7\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\linewidth]{figures/fig_shield_efficacy.pdf}
+  \caption{Effect of the CBF runtime shield on base $\pi_{0.5}$, pooled over all 24 scenes.
+    Error bars are Wilson 95\% intervals at $n = 120$ per condition.}
+  \label{fig:shield_efficacy}
+\end{figure}
+
+Unshielded, $\pi_{0.5}$ displaces the obstacle in 82.5\% of episodes. With the shield active this
+falls to 13.3\%, a reduction of 69 percentage points with disjoint confidence intervals.
+
+Success also rises, from 58.3\% to 71.7\%. This is not incidental: a collision frequently derails
+the episode, knocking the target object out of reach or displacing the goal, so preventing
+collisions helps the policy complete the task. This point is worth holding onto, because in
+Section~\ref{sec:internalise} the same shield applied to an already-avoidant policy has the
+opposite effect on success, and the two observations are only consistent once the mechanism is
+stated.
+
+\paragraph{Caveat on privileged information.}
+The barrier is constructed from ground-truth obstacle geometry taken directly from the simulator,
+not from perception. A deployed system would have to estimate that geometry from sensors and would
+inherit the resulting error. The numbers here should therefore be read as an upper bound on what
+this class of shield achieves, with the perception gap removed by construction.
+
+\paragraph{External validation.}
+The evaluation pipeline can be checked against the figures reported for $\pi_{0.5}$ by the work
+that introduced \texttt{SafeLIBERO}. Table~\ref{tab:external_validation} places the two side by
+side. The unshielded rows agree to within a fraction of a point on both metrics, which supports the
+view that this pipeline recovers the published baseline rather than producing an artefact of the
+present implementation --- a check worth making explicitly, since every subsequent result in this
+chapter is measured relative to that baseline.
+
+The shielded rows diverge, and the divergence is worth stating rather than smoothing: the shield
+used here is roughly fifteen points safer and three points less successful. Two deliberate
+differences in the constraint account for it. The published formulation, by its authors' own
+statement, ``solely constrains the end-effector'', and its limitations section notes that
+unconstrained kinematic links may consequently collide; the barrier used here additionally
+constrains links three through seven and the hand body (Section~\ref{sec:barrier}), and
+Section~\ref{sec:scope} shows that arm links are exactly where residual collisions concentrate.
+Separately, this barrier reads ground-truth geometry from the simulator, whereas the published
+layer grounds its constraints through vision-language perception and fused depth, and attributes
+its own residual collisions primarily to that upstream pipeline rather than to the controller.
+Both differences favour the shield used here, so these figures are an upper bound for this class of
+filter rather than a like-for-like improvement over that method.
+
+\input{sections/tab_external_validation}
