@@ -1,7 +1,7 @@
 """make_fig_shield_efficacy.py — Figure 4.1: does the shield make pi0.5 safe?
 
 Two panels, base vs base+shield, on the two metrics that answer the section's question: task
-success (higher is better) and collision rate (lower is better). Wilson 95% intervals as error bars.
+success (arrow up = better) and collision rate (arrow down = better). Wilson 95% intervals as bars.
 
 WHY COUNTS, NOT PERCENTAGES. The source table reports rounded percentages (58.3%, 82.5%, ...). A
 Wilson interval computed from a rounded rate is not the interval that was reported, and the
@@ -68,14 +68,14 @@ def main() -> int:
 
     labels = list(ARMS.keys())
     panels = [
-        ("Task success rate", "success", "#2E6F9E", "higher is better"),
-        ("Collision rate", "collision", "#C0504D", "lower is better"),
+        ("Task success rate", "success", "#2E6F9E", r"$\uparrow$"),
+        ("Collision rate", "collision", "#C0504D", r"$\downarrow$"),
     ]
 
     fig, axes = plt.subplots(1, 2, figsize=(8.4, 3.9))
     x = np.arange(len(labels))
 
-    for ax, (title, metric, colour, direction) in zip(axes, panels):
+    for ax, (title, metric, colour, arrow) in zip(axes, panels):
         pts, los, his = [], [], []
         for arm in labels:
             p, lo, hi = wilson(ARMS[arm][metric], N)
@@ -90,7 +90,7 @@ def main() -> int:
             ax.text(xi, p + his[xi] + 3.0, f"{p:.1f}%", ha="center", va="bottom",
                     fontsize=10, fontweight="bold")
 
-        ax.set_title(f"{title}\n({direction})", fontsize=11, pad=8)
+        ax.set_title(f"{title} {arrow}", fontsize=11.5, pad=10)
         ax.set_xticks(x); ax.set_xticklabels(labels, fontsize=9.5)
         ax.set_ylim(0, 100); ax.set_ylabel("percent of rollouts", fontsize=10)
         ax.grid(axis="y", alpha=0.28, zorder=0, linewidth=0.6)
