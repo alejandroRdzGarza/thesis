@@ -1,3 +1,29 @@
+% =====================================================================================
+%  Section 4.2 — Does the shield make pi0.5 safe?
+%  Self-contained: both tables and the figure are inline. Nothing to \input.
+%
+%  PREAMBLE REQUIREMENTS (all already in main.tex):
+%    \usepackage{graphicx} \usepackage{booktabs} \usepackage{multirow}
+%    \usepackage{threeparttable}
+%
+%  ASSET: figures/fig_shield_efficacy.pdf
+%    Regenerate with:  PYTHONPATH=. python -m experiments.make_fig_shield_efficacy
+%
+%  CROSS-REFERENCES. Two labels below live in the Method chapter and DO NOT EXIST YET.
+%  Add them when Chapter 3 is ported, or these render as ??:
+%    \label{sec:metrics}  -> Method 3.1, the "Metrics" subsection
+%    \label{sec:barrier}  -> Method 3.2, "Obstacle geometry and the barrier"
+%  The other two (sec:res:internalise, sec:res:scope) already exist in this chapter.
+%
+%  NUMBER PROVENANCE:
+%    This work — figures/results_shielded_distillation.md, eval 2026-08-07, n=120 held-out.
+%    Published — AEGIS/VLSA Table I, averaged over the three suites used here (spatial, goal,
+%                object). Their printed averages also include a Long suite, so these are
+%                recomputed three-suite figures. Verified against the PDF; see papers/FINDINGS.md.
+%    Do NOT cite 87.5% for their shielded CAR — that came from a docstring in their released
+%    code, not the paper. The paper's three-suite figure is 71.9%.
+% =====================================================================================
+
 \section{Does the Shield Make \texorpdfstring{$\pi_{0.5}$}{pi 0.5} Safe?}\label{sec:shield_efficacy}
 
 The first question is whether a control barrier function shield, applied as a runtime filter, makes
@@ -33,7 +59,7 @@ falls to 13.3\%, a reduction of 69 percentage points with disjoint confidence in
 Success also rises, from 58.3\% to 71.7\%. This is not incidental: a collision frequently derails
 the episode, knocking the target object out of reach or displacing the goal, so preventing
 collisions helps the policy complete the task. This point is worth holding onto, because in
-Section~\ref{sec:internalise} the same shield applied to an already-avoidant policy has the
+Section~\ref{sec:res:internalise} the same shield applied to an already-avoidant policy has the
 opposite effect on success, and the two observations are only consistent once the mechanism is
 stated.
 
@@ -51,17 +77,55 @@ view that this pipeline recovers the published baseline rather than producing an
 present implementation --- a check worth making explicitly, since every subsequent result in this
 chapter is measured relative to that baseline.
 
+\begin{table}[htbp]
+\centering
+\begin{threeparttable}
+\caption[External validation against the published baseline]{%
+  External validation against the originating work. The measured figures repeat those of
+  Table~\ref{tab:shield_efficacy}; they appear again here so that each can be read directly
+  against its published counterpart. The unshielded rows agree to within a fraction of a point on
+  both metrics. The shielded rows are \emph{not} like-for-like --- see note (c).}
+\label{tab:external_validation}
+\begin{tabular}{llcc}
+\toprule
+\textbf{Condition} & \textbf{Source} & \textbf{CAR} & \textbf{TSR} \\
+\midrule
+\multirow{2}{*}{Base $\pi_{0.5}$, no shield}
+  & Published\tnote{a} & 17.3\%          & 58.9\%          \\
+  & This work\tnote{b} & \textbf{17.5\%} & \textbf{58.3\%} \\
+\addlinespace[2pt]
+\multicolumn{2}{l}{\emph{difference}} & $0.2$ pp & $0.6$ pp \\
+\midrule
+\multirow{2}{*}{With runtime CBF shield}
+  & Published\tnote{a} & 71.9\%          & 74.6\%          \\
+  & This work\tnote{b} & 86.7\%          & 71.7\%          \\
+\addlinespace[2pt]
+\multicolumn{2}{l}{\emph{difference}\tnote{c}} & $+14.8$ pp & $-2.9$ pp \\
+\bottomrule
+\end{tabular}
+\begin{tablenotes}[flushleft]\footnotesize
+\item[a] Averaged over the three suites used in this work (spatial, goal, object) from the
+  originating work's reported per-suite results in the full action space. Their printed averages
+  additionally include a Long suite and are therefore not quoted directly.
+\item[b] $n = 120$ held-out rollouts, pooled over 24 scenes. CAR is the complement of the collision
+  rate defined in Section~\ref{sec:metrics}. The originating work defines collision avoidance as
+  the proportion of strictly collision-free episodes without stating a numeric tolerance, so the
+  1\,mm threshold used here is this work's operationalisation of that definition.
+\item[c] The shielded rows are not like-for-like and the gap is expected; both causes are
+  deliberate and are discussed in the text below.
+\end{tablenotes}
+\end{threeparttable}
+\end{table}
+
 The shielded rows diverge, and the divergence is worth stating rather than smoothing: the shield
 used here is roughly fifteen points safer and three points less successful. Two deliberate
 differences in the constraint account for it. The published formulation, by its authors' own
 statement, ``solely constrains the end-effector'', and its limitations section notes that
 unconstrained kinematic links may consequently collide; the barrier used here additionally
 constrains links three through seven and the hand body (Section~\ref{sec:barrier}), and
-Section~\ref{sec:scope} shows that arm links are exactly where residual collisions concentrate.
+Section~\ref{sec:res:scope} shows that arm links are exactly where residual collisions concentrate.
 Separately, this barrier reads ground-truth geometry from the simulator, whereas the published
 layer grounds its constraints through vision-language perception and fused depth, and attributes
 its own residual collisions primarily to that upstream pipeline rather than to the controller.
 Both differences favour the shield used here, so these figures are an upper bound for this class of
 filter rather than a like-for-like improvement over that method.
-
-\input{sections/tab_external_validation}
