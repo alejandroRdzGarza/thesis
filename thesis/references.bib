@@ -1,59 +1,270 @@
-% Bibliography stub.
+% =====================================================================================
+%  references.bib
 %
-% VERIFY EVERY ENTRY against the actual paper before submitting. The entries
-% below carry only the identifying details established during the project; page
-% numbers, venues and DOIs are deliberately left blank rather than guessed, and
-% entries marked TODO need their metadata filled in from the paper itself.
-% Citing a source you have not opened is exactly what §5.4 of the guidance warns
-% against.
+%  VERIFICATION STATUS. Entries marked [VERIFIED] were read in the PDF and their metadata
+%  taken from the title page. Entries marked [CHECK] were not opened; title comes from PDF
+%  metadata but authors, venue or year may be incomplete. Fix those before submission.
+%
+%  ONE IMPORTANT MERGE: VLSA and AEGIS are the SAME PAPER. VLSA is the architecture, AEGIS
+%  (Action Execution Guarded by Invariant Safety) is the method inside it. An earlier version
+%  of this file carried aegis2025 and vlsa2026 as separate stubs, which would have produced a
+%  duplicate citation for the primary baseline. Use \cite{vlsa2026} throughout.
+% =====================================================================================
 
-@inproceedings{ross2011dagger,
-  author    = {Ross, St{\'e}phane and Gordon, Geoffrey J. and Bagnell, J. Andrew},
-  title     = {A Reduction of Imitation Learning and Structured Prediction to
-               No-Regret Online Learning},
-  booktitle = {AISTATS},
-  year      = {2011}
+% ---------- Primary baseline -------------------------------------------------------------
+% [VERIFIED] Read in full 2026-08-18. Title page: Tsinghua University, Institute for Embodied
+% Intelligence and Robotics, TetraBOT, DAMO Academy (Alibaba). Introduces SafeLIBERO.
+@article{vlsa2026,
+  title   = {{VLSA}: Vision-Language-Action Models with Plug-and-Play Safety Constraint Layer},
+  author  = {Hu, Songqiao and Liu, Zeyi and Liu, Shuang and Cen, Jun and Meng, Zihan and
+             Wang, Shihefeng and Li, Xiang and He, Xiao},
+  journal = {arXiv preprint arXiv:2512.11891},
+  year    = {2026},
+  note    = {AEGIS is the safety-constraint architecture introduced in this work}
 }
 
-@article{zhang2016safedagger,
-  author  = {Zhang, Jiakai and Cho, Kyunghyun},
-  title   = {Query-Efficient Imitation Learning for End-to-End Autonomous Driving},
-  journal = {arXiv preprint},
-  year    = {2016}
+% ---------- Control barrier functions -----------------------------------------------------
+% [CHECK] Metadata title matches Ames, Xu, Grizzle and Tabuada, IEEE TAC 2017. NOTE: this is
+% NOT the ECC 2019 "Theory and Applications" survey that papers/summary.md refers to. Cite
+% this one for the CBF-QP formulation and forward invariance.
+@article{ames2017cbf,
+  title   = {Control Barrier Function Based Quadratic Programs for Safety Critical Systems},
+  author  = {Ames, Aaron D. and Xu, Xiangru and Grizzle, Jessy W. and Tabuada, Paulo},
+  journal = {IEEE Transactions on Automatic Control},
+  volume  = {62},
+  number  = {8},
+  pages   = {3861--3876},
+  year    = {2017}
 }
 
-@inproceedings{kelly2019hgdagger,
-  author    = {Kelly, Michael and Sidrane, Chelsea and Driggs-Campbell, Katherine
-               and Kochenderfer, Mykel J.},
-  title     = {HG-DAgger: Interactive Imitation Learning with Human Experts},
-  booktitle = {ICRA},
-  year      = {2019}
+% [CHECK] Authors not recovered from the PDF. Cite ONLY if the sphere-pair construction of
+% Section 3.2 is presented as following this formulation; it is not, so this entry may be
+% unused.
+@inproceedings{collision_cbf_ellipsoidal,
+  title     = {Collision Avoidance with Control Barrier Functions for Ellipsoidal Rigid Bodies},
+  author    = {TODO},
+  booktitle = {TODO},
+  year      = {TODO}
 }
 
-@article{liu2025flowgrpo,
-  author  = {Liu, Yifan and others},
-  title   = {Flow-GRPO: Training Flow Matching Models via Online Reinforcement
-             Learning},
-  journal = {arXiv preprint arXiv:2505.05470},
-  year    = {2025},
-  note    = {NeurIPS 2025}
+% [VERIFIED] Read in full 2026-08-19. Caltech. Theorem 2 and Definition 6 are the citation
+% targets: ISSf transfer holds only under a robust TR-OP expert, known control-affine
+% dynamics, and CBF-compliancy. This is the correct citation for what this thesis does NOT
+% establish.
+@inproceedings{cosner2022il_cbf,
+  title     = {End-to-End Imitation Learning with Safety Guarantees using Control Barrier
+               Functions},
+  author    = {Cosner, Ryan K. and Yue, Yisong and Ames, Aaron D.},
+  booktitle = {IEEE Conference on Decision and Control (CDC)},
+  pages     = {5316--5322},
+  year      = {2022}
 }
 
-@article{chen2025pirl,
-  author  = {Chen, and others},
-  title   = {Online RL Fine-Tuning for Flow-Based Vision-Language-Action Models},
-  journal = {arXiv preprint arXiv:2510.25889},
+% [VERIFIED] Read in full 2026-08-19. Polytechnique Montreal and Mila. Cite the CBF-Filter
+% negative (safety not retained on removal), CBF-Decay (curriculum alternative that is), and
+% the scalar-reward findings.
+@article{guerrier2025guardrails,
+  title   = {Guided by Guardrails: Control Barrier Functions as Safety Instructors for
+             Robotic Learning},
+  author  = {Guerrier, Maeva and Soma, Karthik and Fouad, Hassan and Beltrame, Giovanni},
+  journal = {arXiv preprint arXiv:2505.18858},
   year    = {2025}
 }
 
-% TODO — fill from the paper. LIBERO benchmark (Liu et al., 2023).
-@misc{liu2023libero, title = {TODO}, year = {2023}}
+% ---------- Corrective supervision and its distribution -----------------------------------
+% [VERIFIED] Read in full 2026-08-19. USC and Stanford. ICRA 2025. Cite the HJ-reachability
+% disturbance injection (Eq. 4-5, Algorithm 1) and the ablation showing Gaussian noise,
+% uniform noise and DART all fail. Its expert is an MPC or PID controller: FOREIGN, and
+% safety transfers anyway.
+@inproceedings{ciftci2025safegil,
+  title     = {{SAFE-GIL}: {SAFE}ty Guided Imitation Learning for Robotic Systems},
+  author    = {Ciftci, Yusuf Umut and Chiu, Darren and Feng, Zeyuan and
+               Sukhatme, Gaurav S. and Bansal, Somil},
+  booktitle = {IEEE International Conference on Robotics and Automation (ICRA)},
+  pages     = {3559--3566},
+  year      = {2025}
+}
 
-% TODO — fill from the paper. pi_0.5, Physical Intelligence.
-@misc{physicalintelligence2025pi05, title = {TODO}, year = {2025}}
+% [VERIFIED] Read in full 2026-08-19. UC Berkeley and NVIDIA. IROS 2024. Recovery actions come
+% from a HUMAN teleoperator; only the states are the policy's own. Assumptions 1-3 require a
+% delta-pose action space and a known object-centric subtask sequence.
+@inproceedings{hoque2024intervengen,
+  title     = {{IntervenGen}: Interventional Data Generation for Robust and Data-Efficient
+               Robot Imitation Learning},
+  author    = {Hoque, Ryan and Mandlekar, Ajay and Garrett, Caelan and Goldberg, Ken and
+               Fox, Dieter},
+  booktitle = {IEEE/RSJ International Conference on Intelligent Robots and Systems (IROS)},
+  pages     = {2840--2846},
+  year      = {2024}
+}
 
-% TODO — fill from the paper. AEGIS: the direct baseline this work matches.
-@misc{aegis2025, title = {TODO}, year = {2025}}
+% [VERIFIED] Read in full 2026-08-19. UNSW, Deakin, AFRL. Teacher is a logit-perturbed copy of
+% the STUDENT (their Eq. 10); its privileged-teacher rejection is TEXTUAL-ONLY (Sec 4.2.1).
+% Table 2 is the citation target for the text-privileged ablation.
+@article{wang2026roadvla,
+  title   = {{ROAD-VLA}: Robust Online Adaptation via Self-Distillation for
+             Vision-Language-Action Models},
+  author  = {Wang, Kejing and Nguyen, Toan and Nguyen, Minh Hoang and Khan, Simon and
+             Salim, Flora D.},
+  journal = {arXiv preprint arXiv:2606.25800},
+  year    = {2026}
+}
 
-% TODO — fill from the paper. VLSA.
-@misc{vlsa2026, title = {TODO}, year = {2026}}
+% ---------- Learned safety representations that retain inference-time optimisation --------
+% [VERIFIED] Read 2026-08-19 (abstract and method). MIT and Microsoft Research. ICRA 2024.
+% Confirmed to rectify actions by backpropagation at TEST time.
+@inproceedings{meng2024conbat,
+  title     = {{ConBaT}: Control Barrier Transformer for Safe Robot Learning from
+               Demonstrations},
+  author    = {Meng, Yue and Vemprala, Sai and Bonatti, Rogerio and Fan, Chuchu and
+               Kapoor, Ashish},
+  booktitle = {IEEE International Conference on Robotics and Automation (ICRA)},
+  pages     = {12857--12864},
+  year      = {2024}
+}
+
+% [VERIFIED] Read 2026-08-19 (abstract, intro, method). Stanford. NeurIPS 2025. Performs
+% inference-time latent steering and advertises working WITHOUT retraining: the inverse of
+% this thesis's contribution.
+@inproceedings{sun2025lpb,
+  title     = {Latent Policy Barrier: Learning Robust Visuomotor Policies by Staying
+               In-Distribution},
+  author    = {Sun, Zhanyi and Song, Shuran},
+  booktitle = {Advances in Neural Information Processing Systems (NeurIPS)},
+  year      = {2025},
+  note      = {arXiv:2508.05941}
+}
+
+% ---------- Policy-level safety learning (scope control for the RL negative) --------------
+% [CHECK] Not opened. Title from PDF metadata. Constrained-MDP formulation.
+@article{safevla,
+  title   = {{SafeVLA}: Towards Safety Alignment of Vision-Language-Action Model via
+             Constrained Learning},
+  author  = {TODO},
+  journal = {arXiv preprint},
+  year    = {TODO}
+}
+
+% [CHECK] Not opened, and it is the one remaining open item in papers/FINDINGS.md: SafeDojo
+% evaluates on SafeLIBERO, so its numbers may need to appear in Chapter 4 for the comparison
+% to be complete.
+@article{safedojo,
+  title   = {{SafeDojo}: Safe Reinforcement Learning for {VLA} via Interactive World Model},
+  author  = {TODO},
+  journal = {arXiv preprint},
+  year    = {TODO}
+}
+
+% ---------- Base model and benchmark ------------------------------------------------------
+% [CHECK] Physical Intelligence. arXiv:2410.24164.
+@article{black2024pi0,
+  title   = {$\pi_0$: A Vision-Language-Action Flow Model for General Robot Control},
+  author  = {Black, Kevin and Brown, Noah and Driess, Danny and Esmail, Adnan and
+             Equi, Michael and Finn, Chelsea and others},
+  journal = {arXiv preprint arXiv:2410.24164},
+  year    = {2024}
+}
+
+% [CHECK] Physical Intelligence. arXiv:2504.16054. The base policy adapted in this thesis.
+@article{physicalintelligence2025pi05,
+  title   = {$\pi_{0.5}$: a Vision-Language-Action Model with Open-World Generalization},
+  author  = {{Physical Intelligence}},
+  journal = {arXiv preprint arXiv:2504.16054},
+  year    = {2025}
+}
+
+% [CHECK] NeurIPS 2023 Datasets and Benchmarks. arXiv:2306.03310. Supplies the task suite and
+% BDDL scene specification that SafeLIBERO extends.
+@inproceedings{liu2023libero,
+  title     = {{LIBERO}: Benchmarking Knowledge Transfer for Lifelong Robot Learning},
+  author    = {Liu, Bo and Zhu, Yifeng and Gao, Chongkai and Feng, Yihao and Liu, Qiang and
+               Zhu, Yuke and Stone, Peter},
+  booktitle = {Advances in Neural Information Processing Systems (NeurIPS)
+               Datasets and Benchmarks Track},
+  year      = {2023}
+}
+
+% ---------- Distillation precedents (plausibility only, not safety evidence) --------------
+% [CHECK] Authors not in PDF metadata.
+@article{vita_vla,
+  title   = {{VITA-VLA}: Efficient Vision-Language-Action Model via Action Distillation},
+  author  = {TODO},
+  journal = {arXiv preprint},
+  year    = {TODO}
+}
+
+% [CHECK] Cite for deployment-efficiency motivation ONLY if latency or compute savings are
+% measured. None were measured in this thesis, so prefer "the shield is absent" over any
+% claim of speedup.
+@article{rt_vla,
+  title   = {{RT-VLA}: Real-Time Vision-Language-Action Models via Knowledge Distillation},
+  author  = {TODO},
+  journal = {arXiv preprint},
+  year    = {TODO}
+}
+
+% ---------- Implementation lineage for the RL ablation (appendix material) -----------------
+% [CHECK] arXiv:2505.05470, confirmed from experiments/flow_sde.py which ports their
+% sde_step_with_logprob. Cite for the ODE-to-SDE construction only; their experiments are
+% text-to-image, not robotics.
+@article{liu2025flowgrpo,
+  title   = {Flow-{GRPO}: Training Flow Matching Models via Online {RL}},
+  author  = {Liu, Jie and others},
+  journal = {arXiv preprint arXiv:2505.05470},
+  year    = {2025}
+}
+
+% [CHECK] arXiv:2402.03300. Cite for the group-relative objective only; contains no robotics
+% or safety evidence.
+@article{shao2024grpo,
+  title   = {{DeepSeekMath}: Pushing the Limits of Mathematical Reasoning in Open Language
+             Models},
+  author  = {Shao, Zhihong and Wang, Peiyi and Zhu, Qihao and Xu, Runxin and Song, Junxiao
+             and others},
+  journal = {arXiv preprint arXiv:2402.03300},
+  year    = {2024}
+}
+
+% ---------- Method ancestry ---------------------------------------------------------------
+% [CHECK] Not in papers/. Needed because Chapter 2 places this work in the DAgger lineage and
+% Chapter 3 should cite it as the method's direct ancestor.
+@inproceedings{ross2011dagger,
+  title     = {A Reduction of Imitation Learning and Structured Prediction to No-Regret
+               Online Learning},
+  author    = {Ross, St{\'e}phane and Gordon, Geoffrey J. and Bagnell, J. Andrew},
+  booktitle = {International Conference on Artificial Intelligence and Statistics (AISTATS)},
+  pages     = {627--635},
+  year      = {2011}
+}
+
+% [CHECK] Not in papers/. Cite alongside DAgger for the "learn when the safe policy is needed"
+% idea that Chapter 2 attributes to this line.
+@inproceedings{zhang2017safedagger,
+  title     = {{SafeDAgger}: A Query-Efficient Imitation Learning Algorithm for Autonomous
+               Driving},
+  author    = {Zhang, Jiakai and Cho, Kyunghyun},
+  booktitle = {AAAI Conference on Artificial Intelligence},
+  year      = {2017}
+}
+
+% [CHECK] Not in papers/. Solver stack, for reproducibility.
+@article{stellato2020osqp,
+  title   = {{OSQP}: an operator splitting solver for quadratic programs},
+  author  = {Stellato, Bartolomeo and Banjac, Goran and Goulart, Paul and Bemporad, Alberto
+             and Boyd, Stephen},
+  journal = {Mathematical Programming Computation},
+  volume  = {12},
+  number  = {4},
+  pages   = {637--672},
+  year    = {2020}
+}
+
+@article{diamond2016cvxpy,
+  title   = {{CVXPY}: A Python-embedded modeling language for convex optimization},
+  author  = {Diamond, Steven and Boyd, Stephen},
+  journal = {Journal of Machine Learning Research},
+  volume  = {17},
+  number  = {83},
+  pages   = {1--5},
+  year    = {2016}
+}
