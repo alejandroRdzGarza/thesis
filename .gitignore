@@ -86,3 +86,5 @@ MUJOCO_LOG.TXT
 # browsing artefacts for Figure 4.3 — regenerate with:
 #   PYTHONPATH=. python -m experiments.make_fig_filmstrip --all
 figures/filmstrip_candidates/
+
+figures/demo_videos/
