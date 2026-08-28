@@ -82,3 +82,7 @@ videos_metric_check/
 # ── Logs ─────────────────────────────────────────────────────────────────────
 MUJOCO_LOG.TXT
 *.log
+
+# browsing artefacts for Figure 4.3 — regenerate with:
+#   PYTHONPATH=. python -m experiments.make_fig_filmstrip --all
+figures/filmstrip_candidates/

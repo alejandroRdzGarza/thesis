@@ -90,7 +90,8 @@ def row_label(name: str, collision_free: bool, success: bool) -> str:
             f"{TICK if success else CROSS} success")
 
 
-def build(scene: str, group: str, n: int):
+def build(scene: str, group: str, n: int, stem: str = "fig_filmstrip",
+          exts=("pdf", "png"), quiet: bool = False):
     b, d = load_manifest(BASE_ARM)[(scene, group)], load_manifest(DIST_ARM)[(scene, group)]
     fb, ib = frames(b["trace"], n)
     fd, idd = frames(d["trace"], n)
@@ -119,8 +120,11 @@ def build(scene: str, group: str, n: int):
     fig.tight_layout(rect=[0, 0.04, 1, 0.95])
     fig.subplots_adjust(hspace=0.30)
     OUT.mkdir(exist_ok=True)
-    for ext in ("pdf", "png"):
-        fig.savefig(OUT / f"fig_filmstrip.{ext}", bbox_inches="tight", dpi=200)
+    for ext in exts:
+        fig.savefig(OUT / f"{stem}.{ext}", bbox_inches="tight", dpi=160)
+    plt.close(fig)
+    if quiet:
+        return
     print(f"\n  {scene}  g{group}")
     print(f"    base       collision={b['collision']}  success={b['success']}  ets={b['ets']}")
     print(f"    distilled  collision={d['collision']}  success={d['success']}  ets={d['ets']}")
@@ -133,9 +137,24 @@ def main() -> int:
     ap.add_argument("--list", action="store_true", help="inventory paired episodes, best first")
     ap.add_argument("--scene"); ap.add_argument("--group")
     ap.add_argument("--frames", type=int, default=5)
+    ap.add_argument("--all", action="store_true",
+                    help="render every ideal pair to figures/filmstrip_candidates/ for browsing")
     a = ap.parse_args()
 
     rows = candidates()
+
+    if a.all:
+        ideal = [r for r in rows if r[1]["collision"] and not r[2]["collision"] and r[2]["success"]]
+        d = OUT / "filmstrip_candidates"; d.mkdir(parents=True, exist_ok=True)
+        for i, ((sc, g), _, _) in enumerate(ideal, 1):
+            build(sc, g, a.frames, stem=f"filmstrip_candidates/{sc}_g{g}",
+                  exts=("png",), quiet=True)
+            print(f"  [{i:>2}/{len(ideal)}] {sc}_g{g}.png", flush=True)
+        print(f"\n  {len(ideal)} candidates -> {d}/")
+        print("  browse, then rebuild the one you want:")
+        print("    python -m experiments.make_fig_filmstrip --scene <scene> --group <n>")
+        return 0
+
     if a.list or not (a.scene and a.group):
         ideal = [r for r in rows if r[1]["collision"] and not r[2]["collision"] and r[2]["success"]]
         print(f"\n  {len(rows)} paired (scene, init); {len(ideal)} with base colliding and "
