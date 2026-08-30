@@ -10,12 +10,20 @@ closing with a brief overall recap.
 
 \section{Summary of Findings}\label{sec:conc:summary}
 
-This thesis asked whether the safety of an inference-time control-barrier function shield can be
-distilled into a VLA policy. Under the specific conditions tested in this work, the answer is yes.
-Self-distilling $\pi_{0.5}$ reduced collisions from 82.5\% to 19.2\% \textbf{without running the
+This study aimed to determine whether the collision avoidance supplied by an inference-time control
+barrier function shield can be amortised into the weights of a vision-language-action policy, such
+that the shield is no longer required at deployment. Under the specific conditions tested in this
+work, it can.
+
+In relation to RQ1, the shield performs as the published baseline reports, and the unmodified
+policy's collision and success figures reproduce those of the runtime-shielding
+baseline~\cite{vlsa2026} to within a point --- which establishes that the evaluation measures what
+it claims to before anything is distilled. In relation to RQ2, self-distilling $\pi_{0.5}$ reduced collisions from 82.5\% to 19.2\% \textbf{without running the
 shield at inference}, while increasing task success from 58.3\% to 82.5\% on held-out initial
 states. The resulting policy achieved a collision-avoidance rate of 80.8\%, approaching the
-shielded policy's 86.7\%, and one distillation round was sufficient.
+shielded policy's 86.7\%, and one distillation round was sufficient. The cost fell on execution
+time rather than capability: the distilled policy takes a more conservative route and is roughly
+14\% slower.
 
 Distillation therefore creates a choice between two operating points, and both improve on what was
 available before. Run shield-free, the policy is safer and more capable than the model it came
@@ -29,7 +37,8 @@ unshielded policy the same configuration is both more successful and an order of
 That the residual is 8.3\% rather than zero reflects the approximations of
 Section~\ref{sec:barrier}, not the absence of the argument.
 
-The transfer is bounded, and the bound is the more useful half of the result. A geometry-privileged
+In relation to RQ3, the transfer is bounded, and the bound is the more useful half of the result. A
+geometry-privileged
 motion planner supplying dense per-step corrections produced no measurable improvement under a
 matched comparison; filtering only for successful episodes produced none either. What separates the
 teacher that worked from the one that did not is where its demonstrations sit. Transferable
@@ -41,6 +50,15 @@ an adversarial construction must manufacture them. A third is suggestive rather 
 --- the distilled student avoided arm-link collisions more effectively than the shield that
 supervised it, 8 against 15, on intervals that overlap (Section~\ref{sec:res:scope}) --- but if it
 holds, trajectory imitation alone does not describe what was learned.
+
+In relation to RQ4, the transfer does not reach the whole robot, and four alternative mechanisms did
+not substitute for it. Collisions were eliminated where the barrier's model of the robot is precise
+and the constrained velocity is the one commanded, and persisted at the arm links, which account for
+almost all of what remains under the shield. Scalar-reward reinforcement learning, a
+language-expressed constraint, best-of-$N$ selection and a generative uncertainty monitor were each
+tested and none reproduced the effect, though every one of those negatives is scoped to the
+implementation and budget tested rather than to its method class
+(Section~\ref{sec:conc:limitations}).
 
 \section{Limitations}\label{sec:conc:limitations}
 
@@ -148,7 +166,17 @@ accepts is derived from the student, so no foreign low-level controller appears 
 Supplying one under a matched comparison, and measuring what follows, is this thesis's
 contribution.
 
-A third contribution is a measurement rather than a method: within a given state, the safety
+Three findings bear directly on how such a system would be deployed. Distilling before shielding
+produces the lowest collision rate of any configuration measured, at a success rate
+indistinguishable from shielding the base policy, so where a runtime constraint is required it is
+better applied to a distilled policy than to a raw one. The distilled policy also invokes the shield
+roughly half as often --- the barrier alters 18\% of control steps against 36\% before distillation
+--- which matters wherever motion must be predictable, since a filter that fires constantly is a
+filter that makes cycle times vary. And safe demonstrations are approximately twice as cheap to
+collect with the shield active as without it, at a 39\% yield against 18\%, a direct saving for any
+deployment gathering task-specific data.
+
+A further contribution is a measurement rather than a method: within a given state, the safety
 outcomes of a VLA's sampled action candidates are near-perfectly correlated, which is why
 action-level rejection sampling cannot help where episode-level selection can
 (Section~\ref{sec:res:channels}).
