@@ -106,14 +106,14 @@ Models (VLMs) into physical execution, VLAs unify multimodal perception and low-
 control into single end-to-end architectures, replacing classical modular pipelines. 
 
 % Research problem
-However, deploying VLA policies into real-world, human-centric environments intro-
-duces severe safety risks. While hallucinations in pure language models merely yield incor-
-rect text, ungrounded actions or spatial errors in VLAs directly cause physical collisions,
+However, deploying VLA policies into real-world, human-centric environments introduces
+severe safety risks. While hallucinations in pure language models merely yield incorrect
+text, ungrounded actions or spatial errors in VLAs directly cause physical collisions,
 property damage, or catastrophic injury.
 
 % Research aims and/or objectives
 
-The aim of this work is to determine whether the safety gains provided by external inference-time mechanisms can be in turn internalized in the model weights, and thus making the VLA inherently safer. 
+The aim of this work is to determine whether the safety gains provided by external inference-time mechanisms can be in turn internalised in the model weights, and thus making the VLA inherently safer. 
 
 % rest of chapter structure
 This chapter starts by providing background context, before presenting the research problem, rationale, scope, and significance of the study.
@@ -215,9 +215,9 @@ Chapter~\ref{ch:results}:
   \item Can that safety be internalised by distillation, such that the policy remains safe with the
         shield removed, and at what cost to task capability?
         (Section~\ref{sec:res:internalise})
-  \item What determines whether the transfer occurs --- does the source of the demonstrations
-        matter, and what mechanism explains the difference?
-        (Sections~\ref{sec:res:source} and~\ref{sec:res:mechanism})
+  \item What determines whether the transfer occurs --- what mechanism produces it, and does the
+        source of the demonstrations matter?
+        (Sections~\ref{sec:res:mechanism} and~\ref{sec:res:source})
   \item What does the transfer fail to cover, and do alternative mechanisms succeed where it does
         not? (Sections~\ref{sec:res:scope} and~\ref{sec:res:channels})
 \end{enumerate}
@@ -281,10 +281,12 @@ which explains why selection among actions cannot substitute for correcting them
 
 \section{Structural Overview}
 
-Chapter~\ref{ch:background} reviews the literature in four strands: runtime safety filtering for
-learned policies, learned safety representations that replace the analytic barrier, work on what
-makes corrective demonstrations transferable, and policy-level alternatives that pursue safety
-through constrained learning rather than filtering. It closes by locating the gap this study
+Chapter~\ref{ch:background} reviews the literature in three strands: runtime safety filtering for
+learned policies, whether through an analytic barrier or a learned one; work on what makes
+corrective demonstrations transferable into a policy's weights; and policy-level alternatives that
+pursue safety through constrained learning rather than through correction at all. It sets these on
+the control-theoretic account of safety as forward invariance and the theory of covariate shift in
+imitation learning. It closes by locating the gap this study
 addresses and stating precisely what is and is not new about it.
 
 Chapter~\ref{ch:method} describes the benchmark and metrics, the geometric construction of the
@@ -294,9 +296,10 @@ question rather than chronologically, and includes the controls used to isolate 
 the alternative approaches that were tested and rejected.
 
 Chapter~\ref{ch:discussion} interprets those results against the literature of
-Chapter~\ref{ch:background}, sets out the limitations of the study, and identifies the work that
-would follow from it. Chapter~\ref{ch:conclusion} returns to the research questions and states what
-the study answers, what it bounds, and what remains open. Supporting material that would interrupt
+Chapter~\ref{ch:background}, establishing what each finding contributes and where it sits against
+prior work. Chapter~\ref{ch:conclusion} returns to the research questions and states what the study
+answers, the limitations that bound those answers, the research they recommend, and what the study
+contributes. Supporting material that would interrupt
 the argument --- a standalone characterisation of the scripted expert, and the diagnostics behind
 one rejected approach --- is placed in the appendices.
 
