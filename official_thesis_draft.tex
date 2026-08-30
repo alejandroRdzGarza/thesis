@@ -63,7 +63,7 @@
     % KEEP ONLY ONE of the two disclaimers below.
     The report may be freely copied and distributed provided the source is
     explicitly acknowledged.}
-  \\ \\ MSc Robotics and AI \\ \\ Supervisor: Valerio Modugno}
+  \\ \\ MSc Robotics and Computation \\ \\ Supervisor: Valerio Modugno}
 
 \begin{document}
 \onehalfspacing
@@ -82,14 +82,16 @@ policy's weights. Distilling $\pi_{0.5}$ on its own shielded rollouts reduced co
 to 19.2\% \emph{with no shield at inference}, while raising task success from 58.3\% to
 82.5\% on held-out initial states. One distillation round recovers most of the shielded
 baseline's collision avoidance (80.8\% against 86.7\%), and the shield finds materially
-less to correct when reattached (activation proxy 0.533 to 0.265).
+less to correct when reattached, firing on 18\% of control steps against 36\%.
 
 The transfer is bounded, and the bound is the contribution. A geometry-privileged motion
-planner, safe by construction, produced no measurable improvement under a matched
-comparison; filtering for successful episodes alone produced none either. What transfers
+planner, supplying corrections of equal density under the same shield, produced no
+measurable improvement under a matched comparison; filtering for successful episodes
+alone produced none either. What transfers
 is correction at states the policy itself reaches. Four alternative mechanisms ---
-scalar-reward reinforcement learning, CBF-guided sampling, language-specified safety and
-best-of-$N$ selection --- were tested and rejected, each for an identified reason.
+scalar-reward reinforcement learning, language-specified safety, best-of-$N$ selection and
+generative uncertainty monitoring --- were tested and rejected, each for an identified
+reason.
 \end{abstract}
 
 
