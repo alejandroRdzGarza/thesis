@@ -1,0 +1,95 @@
+
+% ---------------------------------------------------------------------------------------------
+% NOTE. This file currently holds only the two sections moved out of the Discussion chapter:
+% Limitations and Future Work. The rest of the Conclusion (introduction, summary of findings,
+% contributions, closing remarks) still needs to be written around them.
+%
+% Both sections were trimmed when they moved. The parts that INTERPRET a finding now live in
+% Section~\ref{sec:disc:limits}; what remains here is the caveat each places on a claim. Check
+% against that section before adding material back, or the two will restate each other.
+% ---------------------------------------------------------------------------------------------
+
+\chapter{Conclusion}\label{ch:conclusion}
+
+\section{Limitations}\label{sec:conc:limitations}
+
+\paragraph{Simulation only.}
+Every result is from SafeLIBERO. No physical robot was used and no claim of sim-to-real transfer is
+made.
+
+\paragraph{No formal guarantee is inherited.}
+The distilled policy carries no runtime constraint, so nothing of the shield's formal argument
+survives its removal. The conditions under which a learned controller instead inherits
+input-to-state safety~\cite{cosner2022il_cbf} are set out in Section~\ref{sec:bg:learned}, and none
+holds here: the shield is a nominal rather than a robust QP, the plant is not a known
+control-affine system, and neither a bounded learning error nor a Lipschitz constant is available
+for a 3-billion-parameter flow-matching policy. What is demonstrated is an empirical reduction in
+collisions.
+
+\paragraph{Privileged geometry.}
+The barrier is constructed from obstacle poses and meshes read directly from the simulator. A
+deployed system would estimate that geometry from perception and inherit the resulting error, so
+every shielded figure reported here is an upper bound for this class of filter. The distilled
+policy uses no geometry at inference, but the dependency remains during \emph{training}.
+
+\paragraph{Approximate robot model.}
+The barrier represents the robot with spheres rather than its exact shape, because the exact
+version would not solve fast enough to run at every control step (Section~\ref{sec:barrier}). How
+accurate that approximation actually was is never measured directly; the account in
+Section~\ref{sec:disc:limits} of where the transfer stops is a reading of which bodies collided,
+not a measurement of constraint fidelity.
+
+\paragraph{Single training seed.}
+Each distilled policy is one training run and seed variance is unquantified.
+
+\paragraph{Single policy and action space.}
+Everything here uses one model, $\pi_{0.5}$, which produces chunks of actions by integrating a
+flow field. Two results depend on that design --- the reinforcement-learning negative and the
+best-of-$N$ measurement --- and may not carry over to policies that emit one action at a time.
+
+\paragraph{Scope of the negative results.}
+Each negative is a finding about the implementation and budget tested, not about its method class.
+The reinforcement-learning result concerns the reward design and the variant that could be run at
+this scale; richer constraint signals exist and were out of computational reach
+(Section~\ref{sec:disc:limits}). The language result concerns a single phrasing. The best-of-$N$
+measurement supports a state-dominant account of collision risk in this policy and benchmark rather
+than a general claim about generative policies.
+
+\paragraph{Attribution caveats.}
+The per-body attribution is a documented lower bound that can miss delayed or indirect contacts.
+
+\section{Future Work}\label{sec:conc:future}
+
+\textbf{A physical robot} is the most direct extension. Whether internalised avoidance survives
+contact dynamics, calibration error and a real perception pipeline is the question this work most
+needs answered, and Section~\ref{sec:disc:cost} suggests the deployment configuration to test: the
+distilled policy with the shield reattached, which reached the highest collision-avoidance rate of
+any arm evaluated while keeping the runtime constraint a safety case would require.
+
+\textbf{Repeating the training across seeds} is the cheapest outstanding item and addresses the
+weakest one. Each distilled policy here is a single run, so the training variance behind the
+headline is unquantified even though the evaluation variance is not.
+
+\textbf{Perception-grounded barriers} would remove the privileged-geometry dependency and measure
+how much of the reported safety survives estimation error --- the same question a physical
+deployment asks, isolated from the rest of the reality gap. Learned safety representations offer
+one route~\cite{meng2024conbat,sun2025lpb}, though both retain the inference-time correction this
+work removes.
+
+\textbf{A whole-body barrier} with proper link geometry and directly constrained link velocities
+would lower the shield's own floor (Section~\ref{sec:res:scope}); whether that improvement then
+distils is separately testable. It would also make CBF-guided sampling worth testing, since the
+existing implementation was verified against a closed-form projection but wired to an
+end-effector barrier, and so never activated on the scenes where arm links collided.
+
+\textbf{Other architectures and moving obstacles} bound the generality of the result. The
+best-of-$N$ and reinforcement-learning findings depend on chunked flow sampling and may not hold for
+policies emitting single actions, and every scene here is static --- the case that matters for
+deployment is a constraint that moves.
+
+Finally, \textbf{separating the surviving explanations} would say something general about when
+demonstrations transfer between controllers. Observation aliasing was measured and rejected
+(Section~\ref{sec:res:source}) and state coverage is supported but measured only on
+end-effector position; distribution shift and action-distribution mismatch remain. A direct
+comparison against model-based safe RL on this benchmark~\cite{safedojo} would place distillation
+against the strongest current alternative.
