@@ -186,13 +186,22 @@ satisfies~\cite{cosner2022il_cbf}, or distils from a teacher constructed out of 
 itself~\cite{wang2026roadvla}. Whether the corrections a control-theoretic shield produces can be
 compiled into a policy's weights, such that the shield can be \emph{removed}, has not been asked.
 
-The gap matters because the filter is permanent. It consumes inference budget at every control step
-and requires obstacle geometry at deployment, so a policy that could otherwise run from observations
-alone inherits a perception dependency it does not need, and a component that can itself fail. Nor is
-enforcement free: the authors of the runtime-shielding baseline report that constraining a policy can
-drive it into states its training never covered, where it may behave erratically and fail to
-recover~\cite{vlsa2026}. The question is therefore not only whether the shield could be removed, but
-whether removing it would leave a policy that is better behaved than one under constant correction.
+The gap matters because the filter is a mitigation rather than a solution, and because its benefit
+and its cost arise from the same mechanism. It is imperfect: even in the strongest published
+configuration on this benchmark, roughly a quarter of episodes still end with an obstacle
+displaced~\cite{vlsa2026}. And it interferes --- the authors of that work report that enforcing a
+constraint can drive a policy into states its training never covered, where it may behave
+erratically and fail to recover~\cite{vlsa2026}. Correcting actions at runtime is simultaneously
+what makes the filter effective and what pushes the policy out of distribution, so the two cannot be
+separated by tuning: a filter that intervenes less interferes less and protects less.
+
+Internalisation is attractive because it does separate them. If the corrections shape the policy's
+behaviour during training, their effect can survive without a correction occurring at deployment ---
+and the resulting policy can still be shielded where a safety case demands a runtime guarantee, so
+the two mechanisms are complementary rather than exclusive. The question is therefore not only
+whether the shield can be removed, saving the inference budget it consumes and the obstacle geometry
+it requires at deployment. It is whether the safety a runtime filter supplies can be had without the
+interference it imposes.
 
 \section{Rationale}\label{sec:intro:rationale}
 
