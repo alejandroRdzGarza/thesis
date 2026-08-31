@@ -750,6 +750,12 @@ The reference pose $p(0)$ is taken after a brief settling period, since objects 
 unsupported poses would otherwise cross the threshold under gravity before the policy has acted.
 
 
+\paragraph{Per-body attribution}\label{sec:attribution} records which of the robot's bodies
+contacted the obstacle in each episode, grouped as gripper, arm link, held object, and other scene
+objects. The collision metric registers \emph{whether} the obstacle moved, not \emph{what} moved it,
+and the barrier's authority is uneven across the robot --- precise at the end-effector, approximate
+at the links --- so this decomposition is what makes the residual interpretable.
+
 \paragraph{Execution time to success (ETS)} is the control step at which the success predicate
 first holds, averaged over successful rollouts only and reported in control steps. ETS is therefore conditional on success and must be read
 alongside TSR.
@@ -857,15 +863,6 @@ Two discrete-time adjustments are required because the barrier's guarantee is co
 effective radius is inflated by a lag buffer covering the distance travelled between control steps
 and the inverse-kinematics tracking error. Rotation is not constrained: the barrier acts
 on the translational channel only.
-
-\section{Collision Attribution}\label{sec:attribution}
-
-The collision metric records \emph{whether} the obstacle moved, not \emph{what} moved it. Because
-the barrier's authority is uneven across the robot --- precise at the end-effector, approximate at
-the links --- that difference matters for interpreting the residual, so each episode additionally
-records which bodies contacted the obstacle, grouped as gripper, arm link, held object, and other
-scene objects.
-.
 
 \section{Teachers}\label{sec:teachers}
 
