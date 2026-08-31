@@ -130,16 +130,28 @@ commands~\cite{black2024pi0}. Pretraining on web-scale vision-language data and 
 robot datasets has made these models strikingly general: the policy studied here, $\pi_{0.5}$,
 performs long-horizon manipulation in homes it has never seen~\cite{physicalintelligence2025pi05}.
 
-That generality is what the field has optimised for, and it is not the same thing as safety. Nothing
-in the training objective penalises contact with an object that is not the target, and nothing in the
-data distribution reliably demonstrates avoidance --- human demonstrators rarely produce the
-near-collisions that would teach it. The consequence is measurable: on the benchmark used throughout
-this work, an unmodified $\pi_{0.5}$ disturbs a non-target obstacle in more than eight of every ten
-episodes. Throughout this thesis, \emph{safety} refers narrowly to this property --- avoiding
-unintended physical contact with objects in the workspace --- rather than to the broader alignment
-concerns associated with language models.
+That generality is not the same thing as safety, and the reason is structural. A VLA is trained to
+reproduce demonstrated behaviour, so nothing in its objective penalises contact with an object that
+is not the target, and nothing in the data reliably demonstrates avoidance --- human demonstrators
+rarely produce the near-collisions that would teach it. The consequence is measurable: on the
+benchmark used throughout this work, an unmodified $\pi_{0.5}$ disturbs a non-target obstacle in
+more than eight of every ten episodes. Throughout this thesis, \emph{safety} refers narrowly to this
+property --- avoiding unintended physical contact with objects in the workspace --- rather than to
+the broader alignment concerns associated with language models.
 
-Control theory offers a mature answer to constraint satisfaction that predates the learning
+This has not gone unaddressed, and the responses fall into three groups. The largest places a
+corrective component between the policy and the robot, checking each proposed action against a
+safety condition --- analytic or learned --- and modifying it where the condition is
+violated~\cite{vlsa2026,meng2024conbat,sun2025lpb}. A second changes what the policy optimises,
+expressing safety as a constraint on the learning problem rather than as a filter on its
+output~\cite{safevla,safedojo}. A third distils a corrective signal into the policy's weights, so
+that safer actions are produced rather than intercepted~\cite{wang2026roadvla}. Purpose-built
+evaluation has followed: SafeLIBERO augments an established manipulation
+suite~\cite{liu2023libero} with obstacles placed deliberately in the robot's path~\cite{vlsa2026},
+and is the setting for everything reported here. The first group is much the most developed, and is
+where this thesis begins.
+
+That group rests on a control-theoretic answer to constraint satisfaction that predates the learning
 literature. A \emph{control barrier function} defines a safe region of the state space and derives,
 from it, a condition on the robot's velocity that keeps the system inside that region: satisfy the
 condition at every instant, and a system that starts safe provably remains safe~\cite{ames2017cbf}.
@@ -149,14 +161,12 @@ returns the nearest action that satisfies the constraint. Such a component is co
 \emph{shield} or \emph{safety filter}: it sits between the policy and the robot, passing safe actions
 through unchanged and minimally correcting unsafe ones.
 
-Applying this machinery to vision-language-action models is recent. The immediate prior work inserts
-exactly such a filter between $\pi_{0.5}$ and the robot, grounding obstacle geometry from the
-model's own observations, and demonstrates a large reduction in collisions while preserving the
-policy's ability to follow instructions~\cite{vlsa2026}. That work also contributes SafeLIBERO, a
-benchmark that augments an established manipulation suite~\cite{liu2023libero} with obstacles placed
-deliberately in the robot's path, and it is the setting for everything that follows. Runtime
-shielding is therefore the current state of the art for making a VLA safe --- and the starting point
-for the problem this thesis addresses.
+Applying this machinery to vision-language-action models is recent. The immediate prior work --- the
+same work that contributes SafeLIBERO --- inserts exactly such a filter between $\pi_{0.5}$ and the
+robot, grounding obstacle geometry from the model's own observations, and demonstrates a large
+reduction in collisions while preserving the policy's ability to follow
+instructions~\cite{vlsa2026}. Runtime shielding is therefore the current state of the art for making
+a VLA safe --- and the starting point for the problem this thesis addresses.
 
 \section{Problem Statement}
 
