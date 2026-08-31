@@ -1154,10 +1154,12 @@ intervals disjoint. It recovers most of the shielded baseline's collision avoida
   \centering
   \includegraphics[width=\linewidth]{figures/fig_filmstrip.pdf}
   \caption[The same scene under the base and distilled policies]{%
-    The same scene and the same held-out initial state under the base policy (top) and the
-    self-distilled policy (bottom), neither running a shield. Frames are sampled at equal fractions
-    of each episode: the base rollout runs to the horizon without completing, while the distilled
-    rollout finishes at step 168.}
+    Spatial suite, task 0, held-out initial state 1, under the base policy (top) and the
+    self-distilled policy (bottom), neither running a shield. The base policy knocks the moka pot
+    onto its side within the first quarter of the episode and then runs to the horizon without
+    completing the task; the distilled policy leaves the pot standing throughout and succeeds at
+    step 104. Frames are sampled at equal fractions of each episode, so the two rows show the whole
+    of their respective rollouts.}
   \label{fig:filmstrip}
 \end{figure}
 
