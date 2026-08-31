@@ -768,10 +768,6 @@ should need fewer corrections when the shield is reattached.
 
 \paragraph{Mean correction norm} is the average $\lVert u^{\star} - u_{\mathrm{nom}} \rVert$ over steps where the shield intervened, measured against actions bounded to $[-1,1]$ per axis. Where the activation rate says how often the shield acted, this says how far it moved the action when it did. The two are independent: a shield could intervene constantly with negligible corrections, or rarely with large ones.
 
-Unless a caption states otherwise, every reported condition is $n = 120$ held-out rollouts pooled
-over the 24 scenes, with proportions given as 95\% Wilson score confidence intervals.
-
-
 \section{Obstacle Geometry and the Barrier}\label{sec:barrier}
 
 The obstacle's collision mesh is read from the simulator, sampled into a point cloud, and decomposed
@@ -928,8 +924,8 @@ When comparing distilled policies, training runs are matched strictly on the tot
 
 \section{Analysis}\label{sec:method:analysis}
 
-Every headline quantity is a proportion over $n = 120$ independent rollouts, reported with a 95\%
-Wilson score interval. Wilson is used rather than the normal approximation because several
+Unless a caption states otherwise, every headline quantity is a proportion over $n = 120$
+independent held-out rollouts, reported with a 95\% Wilson score interval. Wilson is used rather than the normal approximation because several
 conditions sit near zero or one --- shielded gripper collisions are zero across 360 episodes --- and
 at these rates the normal interval is too narrow and can extend outside $[0,1]$.
 
