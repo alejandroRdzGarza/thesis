@@ -1785,53 +1785,31 @@ implementation tested rather than to its method class.
 
 \section{Limitations}\label{sec:conc:limitations}
 
-\paragraph{Simulation only.}
-Every result is from SafeLIBERO. No physical robot was used and no claim of sim-to-real transfer is
-made.
-
-\paragraph{No formal guarantee is inherited.}
-The distilled policy carries no runtime constraint, so nothing of the shield's formal argument
-survives its removal. The conditions under which a learned controller instead inherits
-input-to-state safety~\cite{cosner2022il_cbf} are set out in Section~\ref{sec:bg:transfer}, and none
-holds here: the shield is a nominal rather than a robust QP, the plant is not a known
-control-affine system, and neither a bounded learning error nor a Lipschitz constant is available
-for a 3-billion-parameter flow-matching policy. What is demonstrated is an empirical reduction in
-collisions.
-
-\paragraph{Privileged geometry.}
-The barrier is constructed from obstacle poses and meshes read directly from the simulator. A
-deployed system would estimate that geometry from perception and inherit the resulting error, so
-every shielded figure reported here is an upper bound for this class of filter. The distilled
-policy uses no geometry at inference, but the dependency remains during \emph{training}.
-
-\paragraph{Approximate robot model.}
-The barrier represents the robot with spheres rather than its exact shape, because the exact
-version would not solve fast enough to run at every control step (Section~\ref{sec:barrier}). How
-accurate that approximation actually was is never measured directly; the account in
-Section~\ref{sec:disc:limits} of where the transfer stops is a reading of which bodies collided,
-not a measurement of constraint fidelity.
-
-\paragraph{Single training seed.}
-Each distilled policy is one training run and seed variance is unquantified.
-
-\paragraph{Single policy and action space.}
-Everything here uses one model, $\pi_{0.5}$, which produces chunks of actions by integrating a
-flow field. Two results depend on that design --- the reinforcement-learning negative and the
-best-of-$N$ measurement --- and may not carry over to policies that emit one action at a time.
-
-\paragraph{Scope of the negative results.}
-Four alternative mechanisms were tested and none substituted for shielded imitation, but each
-negative is scoped rather than general. The reinforcement-learning result concerns the reward
-design and the variant that could be run at this scale, not safe reinforcement learning as a
-class: neither constrained-MDP~\cite{safevla} nor model-based world-model
-approaches~\cite{safedojo} are scalar-reward methods, and both require compute beyond what was
-available here. Language-specified safety was tested at a single phrasing. Best-of-$N$ supports a
-state-dominant account of collision risk \textbf{in this policy and benchmark} rather than a
-general claim about generative policies. And the uncertainty monitor was scored at episode level on
-23 collision episodes, where its inversion sits roughly two standard errors from chance.
-
-\paragraph{Attribution caveats.}
-The per-body attribution is a documented lower bound that can miss delayed or indirect contacts.
+\begin{description}[leftmargin=0pt, labelsep=0.5em, topsep=4pt, itemsep=3pt,
+                    parsep=0pt, font=\normalfont\bfseries]
+  \item[Simulation only.] Every result is from SafeLIBERO. No physical robot was used and no claim
+    of sim-to-real transfer is made.
+  \item[No formal guarantee is inherited.] The distilled policy carries no runtime constraint, so
+    nothing of the shield's formal argument survives its removal. What is demonstrated is an
+    empirical reduction in collisions.
+  \item[Privileged geometry.] The barrier is constructed from obstacle poses and meshes read
+    directly from the simulator, so every shielded figure reported here is an upper bound for this
+    class of filter. The distilled policy uses no geometry at inference, but the dependency remains
+    during training.
+  \item[Approximate robot model.] The barrier represents the robot with spheres rather than its
+    exact shape, because the exact version would not solve fast enough to run at every control step
+    (Section~\ref{sec:barrier}). How accurate that approximation actually was is never measured
+    directly.
+  \item[Single training seed.] Each distilled policy is one training run and seed variance is
+    unquantified.
+  \item[Single policy and action space.] Everything here uses one model, $\pi_{0.5}$, which
+    produces chunks of actions by integrating a flow field.
+  \item[Scope of the negative results.] Each of the four negatives is scoped to the implementation
+    and budget tested rather than to its method class, as stated in
+    Table~\ref{tab:negatives}.
+  \item[Attribution caveats.] The per-body attribution is a documented lower bound that can miss
+    delayed or indirect contacts.
+\end{description}
 
 \section{Recommendations for Future Research}\label{sec:conc:future}
 
