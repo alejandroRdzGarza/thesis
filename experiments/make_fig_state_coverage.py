@@ -41,7 +41,6 @@ PLANNER = "results_distill/planner_A/{sc}/{sc}_ep*trace.npz"
 BASE = "pod_backup/results_shielded/eval_base_nocbf/{sc}/*/rollout_*_trace.npz"
 RADIUS = 0.02          # metres; "covered" means a demo state within 2 cm
 RESAMPLES = 30
-HERO = "safelibero_object_LII_t1"   # largest gap; used for the right-hand panel
 
 
 def ee(path: str) -> np.ndarray | None:
@@ -59,7 +58,7 @@ def main() -> int:
     scenes = sorted({re.search(r"(safelibero_\w+?_L(?:I|II)_t\d)_ep", f).group(1)
                      for f in glob.glob(SHIELDED.format(sc="*"))})
 
-    rows, hero = [], None
+    rows = []
     for sc in scenes:
         S, P, B = load(SHIELDED, sc), load(PLANNER, sc), load(BASE, sc)
         if S is None or P is None or B is None:
@@ -73,18 +72,12 @@ def main() -> int:
                         (cKDTree(Ps).query(B)[0] < RADIUS).mean()])
         cs, cp = np.array(cov).mean(0)
         rows.append((sc, cs, cp))
-        if sc == HERO:
-            hero = (S, P, B)
 
     assert rows, "no scenes had all three sources; check the paths at the top of this file"
     cs = np.array([r[1] for r in rows]); cp = np.array([r[2] for r in rows])
     wins = int((cs > cp).sum())
 
-    fig = plt.figure(figsize=(10.6, 4.5))
-    gs = fig.add_gridspec(1, 2, width_ratios=[1.0, 1.15], wspace=0.28)
-
-    # ---- (a) per-scene coverage, shielded vs planner -----------------------------------------
-    ax = fig.add_subplot(gs[0, 0])
+    fig, ax = plt.subplots(figsize=(5.4, 5.0))
     lim = max(cs.max(), cp.max()) * 100 * 1.12
     ax.plot([0, lim], [0, lim], ls="--", c="grey", lw=1.1, zorder=1)
     ax.scatter(cp * 100, cs * 100, s=58, c="#2E6F9E", edgecolor="black",
@@ -94,37 +87,13 @@ def main() -> int:
             color="#2E6F9E", style="italic", va="top")
     ax.set_xlabel("planner demonstrations: base states covered (%)", fontsize=10)
     ax.set_ylabel("shielded demonstrations: base states covered (%)", fontsize=10)
-    ax.set_title(f"(a) Coverage of the base policy's own states\n"
+    ax.set_title(f"Coverage of the base policy's own states\n"
                  f"one point per scene; shielded wins {wins}/{len(rows)}",
                  fontsize=11, pad=8)
     ax.set_xlim(0, lim); ax.set_ylim(0, lim)
     ax.grid(alpha=0.25, lw=0.6); ax.set_axisbelow(True)
     for s in ("top", "right"):
         ax.spines[s].set_visible(False)
-
-    # ---- (b) the distributions themselves, on the widest-gap scene ---------------------------
-    ax2 = fig.add_subplot(gs[0, 1])
-    S, P, B = hero
-    ax2.scatter(P[:, 0], P[:, 2], s=5, c="#C0504D", alpha=0.30, label="planner demos", zorder=2)
-    ax2.scatter(S[:, 0], S[:, 2], s=5, c="#2E6F9E", alpha=0.55, label="shielded demos", zorder=3)
-    ax2.scatter(B[:, 0], B[:, 2], s=13, facecolor="none", edgecolor="black",
-                linewidth=0.55, label="base policy states", zorder=4)
-    ax2.set_xlabel("end-effector $x$ (m)", fontsize=10)
-    ax2.set_ylabel("end-effector $z$ (m)", fontsize=10)
-    ax2.set_title(f"(b) {HERO.replace('safelibero_', '').replace('_', ' ')}\n"
-                  f"widest gap: {cs[[r[0] for r in rows].index(HERO)]*100:.0f}% vs "
-                  f"{cp[[r[0] for r in rows].index(HERO)]*100:.0f}% covered",
-                  fontsize=11, pad=8)
-    ax2.legend(fontsize=9, loc="best", framealpha=0.92)
-    ax2.grid(alpha=0.25, lw=0.6); ax2.set_axisbelow(True)
-    for s in ("top", "right"):
-        ax2.spines[s].set_visible(False)
-
-    fig.text(0.5, -0.06,
-             f"Coverage = fraction of base-policy states within {RADIUS*100:.0f} cm of a "
-             f"demonstration state. Both sets subsampled to equal size per scene "
-             f"({RESAMPLES} resamples).",
-             ha="center", fontsize=9, style="italic")
 
     OUT.mkdir(exist_ok=True)
     for ext in ("pdf", "png"):
