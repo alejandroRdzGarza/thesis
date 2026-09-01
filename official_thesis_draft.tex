@@ -1445,53 +1445,27 @@ Generative uncertainty as a runtime monitor
 
 \subsection*{Scalar-reward reinforcement learning}
 
-RL was tried first, and its failure motivated the imitation approach.
+RL was tried first, and its failure motivated the imitation approach. The setup was flow-SDE GRPO
+on $\pi_{0.5}$'s flow-matching action head, with a LoRA adapter on the action head receiving
+gradients and the backbone frozen --- the same trainable surface used for distillation in
+Section~\ref{sec:res:internalise}, so the comparison between the two learning signals is not
+confounded by capacity. Rollouts used ten denoising steps at noise 0.7 on one level-II scene, with
+$K = 8$ rollouts per group over six rounds, and a reward combining success, direct collision, CBF
+activation rate and progress.
 
-The setup was flow-SDE GRPO on $\pi_{0.5}$'s flow-matching action head: the deterministic sampling
-ODE is converted to an equivalent SDE so that log-probabilities exist and a policy gradient can be
-taken. A LoRA adapter on the action head received gradients with the backbone frozen, matching the
-trainable surface used for distillation in Section~\ref{sec:res:internalise}, so the comparison
-between the two learning signals is not confounded by capacity. Rollouts used the CPS sampler at
-noise 0.7 with ten denoising steps and clipping 0.2, on one level-II scene, with $K = 8$ rollouts
-per group over six rounds. The reward combined success, direct collision, CBF activation rate and
-progress terms.
-
-\begin{figure}[htbp]
-  \centering
-  \includegraphics[width=\linewidth]{figures/fig_rl_bracket.png}
-  \caption[Scalar-reward RL bracketed from both sides]{%
-    The two informative configurations. \textbf{Left:} admitting real collisions to the reward
-    moves the policy and it collapses to inaction --- success reaches zero even in the shielded
-    condition, which the shield alone cannot cause. \textbf{Right:} a lower learning rate with an
-    annealed shield fixes the collapse and learns nothing.}
-  \label{fig:rl_bracket}
-\end{figure}
-
-Two configurations bracket the failure. With the shield active on every rollout, collisions never
-enter the reward directly --- the shield prevents them --- so the only safety signal is the
-activation penalty, and raising the learning rate to $5 \times 10^{-5}$ with the activation weight
-at 1.5 left the policy flat. Running half of each group's rollouts unshielded admits real
-collisions and widens the within-group spread to roughly $\Delta = 1.0$; the safety metric improved
-immediately and the task collapsed with it, as the adapter diverged under a far higher-variance
-reward and the collision penalty suppressed forward motion, which in these scenes almost always
-collides early in training.
-
-These are not two settings with a working point between them. The only configuration that moved the
-policy's behaviour collapsed it, and every configuration stable enough to preserve the task learned
-no avoidance, because the learning signal and the destabilising signal are the same knob. A scalar
-episode reward gives no per-step spatial credit, so the policy cannot separate detouring around the
-obstacle from stopping short of the goal when the obstacle lies on the path to it; and in a
-flow-matching policy exploration \emph{is} sampling noise, which is also what degrades the actions
-being evaluated. This is what the shield supplies and the reward cannot: the barrier computes the
-correct action at every step it intervenes, in the space the policy emits, so credit assignment is
-given rather than inferred.
+Two configurations bracket the failure. With the shield active on every rollout the only safety
+signal is the activation penalty, and the policy stayed flat even at a raised learning rate.
+Running half of each group's rollouts unshielded admits real collisions and widens the within-group
+spread to roughly $\Delta = 1.0$; safety improved immediately and the task collapsed with it,
+success reaching zero. These are not two settings with a working point between them: every
+configuration that moved the policy's behaviour collapsed it, and every configuration stable enough
+to preserve the task learned no avoidance. Section~\ref{sec:disc:transfer} takes up why.
 
 \subsection*{Safety expressed in language}
 
-The experiment has the same checkpoint, seed, held-out initial states and
-evaluation code for both conditions, differing only in a safety clause appended to the instruction. Twelve
-level-II scenes at five initial states each give $n = 60$ per condition; level II was chosen
-because of difficulty calibration.
+Both conditions share checkpoint, seed, held-out initial states and evaluation code, differing only
+in a safety clause appended to the instruction. Twelve level-II scenes at five initial states each
+give $n = 60$ per condition.
 
 \begin{quote}\small
 \textbf{plain:} \texttt{pick up the black bowl between the plate and the ramekin and place it on
@@ -1500,32 +1474,11 @@ the plate}\\[3pt]
 over any other objects}
 \end{quote}
 
-The phrasing is generic: it names no object, gives no spatial reference, and
-states the constraint as a manner adverbial rather than a prohibition.
-
-\begin{table}[htbp]
-\centering
-\caption{Effect of appending a safety clause to the instruction. $n = 60$ per condition, twelve
-  level-II scenes, Wilson 95\% intervals.}
-\label{tab:language}
-\begin{tabular}{lccc}
-\toprule
-\textbf{Condition} & \textbf{TSR (95\% CI)} & \textbf{Collision (95\% CI)} & \textbf{ETS} \\
-\midrule
-Plain instruction       & 66.7\% [54.1, 77.3] & 70.0\% [57.5, 80.1] & 132.4 \\
-Safety clause appended  & 55.0\% [42.5, 66.9] & 68.3\% [55.8, 78.7] & 162.4 \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-The policy responds to the safety clause by marginally  decreasing collisions, succeeding less often, and taking longer to complete. 
-
-The natural reading is that safety language elicits a general behavioural prior --- hesitancy,
-reduced speed --- rather than a grounded avoidance behaviour. The model has learned that
-safety-flavoured instructions correspond to cautious-looking motion, and that association is not
-connected to the geometry of the scene.
-
-ROAD-VLA got similar negative results from their text-based grounding experiments~\cite{wang2026roadvla}. They attribute the failure to a modality gap preventing discrete text from supplying the grounding continuous control requires.
+The phrasing is generic: it names no object, gives no spatial reference, and states the constraint
+as a manner adverbial rather than a prohibition. Collisions were unchanged within interval overlap
+(70.0\% against 68.3\%), while success fell 11.7 points and episodes ran 23\% longer. The policy
+responds to safety language with hesitancy rather than avoidance --- a behavioural prior not
+connected to the geometry of the scene (Section~\ref{sec:disc:limits}).
 
 \subsection*{Best-of-$N$ selection}
 
@@ -1538,7 +1491,7 @@ were verified to machine precision before any result was recorded.
 
 \begin{figure}[htbp]
   \centering
-  \includegraphics[width=0.82\linewidth]{figures/fig_bon_correlation.png}
+  \includegraphics[width=0.78\linewidth]{figures/fig_bon_correlation.png}
   \caption[Within-state safety correlation in a VLA policy]{%
     Why rejection sampling cannot help here. In every configuration the fraction of individually
     safe candidates coincides with the fraction of queries in which \emph{all} $K$ are safe, so a
@@ -1547,31 +1500,23 @@ were verified to machine precision before any result was recorded.
   \label{fig:bon}
 \end{figure}
 
-As a method this is negative: on roughly 60\% of queries no candidate was safe, and buying more
-candidates barely moved it --- doubling $K$ from four to eight recovered 8.8 percentage points for
-twice the compute, and raising the noise recovered 3.7.
+As a method this is negative: on roughly 60\% of queries no candidate was safe, and doubling $K$
+from four to eight recovered 8.8 percentage points for twice the compute.
 
-The measurement underneath it is the more interesting result. The mean safe fraction and the
-all-$K$-safe fraction coincide in all three configurations. Were the candidates independent draws,
-the all-$K$-safe rate would be $p^{K}$: 1.1\% at $K = 4$ and 0.08\% at $K = 8$, against observed
-values of 32\% and 41\%. The policy's samples from a given state are therefore near-perfectly
-correlated in their safety outcome.
+The measurement underneath it is the result. The mean safe fraction and the all-$K$-safe fraction
+coincide in all three configurations. Were the candidates independent draws the all-$K$-safe rate
+would be $p^{K}$: 1.1\% at $K = 4$ and 0.08\% at $K = 8$, against observed values of 32\% and
+41\%. The policy's samples from a given state are therefore near-perfectly correlated in their
+safety outcome, and safety in this policy is \textbf{state-determined rather than
+sample-determined}. Once a state is reached the outcome is largely fixed, and no amount of choosing
+among actions recovers it --- which is also why episode-level filtering worked
+(Section~\ref{sec:res:mechanism}) where action-level selection cannot: episode-level selection
+chooses between trajectories that reached \emph{different} states, the axis along which variation
+actually exists.
 
-Safety in this policy is consequently \textbf{state-determined rather than sample-determined}, at
-least on this benchmark. Once a state is reached the outcome is largely fixed, and no amount of
-choosing among actions recovers it --- the leverage lies in not reaching the state. This also
-explains a result that would otherwise look inconsistent: episode-level filtering worked
-(Section~\ref{sec:res:mechanism}) while action-level selection cannot, because episode-level
-selection chooses between trajectories that reached \emph{different states}, which is the axis
-along which variation actually exists.
+\subsection*{Generative uncertainty as a collision predictor}
 
-The correlation measurement is offered here as the contribution rather than the selection method.
-It is, as far as this work is aware, the first measurement of candidate-level safety correlation in
-a VLA policy, and it is the sharpest available statement of the reachability
-theme running through Sections~\ref{sec:res:scope}, \ref{sec:res:mechanism} and the discussion that
-follows.
-
-\subsection*{Generative uncertainty as a collision predictor.} Uncertainty was also tested as a barrier-free monitor: $\pi_{0.5}$ stores the full denoising chain
+Uncertainty was also tested as a barrier-free monitor: $\pi_{0.5}$ stores the full denoising chain
 for every action, and if the policy were less certain where safe and unsafe behaviours are both
 plausible, that chain would carry a risk signal requiring no obstacle geometry at all. It does
 not --- the association is at chance for the base policy, and the distilled policy's consistent
