@@ -86,13 +86,9 @@ def main() -> int:
     axes[0].text(0.5, 0.90, "the lines cross", ha="center", fontsize=10,
                  style="italic", color="#444444", transform=axes[0].transAxes)
 
-    fig.suptitle("Attaching the shield helps the base policy and harms the distilled one",
-                 fontsize=12.5, y=1.02)
-    fig.text(0.5, -0.06,
-             "The reversal is confined to the success channel. Collisions fall in both cases: "
-             "safety and capability come apart,\nand only one of them reverses. "
-             "$n = 120$ per condition, Wilson 95% intervals.",
-             ha="center", fontsize=9, style="italic")
+    # the suptitle and the italic footer both said what the LaTeX caption says; a figure
+    # should not caption itself twice. The sample size and interval type they carried move
+    # into the caption, which is where a reader looks for them.
     fig.tight_layout()
     for ext in ("pdf", "png"):
         fig.savefig(OUT / f"fig_stacking.{ext}", bbox_inches="tight", dpi=200)
