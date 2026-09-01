@@ -1759,53 +1759,29 @@ closing with a brief overall recap.
 
 This study aimed to determine whether the collision avoidance supplied by an inference-time control
 barrier function shield can be amortised into the weights of a vision-language-action policy, such
-that the shield is no longer required at deployment. Under the specific conditions tested in this
-work, it can.
+that the shield is no longer required at deployment. Under the conditions tested, it can. In
+relation to RQ1, the shield made $\pi_{0.5}$ substantially safer on this benchmark and reproduced
+the published baseline closely enough to establish that the evaluation measures what it claims to.
+In relation to RQ2, distilling the shielded policy's own corrected rollouts reduced collisions from
+82.5\% to 19.2\% \textbf{with no shield at inference}, while raising task success from 58.3\% to
+82.5\% on held-out initial states --- recovering most of the shielded baseline's collision
+avoidance in a single round, at a cost of roughly 14\% in execution time.
 
-In relation to RQ1, the shield performs as the published baseline reports, and the unmodified
-policy's collision and success figures reproduce those of the runtime-shielding
-baseline~\cite{vlsa2026} to within a point --- which establishes that the evaluation measures what
-it claims to before anything is distilled. In relation to RQ2, self-distilling $\pi_{0.5}$ reduced collisions from 82.5\% to 19.2\% \textbf{without running the
-shield at inference}, while increasing task success from 58.3\% to 82.5\% on held-out initial
-states. The resulting policy achieved a collision-avoidance rate of 80.8\%, approaching the
-shielded policy's 86.7\%, and one distillation round was sufficient. The cost fell on execution
-time rather than capability: the distilled policy takes a more conservative route and is roughly
-14\% slower.
+In relation to RQ3, the transfer is bounded, and the bound is the more useful half of the result.
+The improvement is produced by the shield's corrections rather than by training on successful
+episodes, but it does not survive a change of demonstration source: a geometry-privileged motion
+planner, supplying corrections from the same shield, produced no measurable gain under a comparison
+in which the demonstration source was the only variable. What separates the teacher that worked
+from the one that did not is where its demonstrations sit. Transferable supervision must correct
+the learner at states the learner itself reaches.
 
-Distillation therefore creates a choice between two operating points, and both improve on what was
-available before. Run shield-free, the policy is safer and more capable than the model it came
-from --- but the online constraint satisfaction that establishes forward invariance is
-gone~\cite{ames2017cbf}, and what remains is an empirical reduction rather than a guarantee.
-Reattached, the shield restores that constraint and yields the safest configuration measured:
-8.3\% collisions at 70.8\% success, against 13.3\% and 71.7\% for the same shield on the
-undistilled policy. Where a safety case demands a runtime constraint, distilling first therefore
-costs nothing in success and lowers what the constraint is left to catch; and against the original
-unshielded policy the same configuration is both more successful and an order of magnitude safer.
-That the residual is 8.3\% rather than zero reflects the approximations of
-Section~\ref{sec:barrier}, not the absence of the argument.
-
-In relation to RQ3, the transfer is bounded, and the bound is the more useful half of the result. A
-geometry-privileged
-motion planner supplying dense per-step corrections produced no measurable improvement under a
-matched comparison; filtering only for successful episodes produced none either. What separates the
-teacher that worked from the one that did not is where its demonstrations sit. Transferable
-supervision must correct the learner at states the learner itself reaches. Two features of that
-result are not anticipated by the literature it sits in. Safety and task success improved
-\emph{together}, where the closest prior method reports a trade-off between them. And no
-disturbance model was required: the shield corrects at states the policy reaches unprompted, where
-an adversarial construction must manufacture them. A third is suggestive rather than established
---- the distilled student avoided arm-link collisions more effectively than the shield that
-supervised it, 8 against 15, on intervals that overlap (Section~\ref{sec:res:scope}) --- but if it
-holds, trajectory imitation alone does not describe what was learned.
-
-In relation to RQ4, the transfer does not reach the whole robot, and four alternative mechanisms did
-not substitute for it. Collisions were eliminated where the barrier's model of the robot is precise
-and the constrained velocity is the one commanded, and persisted at the arm links, which account for
-almost all of what remains under the shield. Scalar-reward reinforcement learning, a
-language-expressed constraint, best-of-$N$ selection and a generative uncertainty monitor were each
-tested and none reproduced the effect, though every one of those negatives is scoped to the
-implementation and budget tested rather than to its method class
-(Section~\ref{sec:conc:limitations}).
+In relation to RQ4, the transfer does not reach the whole robot. Collisions were eliminated where
+the barrier's model of the robot is precise and the constrained velocity is the one commanded, and
+persisted at the arm links, which account for almost all of what remains under the shield. Four
+alternative mechanisms --- scalar-reward reinforcement learning, a language-expressed constraint,
+best-of-$N$ selection and a generative uncertainty monitor --- were each tested and none
+substituted for shielded imitation, though every one of those negatives is scoped to the
+implementation tested rather than to its method class.
 
 \section{Limitations}\label{sec:conc:limitations}
 
