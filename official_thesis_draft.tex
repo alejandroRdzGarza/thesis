@@ -213,14 +213,13 @@ policy, such that the shield is no longer required at deployment.
 \paragraph{Research objectives.}
 The following objectives guide the study:
 
-\begin{enumerate}
-  \item To implement a control barrier function shield over $\pi_{0.5}$ and quantify its effect on
-        collision and task success against the published baseline for the same benchmark.
+\begin{enumerate}[leftmargin=*, topsep=3pt, itemsep=2pt, parsep=0pt]
+  \item To implement a CBF shield over $\pi_{0.5}$ and quantify its effect on collision and task
+        success against the published baseline for the SafeLIBERO benchmark.
   \item To distil the shielded policy's own corrected rollouts into its action head, and to measure
         the resulting policy's safety and capability with the shield removed at inference.
-  \item To isolate the mechanism responsible for any transfer, through controlled comparisons that
-        vary the source of the demonstrations and the presence of the shield during their
-        collection, while holding training and evaluation fixed.
+  \item To isolate the mechanism responsible for any transfer, through controlled ablations that
+        vary the source of the demonstrations and the presence of the shield during collection.
   \item To characterise the limits of the transfer: which collisions persist and why, and whether
         alternative mechanisms achieve the same end.
 \end{enumerate}
@@ -229,7 +228,7 @@ The following objectives guide the study:
 These objectives translate into four questions, each addressed in a corresponding section of
 Chapter~\ref{ch:results}:
 
-\begin{enumerate}[label=\textbf{RQ\arabic*.}, leftmargin=3.2em]
+\begin{enumerate}[label=\textbf{RQ\arabic*.}, leftmargin=3.2em, topsep=3pt, itemsep=2pt, parsep=0pt]
   \item Does a control barrier function shield make a pretrained vision-language-action policy safe
         on this benchmark, and how do the resulting figures compare with published results?
         (Section~\ref{sec:shield_efficacy})
