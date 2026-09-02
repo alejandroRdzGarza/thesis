@@ -353,6 +353,13 @@ table.neg td:first-child { white-space: nowrap; }
   background:
     repeating-linear-gradient(45deg, #f7f5f2 0 10px, #fbfaf8 10px 20px);
 }
+.hero-tag {
+  padding: 9px 13px 8px;
+  border-bottom: 1px solid var(--rule-soft);
+  font-size: 11px; font-weight: 600; letter-spacing: .07em;
+  text-transform: uppercase; color: var(--blue);
+}
+
 .vcap {
   display: flex; align-items: center; justify-content: space-between;
   gap: 10px;
@@ -366,6 +373,18 @@ table.neg td:first-child { white-space: nowrap; }
   cursor: pointer; padding: 2px 0;
 }
 .vcap .replay:hover { text-decoration: underline; }
+
+/* ── show-all expander ──────────────────────────────────────────────────────
+   The grid opens on one clip per suite x obstacle level; the button carries the
+   full count so the breadth of the set is visible even while collapsed. */
+.more-wrap { display: flex; justify-content: center; margin: 34px 0 4px; }
+.more-btn {
+  font-family: inherit; font-size: 14.5px; font-weight: 500;
+  padding: 11px 26px; border-radius: 999px;
+  border: 1px solid var(--rule); background: #fff; color: var(--ink);
+  cursor: pointer; transition: all .12s ease;
+}
+.more-btn:hover { border-color: var(--blue); color: var(--blue-deep); transform: translateY(-1px); }
 
 /* ── cite ────────────────────────────────────────────────────────────── */
 .cite-band { background: var(--paper-2); }
@@ -411,3 +430,46 @@ footer p { margin: 0 0 10px; }
   html { scroll-behavior: auto; }
   * { transition: none !important; }
 }
+
+/* ── system figure ───────────────────────────────────────────────────────────
+   The SVG carries every fill and stroke as a presentation attribute, so it
+   renders correctly with no stylesheet at all. Only layout lives here. */
+.sysfig-wrap { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.sysfig {
+  display: block; width: 100%; height: auto;
+  border: 1px solid var(--rule);
+  border-radius: 12px;
+  background: #fff;
+  padding: 4px;
+}
+/* stack the panels before the labels get too small to read */
+@media (max-width: 860px) {
+  .sysfig-wrap { grid-template-columns: 1fr; }
+}
+
+/* ── configuration blocks ────────────────────────────────────────────────────
+   The headline numbers split by deployment configuration, so a reader can see
+   what each choice actually costs rather than only the best number from each
+   column. */
+.config {
+  border: 1px solid var(--rule);
+  border-radius: 12px;
+  background: #fff;
+  overflow: hidden;
+  margin: 16px 0;
+}
+.config.best { border-color: var(--blue); box-shadow: 0 0 0 1px var(--blue) inset; }
+.config-head {
+  display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+  padding: 13px 18px;
+  background: var(--paper-2);
+  border-bottom: 1px solid var(--rule-soft);
+}
+.config.best .config-head { background: var(--blue-wash); }
+.config-name { font-family: var(--serif); font-size: 16.5px; font-weight: 600; letter-spacing: -.01em; }
+.config-note { font-size: 13px; color: var(--ink-3); }
+.config .stats { padding: 16px; gap: 12px; }
+.config .stat { border: 1px solid var(--rule-soft); border-top: 3px solid var(--blue); }
+.stat.cost { border-top-color: var(--red); }
+.stat.cost .stat-value { color: var(--ink); }
+.stat.cost .stat-vs b { color: var(--red); }

@@ -21,12 +21,13 @@ distilled policy has finished.
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import tempfile
 from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 
 from experiments.make_fig_filmstrip import DIST_ARM, BASE_ARM, candidates, load_manifest
 
@@ -35,6 +36,51 @@ FPS = 8
 SCALE = 2          # 224 -> 448 per panel
 HEADER = 54
 GREEN, RED, INK = (46, 125, 50), (192, 80, 77), (30, 30, 30)
+
+# The header is read at roughly half size on a project page, where the clip sits in a
+# two-column grid, so PIL's default bitmap font is too light to survive the downscale.
+# Prefer a real bold face and fall back to the default only if none is installed.
+_FONT_CANDIDATES = [
+    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+]
+
+
+def _font(size: int):
+    for path in _FONT_CANDIDATES:
+        if os.path.exists(path):
+            return ImageFont.truetype(path, size)
+    return ImageFont.load_default()
+
+
+FONT_NAME, FONT_STATUS, FONT_FOOT = _font(19), _font(18), _font(12)
+
+
+def _mark(d, x: float, y: float, size: int, ok: bool, colour) -> None:
+    """A tick or a cross drawn as strokes rather than a glyph.
+
+    U+2713/U+2717 are absent from several of the faces above, and a missing glyph renders
+    as a blank or a tofu box that would be invisible in a burned-in header. Strokes always
+    draw, and the weight can be matched to the bold text beside them.
+    """
+    lw = max(2, size // 5)
+    if ok:
+        d.line([(x, y + size * 0.52), (x + size * 0.38, y + size * 0.86),
+                (x + size, y + size * 0.06)], fill=colour, width=lw, joint="curve")
+    else:
+        d.line([(x, y), (x + size, y + size)], fill=colour, width=lw)
+        d.line([(x, y + size), (x + size, y)], fill=colour, width=lw)
+
+
+def _status(d, x: float, y: float, ok: bool, label: str) -> float:
+    """Mark plus label, coloured by its own outcome. Returns the x to continue from."""
+    colour = GREEN if ok else RED
+    size = 13
+    _mark(d, x, y + 3, size, ok, colour)
+    tx = x + size + 7
+    d.text((tx, y), label, fill=colour, font=FONT_STATUS)
+    return tx + d.textlength(label, font=FONT_STATUS)
 
 
 def load_frames(path: str) -> np.ndarray:
@@ -57,13 +103,12 @@ def compose(base: np.ndarray, dist: np.ndarray, meta_b: dict, meta_d: dict,
         d = ImageDraw.Draw(canvas)
         for (meta, name, x) in ((meta_b, "Base pi0.5", 0), (meta_d, "Self-distilled", w + 6)):
             ok = not meta["collision"]
-            col = GREEN if ok else RED
-            d.rectangle([x, HEADER - 4, x + w, HEADER], fill=col)
-            d.text((x + 8, 6), name, fill=INK)
-            d.text((x + 8, 24),
-                   f"{'collision-free' if ok else 'COLLISION'}   "
-                   f"{'success' if meta['success'] else 'no success'}", fill=col)
-        d.text((8, w + HEADER - 16), f"{scene}  init {group}   step {i*5}", fill=INK)
+            d.rectangle([x, HEADER - 4, x + w, HEADER], fill=GREEN if ok else RED)
+            d.text((x + 8, 2), name, fill=INK, font=FONT_NAME)
+            cx = _status(d, x + 8, 27, ok, "collision-free" if ok else "COLLISION")
+            _status(d, cx + 20, 27, meta["success"], "success" if meta["success"] else "no success")
+        d.text((8, w + HEADER - 18), f"{scene}  init {group}   step {i*5}",
+               fill=INK, font=FONT_FOOT)
         out.append(canvas)
     return out
 

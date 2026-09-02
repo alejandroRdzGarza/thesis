@@ -50,8 +50,8 @@ results_*/
 
 # ── Vendored third-party repos and archives ──────────────────────────────────
 # Downloaded for reference, not part of this project.
-# openvla-oft (moojink/openvla-oft, MIT) and vlsa-aegis are dependencies, not our
-# code — see THIRD_PARTY.md for where to clone each and what depends on it.
+# openvla-oft (moojink/openvla-oft, MIT) and vlsa-aegis are dependencies, not our code;
+# see the "Dependencies not included here" section of README.md.
 openvla-oft-main/
 vlsa-aegis/
 # ManiSkill-main.zip (233 MB) and ucl_grpo_results.tar.gz (897 MB) each exceed GitHub's

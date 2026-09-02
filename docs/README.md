@@ -9,7 +9,8 @@ docs/
   style.css       all styling
   script.js       demo grid: filtering, lazy loading, autoplay on scroll
   data.js         manifest of the 68 clips (suite, level, task, init state, instruction)
-  assets/         thesis PDF, UCL crest, and the six figures lifted from figures/
+  assets/         thesis PDF, UCL crest, the results figure, and the stills the
+                  system diagram embeds (dg_*.png, cut from a demo clip)
   videos/         68 side-by-side comparison clips, ~12 MB total
   .nojekyll       stops GitHub Pages running the files through Jekyll
 ```
@@ -41,6 +42,6 @@ Figures come from `figures/`; re-copy them after rerunning any `experiments/make
 
 ## Numbers
 
-Every figure on the page is quoted from `official_thesis_draft.tex` — the internalisation
-table (§4.4), the matched control (§4.5), the demonstration-source comparison (§4.6), the culprit-body breakdown (§4.7) and the
-rejected-mechanism table (§4.8). Change them there first.
+Every number on the page is quoted from the submitted dissertation, `assets/thesis.pdf` —
+the internalisation table (§4.4), the demonstration-source comparison (§4.6) and the
+per-body attribution (§4.7). Change them there first.

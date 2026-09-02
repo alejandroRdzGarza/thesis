@@ -10,7 +10,7 @@
 const SUITE_LABEL = { spatial: 'SafeLIBERO-Spatial', object: 'SafeLIBERO-Object', goal: 'SafeLIBERO-Goal' };
 const LEVEL_LABEL = { LI: 'Level I — obstacle beside the target', LII: 'Level II — obstacle blocking the path' };
 
-const state = { suite: 'all', level: 'all', autoplay: true };
+const state = { suite: 'all', level: 'all', autoplay: true, expanded: false };
 
 const listEl  = document.getElementById('demo-list');
 const countEl = document.getElementById('demo-count');
@@ -30,8 +30,47 @@ const io = new IntersectionObserver((entries) => {
 
 /* ── build ─────────────────────────────────────────────────────────────── */
 function matches(d) {
-  return (state.suite === 'all' || d.suite === state.suite)
+  return (state.expanded || d.hero)
+      && (state.suite === 'all' || d.suite === state.suite)
       && (state.level === 'all' || d.level === state.level);
+}
+
+function appendMore() {
+  const more = document.createElement('div');
+  more.className = 'more-wrap';
+  more.innerHTML = `<button class="more-btn" type="button">${
+    state.expanded ? 'Show fewer' : `Show all ${DEMOS.length} clips`}</button>`;
+  more.querySelector('.more-btn').addEventListener('click', () => {
+    state.expanded = !state.expanded;
+    render();
+    if (!state.expanded) document.getElementById('demos').scrollIntoView({ block: 'start' });
+  });
+  listEl.appendChild(more);
+}
+
+
+function makeCard(d, withTag = false) {
+  const card = document.createElement('div');
+  card.className = 'vcard';
+  card.innerHTML = `
+    ${withTag ? `<div class="hero-tag">${SUITE_LABEL[d.suite]} &middot; ${
+      d.level === 'LI' ? 'Level I' : 'Level II'}</div>` : ''}
+    <video data-src="videos/${d.file}" muted loop playsinline preload="none"
+           aria-label="Base pi-0.5 on the left, self-distilled on the right: ${d.instruction}, held-out initial state ${d.init}"></video>
+    <div class="vcap">
+      <span>${withTag ? `&ldquo;${d.instruction}&rdquo;` : `held-out initial state ${d.init}`}</span>
+      <button class="replay" type="button">restart</button>
+    </div>`;
+
+  const v = card.querySelector('video');
+  card.querySelector('.replay').addEventListener('click', () => {
+    if (!v.src) v.src = v.dataset.src;
+    v.currentTime = 0;
+    v.play().catch(() => {});
+  });
+  v.addEventListener('click', () => (v.paused ? v.play().catch(() => {}) : v.pause()));
+  io.observe(v);
+  return card;
 }
 
 function render() {
@@ -39,12 +78,26 @@ function render() {
   listEl.innerHTML = '';
 
   const shown = DEMOS.filter(matches);
-  countEl.textContent = shown.length === DEMOS.length
-    ? `${DEMOS.length} clips`
-    : `${shown.length} of ${DEMOS.length} clips`;
+  countEl.textContent = !state.expanded
+    ? `${shown.length} of ${DEMOS.length} clips \u2014 one per suite and obstacle level`
+    : shown.length === DEMOS.length
+      ? `${DEMOS.length} clips`
+      : `${shown.length} of ${DEMOS.length} clips`;
 
   if (!shown.length) {
     listEl.innerHTML = '<p class="fineprint">No clips match that combination.</p>';
+    return;
+  }
+
+  if (!state.expanded) {
+    const grid = document.createElement('div');
+    grid.className = 'vgrid';
+    const order = ['spatial', 'object', 'goal'];
+    shown.sort((a, b) => order.indexOf(a.suite) - order.indexOf(b.suite)
+                      || a.level.length - b.level.length);
+    for (const d of shown) grid.appendChild(makeCard(d, true));
+    listEl.appendChild(grid);
+    appendMore();
     return;
   }
 
@@ -80,29 +133,12 @@ function render() {
 
     const grid = block.querySelector('.vgrid');
     for (const d of items) {
-      const card = document.createElement('div');
-      card.className = 'vcard';
-      card.innerHTML = `
-        <video data-src="videos/${d.file}" muted loop playsinline preload="none"
-               aria-label="Base pi-0.5 on the left, self-distilled on the right: ${d.instruction}, held-out initial state ${d.init}"></video>
-        <div class="vcap">
-          <span>held-out initial state ${d.init}</span>
-          <button class="replay" type="button">restart</button>
-        </div>`;
-
-      const v = card.querySelector('video');
-      card.querySelector('.replay').addEventListener('click', () => {
-        if (!v.src) v.src = v.dataset.src;
-        v.currentTime = 0;
-        v.play().catch(() => {});
-      });
-      v.addEventListener('click', () => (v.paused ? v.play().catch(() => {}) : v.pause()));
-
-      grid.appendChild(card);
-      io.observe(v);
+      grid.appendChild(makeCard(d));
     }
     listEl.appendChild(block);
   }
+
+  appendMore();
 }
 
 /* ── filter chips ──────────────────────────────────────────────────────── */
@@ -110,6 +146,7 @@ for (const chip of document.querySelectorAll('.chip[data-filter]')) {
   chip.addEventListener('click', () => {
     const { filter, value } = chip.dataset;
     state[filter] = value;
+    if (value !== 'all') state.expanded = true;   // a filter is a request for more, not less
     for (const sib of document.querySelectorAll(`.chip[data-filter="${filter}"]`)) {
       sib.classList.toggle('active', sib === chip);
     }
