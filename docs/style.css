@@ -77,8 +77,9 @@ a:hover { border-bottom-color: var(--blue); }
 .crest { height: 52px; width: auto; margin-bottom: 26px; opacity: .92; }
 .hero h1 {
   font-family: var(--serif);
-  font-size: clamp(30px, 5.2vw, 50px);
+  font-size: clamp(26px, 5.2vw, 50px);
   line-height: 1.14;
+  text-wrap: balance;
   font-weight: 600;
   letter-spacing: -.022em;
   margin: 0 0 22px;
@@ -418,6 +419,9 @@ footer p { margin: 0 0 10px; }
 
 /* ── responsive ──────────────────────────────────────────────────────── */
 @media (max-width: 720px) {
+  /* drop the authored line break: the fallback serif is wider than Source Serif 4
+     and overflows a phone if the title cannot rewrap */
+  .wide-only { display: none; }
   body { font-size: 16px; }
   .navlinks { display: none; }
   .band { padding: 46px 0; }

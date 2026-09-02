@@ -10,7 +10,13 @@
 <meta property="og:type" content="website">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<!-- Loaded non-blocking. As a plain stylesheet this gates first paint on a third-party
+     host, so anywhere Google Fonts is slow or blocked the page hangs on a blank screen
+     instead of rendering. The fallback stacks in style.css carry the design until (or
+     unless) the webfonts arrive. -->
+<link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&family=Inter:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&family=Inter:wght@400;500;600&display=swap" media="print" onload="this.media='all';this.onload=null">
+<noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&family=Inter:wght@400;500;600&display=swap"></noscript>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -26,7 +32,7 @@
 
 <header id="top" class="hero">
   <img class="crest" src="assets/ucl_logo.png" alt="University College London">
-  <h1>Distilling Runtime Safety into<br>VLA Robot Policies</h1>
+  <h1>Distilling Runtime Safety into <br class="wide-only">VLA Robot Policies</h1>
   <p class="authors"><strong>Alejandro Rodriguez Garza</strong></p>
   <p class="affil">MSc Robotics and AI &middot; University College London</p>
   <div class="buttons">
