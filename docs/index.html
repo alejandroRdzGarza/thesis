@@ -1,0 +1,680 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Distilling Runtime Safety into VLA Robot Policies</title>
+<meta name="description" content="A control-barrier-function shield, distilled out of a vision-language-action policy's own corrected rollouts, and then removed. MSc thesis, UCL.">
+<meta property="og:title" content="Distilling Runtime Safety into VLA Robot Policies">
+<meta property="og:description" content="π0.5 collides in 82.5% of SafeLIBERO episodes. Distilled on its own shielded rollouts it collides in 19.2% — with no shield running at inference.">
+<meta property="og:type" content="website">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <a class="brand" href="#top">Distilling Runtime Safety</a>
+  <div class="navlinks">
+    <a href="#method">Method</a>
+    <a href="#results">Results</a>
+    <a href="#boundary">Boundary</a>
+    <a href="#negatives">Negatives</a>
+    <a href="#demos">Demos</a>
+  </div>
+</nav>
+
+<header id="top" class="hero">
+  <img class="crest" src="assets/ucl_logo.png" alt="University College London">
+  <h1>Distilling Runtime Safety into<br>VLA Robot Policies</h1>
+  <p class="authors"><strong>Alex Rodriguez</strong></p>
+  <p class="affil">MSc Robotics and Computation &middot; University College London</p>
+  <div class="buttons">
+    <a class="btn" href="assets/thesis.pdf">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 2h9l5 5v15H6z"/><path d="M15 2v5h5"/></svg>
+      Thesis
+    </a>
+    <a class="btn" href="https://github.com/alejandroRdzGarza/thesis">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.9a3.4 3.4 0 0 0-.9-2.6c3-.3 6.2-1.5 6.2-6.7A5.2 5.2 0 0 0 19.9 5a4.8 4.8 0 0 0-.1-3.6s-1.1-.3-3.7 1.4a12.7 12.7 0 0 0-6.6 0C6.9 1.1 5.8 1.4 5.8 1.4A4.8 4.8 0 0 0 5.7 5a5.2 5.2 0 0 0-1.4 3.6c0 5.2 3.2 6.4 6.2 6.7a3.4 3.4 0 0 0-.9 2.6V22"/></svg>
+      Code
+    </a>
+  </div>
+</header>
+
+<main>
+
+<!-- ═══════════════════════════════ OVERVIEW ═══════════════════════════════ -->
+<section class="band">
+  <div class="wrap">
+    <h2>The short version</h2>
+    <p class="lede">
+      Vision-language-action models are competent manipulators and unsafe ones. On
+      <a href="#benchmark">SafeLIBERO</a>, the 3B-parameter policy <span class="math">&pi;<sub>0.5</sub></span>
+      knocks a non-target obstacle out of place in <strong>82.5%</strong> of episodes. The standard
+      remedy is a control-barrier-function shield that projects every proposed action onto a safe
+      set. It works &mdash; and it never leaves: it costs a quadratic program at every control step,
+      it needs obstacle geometry at deployment, and it is one more component that can fail.
+    </p>
+    <p>
+      This thesis asks whether that corrective behaviour can be <em>amortised into the weights</em>
+      instead. Roll the policy out with the shield attached, keep the episodes where the shield
+      actually did something, behaviour-clone the policy on the <em>corrected</em> actions, then
+      take the shield away.
+    </p>
+    <p class="callout">
+      One round of that leaves the policy colliding in <strong>19.2%</strong> of held-out episodes
+      with <strong>nothing running at inference</strong>, while task success <em>rises</em> from
+      58.3% to 82.5%. The transfer has a boundary, and mapping that boundary is the contribution:
+      a geometry-privileged motion planner, supplying corrections of equal density under the same
+      shield, transferred nothing at all.
+    </p>
+
+    <figure class="teaser">
+      <img src="assets/fig_filmstrip.png" alt="Two filmstrips of the same scene from the same held-out initial state. Top row, base pi 0.5 in red: the arm drags the blue moka pot across the table and neither avoids the obstacle nor completes the task. Bottom row, self-distilled in green: the arm routes around the pot and completes the placement, marked collision-free and task success.">
+      <figcaption>
+        The same scene, the same held-out initial state. <b>Top:</b> base
+        <span class="math">&pi;<sub>0.5</sub></span>, which shoves the obstacle across the table and
+        fails the task anyway. <b>Bottom:</b> the same policy after one round of self-distillation,
+        with no shield running.
+      </figcaption>
+    </figure>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════ STATS ═══════════════════════════════ -->
+<section class="band stats-band">
+  <div class="wrap">
+    <h2>Headline numbers</h2>
+    <p class="sub">Self-distilled <span class="math">&pi;<sub>0.5</sub></span> after one round, against the
+      undistilled base policy. Both evaluated <strong>with no shield at inference</strong>,
+      on <em>n</em>&nbsp;=&nbsp;120 held-out initial states pooled over 24 scenes.</p>
+    <div class="stats">
+      <div class="stat good">
+        <div class="stat-label">Collision rate&nbsp;<span class="arrow">&darr;</span></div>
+        <div class="stat-value">19.2%</div>
+        <div class="stat-ci">95% CI [13.1, 27.1]</div>
+        <div class="stat-vs">vs. base <b>82.5%</b></div>
+      </div>
+      <div class="stat good">
+        <div class="stat-label">Task success rate&nbsp;<span class="arrow">&uarr;</span></div>
+        <div class="stat-value">82.5%</div>
+        <div class="stat-ci">95% CI [74.7, 88.3]</div>
+        <div class="stat-vs">vs. base <b>58.3%</b></div>
+      </div>
+      <div class="stat good">
+        <div class="stat-label">Shield activation&nbsp;<span class="arrow">&darr;</span></div>
+        <div class="stat-value">18%</div>
+        <div class="stat-ci">of control steps, shield reattached</div>
+        <div class="stat-vs">vs. base <b>36%</b></div>
+      </div>
+      <div class="stat neutral">
+        <div class="stat-label">Clean-demo yield&nbsp;<span class="arrow">&uarr;</span></div>
+        <div class="stat-value">39%</div>
+        <div class="stat-ci">usable episodes collected, shield on</div>
+        <div class="stat-vs">vs. <b>18%</b> with the shield off</div>
+      </div>
+    </div>
+    <p class="fineprint">
+      Intervals are Wilson 95% score intervals &mdash; several conditions sit near zero, where the
+      normal approximation is too narrow and can leave <span class="math">[0,1]</span> entirely.
+    </p>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════ METHOD ═══════════════════════════════ -->
+<section class="band" id="method">
+  <div class="wrap">
+    <h2>How it works</h2>
+
+    <figure>
+      <img src="assets/fig_shield_block.png" alt="Block diagram: observation feeds the policy, which proposes an action; a CBF-QP projection block corrects it before the robot executes it, and the corrected action is tapped off as the behaviour-cloning target. The projection block is marked 'removed at deployment'.">
+      <figcaption>
+        <b>The whole method in one diagram.</b> The shield exists only while demonstrations are
+        being generated. The imitation target is the action the robot actually executed &mdash;
+        post-projection &mdash; not the one the policy proposed. What survives into deployment is
+        the policy, not the apparatus.
+      </figcaption>
+    </figure>
+
+    <div class="steps">
+      <div class="step">
+        <div class="step-n">1</div>
+        <h3>Build the barrier</h3>
+        <p>
+          The obstacle's collision mesh is read from the simulator, sampled into a point cloud and
+          decomposed into a small set of spheres &mdash; a single bounding volume is a poor
+          approximation of a non-convex object. The Franka hand gets three spheres (a 4.8&nbsp;cm palm,
+          two 2.0&nbsp;cm finger pads); arm links three through seven get one each.
+        </p>
+      </div>
+      <div class="step">
+        <div class="step-n">2</div>
+        <h3>Shield at runtime</h3>
+        <p>
+          Each proposed translation is treated as a nominal end-effector velocity and projected onto
+          the safe set by a three-variable quadratic program &mdash; the standard CBF-QP, one
+          constraint row per sphere pair, solved with OSQP. When no constraint is active the action
+          passes through untouched. Rotation is left free; the barrier acts on translation only.
+        </p>
+      </div>
+      <div class="step">
+        <div class="step-n">3</div>
+        <h3>Distil, then remove</h3>
+        <p>
+          Episodes are kept only if they succeeded, displaced nothing, <em>and</em> the shield fired at
+          least once &mdash; a clean episode the shield never touched is ordinary base behaviour and
+          teaches nothing. The retained corrected actions are behaviour-cloned through the policy's
+          own flow-matching loss into a LoRA adapter on the action head, backbone frozen. Then the
+          shield comes off.
+        </p>
+      </div>
+    </div>
+
+    <figure>
+      <img src="assets/fig_spheres.png" alt="Panel (a): a 5.5 cm wide box object, its sphere decomposition tracking the shape in blue, and a red bounding sphere 16 cm across that inflates it threefold. Panel (b): the Franka hand modelled as a 4.8 cm palm sphere at 5.6 cm depth plus two 2.0 cm finger-pad spheres offset 3.6 cm either side at 10.5 cm depth, with the grasp site marked.">
+      <figcaption>
+        <b>Drawn to scale from the constants the shield actually uses.</b> <b>(a)</b> A single
+        bounding sphere over a 5.5&nbsp;cm object is 16&nbsp;cm across &mdash; a threefold inflation
+        that would forbid most of the workspace. <b>(b)</b> The end-effector model. Arm links, not
+        shown, carry one radius each sampled at three points along the axis &mdash; a coarser
+        representation than the hand, and exactly where the residual collisions turn out to be.
+      </figcaption>
+    </figure>
+
+    <div class="note" id="benchmark">
+      <h3>The benchmark</h3>
+      <p>
+        <b>SafeLIBERO</b> augments the LIBERO manipulation suite with an obstacle placed in the
+        workspace. The grid is three task suites (spatial, object, goal) &times; two obstacle levels
+        &times; four tasks = <b>24 scenes</b>, each with 50 randomised initial states. A simulated
+        7-DoF Franka Panda in MuJoCo, operational-space control, 224&times;224 agent-view and wrist
+        images plus eight proprioceptive dimensions &mdash; <em>and no joint angles</em>, a fact the
+        boundary result returns to.
+      </p>
+      <p>
+        Initial states 0&ndash;34 are used for collecting demonstrations and training; states
+        <b>35&ndash;49 are held out</b> and used only for evaluation. That split is load-bearing: a
+        policy trained on shielded rollouts could in principle memorise those trajectories rather
+        than acquire the behaviour behind them, and only unseen initial states tell the two apart.
+      </p>
+      <p>
+        <b>Collision</b> is recorded when the obstacle moves more than 1&nbsp;mm from where it
+        settled, in the <span class="math">&ell;<sub>1</sub></span> sense, at any control step.
+        The benchmark is due to Hu&nbsp;et&nbsp;al.'s VLSA / AEGIS work, which is also the
+        runtime-shielding baseline this thesis measures itself against.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════ RESULTS ═══════════════════════════════ -->
+<section class="band" id="results">
+  <div class="wrap">
+    <h2>Does the safety internalise?</h2>
+    <p class="lede">
+      Yes &mdash; most of it, in a single round, and without paying for it in task performance.
+    </p>
+
+    <figure>
+      <img src="assets/fig_internalisation.png" alt="Two bar charts. Left, task success rate: base 58.3%, base plus shield 71.7%, self-distilled 82.5%. Right, collision rate: base 82.5%, base plus shield 13.3%, self-distilled 19.2%. Hatched bars indicate the shield is running.">
+      <figcaption>
+        <b>Hatched bars have a shield running; solid bars do not.</b> The self-distilled policy, with
+        nothing at inference, recovers most of the shielded baseline's collision avoidance
+        (80.8% CAR against 86.7%) and overtakes both conditions on task success.
+      </figcaption>
+    </figure>
+
+    <div class="tablewrap">
+      <table>
+        <caption>Effect of self-distillation. <em>n</em> = 120 held-out rollouts per row.</caption>
+        <thead>
+          <tr>
+            <th>Policy</th>
+            <th>Shield</th>
+            <th>TSR (95% CI)</th>
+            <th>Collision (95% CI)</th>
+            <th>CAR</th>
+            <th>Shield act.</th>
+            <th>ETS</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Base <span class="math">&pi;<sub>0.5</sub></span></td>
+            <td><span class="pill off">off</span></td>
+            <td>58.3% <span class="ci">[49.4, 66.8]</span></td>
+            <td>82.5% <span class="ci">[74.7, 88.3]</span></td>
+            <td>17.5%</td><td>&mdash;</td><td>138.6</td>
+          </tr>
+          <tr>
+            <td>Base <span class="math">&pi;<sub>0.5</sub></span></td>
+            <td><span class="pill on">on</span></td>
+            <td>71.7% <span class="ci">[63.0, 79.0]</span></td>
+            <td>13.3% <span class="ci">[8.4, 20.6]</span></td>
+            <td>86.7%</td><td>0.355</td><td>160.6</td>
+          </tr>
+          <tr class="highlight">
+            <td>Self-distilled, round 1</td>
+            <td><span class="pill off">off</span></td>
+            <td><b>82.5%</b> <span class="ci">[74.7, 88.3]</span></td>
+            <td><b>19.2%</b> <span class="ci">[13.1, 27.1]</span></td>
+            <td><b>80.8%</b></td><td>&mdash;</td><td>157.3</td>
+          </tr>
+          <tr>
+            <td>Self-distilled, round 1</td>
+            <td><span class="pill on">on</span></td>
+            <td>70.8% <span class="ci">[62.2, 78.2]</span></td>
+            <td>8.3% <span class="ci">[4.6, 14.7]</span></td>
+            <td>91.7%</td><td><b>0.177</b></td><td>170.0</td>
+          </tr>
+          <tr class="highlight">
+            <td>Self-distilled, round 2</td>
+            <td><span class="pill off">off</span></td>
+            <td><b>80.8%</b> <span class="ci">[72.9, 86.9]</span></td>
+            <td><b>17.5%</b> <span class="ci">[11.7, 25.3]</span></td>
+            <td><b>82.5%</b></td><td>&mdash;</td><td>158.8</td>
+          </tr>
+          <tr>
+            <td>Self-distilled, round 2</td>
+            <td><span class="pill on">on</span></td>
+            <td>72.5% <span class="ci">[63.9, 79.7]</span></td>
+            <td>9.2% <span class="ci">[5.2, 15.7]</span></td>
+            <td>90.8%</td><td>0.182</td><td>176.7</td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="fineprint">
+        Shield activation is the fraction of control steps on which the projection changed the
+        action. ETS is the control step at which success first held, averaged over successful
+        rollouts only, so it must be read alongside TSR. Most of the gain arrives in round 1;
+        round 2 is a small consolidation.
+      </p>
+    </div>
+
+    <h3 class="sub-h">Is it the shield, or just training on your own successes?</h3>
+    <p>
+      The demonstration filter tests three things at once &mdash; the shield fired, the episode
+      succeeded, nothing was displaced &mdash; and that conflates two mechanisms. Under the first,
+      the policy imitates the shield's avoidance corrections. Under the second, the gain is plain
+      self-improvement from training on one's own successful episodes, for which the shield is
+      incidental and the result a rediscovery of filtered behaviour cloning.
+    </p>
+    <p>
+      So a matched control was run: every variable held constant, the shield simply switched off
+      during collection, same filter, same 85 demonstrations.
+    </p>
+
+    <div class="tablewrap">
+      <table>
+        <caption>The matched control. Both distilled rows use 85 demonstrations passing an
+          identical filter and differ only in whether the shield was on while collecting them.</caption>
+        <thead>
+          <tr><th>Condition</th><th>Demos</th><th>TSR (95% CI)</th><th>Collision (95% CI)</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Undistilled base</td><td>&mdash;</td>
+              <td>58.3% <span class="ci">[49.4, 66.8]</span></td>
+              <td>82.5% <span class="ci">[74.7, 88.3]</span></td></tr>
+          <tr class="bad"><td>Control, shield <b>off</b> during collection</td><td>85</td>
+              <td>50.0% <span class="ci">[41.2, 58.8]</span></td>
+              <td>84.2% <span class="ci">[76.6, 89.6]</span></td></tr>
+          <tr class="highlight"><td>Matched, shield <b>on</b> during collection</td><td>85</td>
+              <td><b>75.8%</b> <span class="ci">[67.4, 82.6]</span></td>
+              <td><b>26.7%</b> <span class="ci">[19.6, 35.2]</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>
+      Success-filtering on its own does nothing here: the control ends up marginally
+      <em>worse</em> than the policy it started from on both metrics. The shielded condition, at the
+      same demonstration count and under the same filter, lands at 26.7% with a confidence interval
+      disjoint from the control's. The activation rate corroborates it independently &mdash; a
+      policy that merely succeeded more often would not need <em>less</em> safety intervention.
+    </p>
+    <p class="fineprint">
+      The control is not entirely inert, though. Its arm-link collisions fall from 17 to 6 while
+      gripper collisions hold at 44, which is why the total does not move. Outcome selection
+      transfers avoidance in the channel the barrier does <em>not</em> express, and leaves the
+      channel that dominates the collision count alone.
+    </p>
+
+    <h3 class="sub-h">Four things worth noticing</h3>
+    <div class="findings">
+      <div class="finding">
+        <h4>Distil <em>before</em> you shield</h4>
+        <p>
+          Shielding a distilled policy gives the highest collision avoidance measured anywhere in
+          this work &mdash; 91.7% &mdash; at a success rate statistically indistinguishable from
+          shielding the base policy. Where a safety case demands a runtime constraint anyway, a
+          distilled policy is the better thing to attach it to.
+        </p>
+      </div>
+      <div class="finding">
+        <h4>The shield finds half as much to fix</h4>
+        <p>
+          Reattached to the distilled policy, the barrier alters 18% of control steps against 36%
+          before. That is an independent check on internalisation, and it matters wherever motion
+          must be predictable: a filter that fires constantly is a filter that makes cycle times vary.
+        </p>
+      </div>
+      <div class="finding">
+        <h4>Safe data is half the price</h4>
+        <p>
+          Collecting clean demonstrations yields 39% with the shield active against 18% without it
+          &mdash; a direct saving for any deployment gathering task-specific data.
+        </p>
+      </div>
+      <div class="finding cost">
+        <h4>And it is not free</h4>
+        <p>
+          The distilled policy takes a more conservative route: execution time to success rises from
+          138.6 to 157.3 control steps, roughly <b>14% slower</b>. A second distillation round buys
+          nothing measurable on either metric &mdash; though it erodes nothing either, in contrast
+          to an earlier DAgger-style attempt in this project that degraded across rounds.
+        </p>
+      </div>
+    </div>
+
+    <h3 class="sub-h">The one place the two mechanisms fight</h3>
+    <p>
+      Combining them is not free. Attaching the shield <em>raises</em> the base policy's success and
+      <em>lowers</em> the distilled policy's, while collisions fall in both cases &mdash; the
+      reversal is confined to the success channel. When a policy already avoids the obstacle on its
+      own, the projection perturbs actions that were already safe and competent, pushing it out of
+      distribution. The VLSA authors independently name the same effect from the other direction,
+      observing that enforcement can drive a policy where it &ldquo;may behave erratically and fail
+      to recover.&rdquo; That the leading runtime-enforcement work reports the ceiling of runtime
+      enforcement is the strongest available argument for internalising it instead.
+    </p>
+
+    <figure>
+      <img src="assets/fig_stacking.png" alt="Two panels with shield-off and shield-on on the x axis. Left, task success: the base policy's line rises from 58.3% to 71.7% while the distilled policy's falls from 82.5% to 70.8%, so the lines cross. Right, collision rate: both lines fall, the base steeply from 82.5% to 13.3% and the distilled from 19.2% to 8.3%.">
+      <figcaption>
+        <b>The lines cross &mdash; but only on success.</b> The shield is worth +13.3 points of
+        success to the base policy and &minus;11.7 to the distilled one, while cutting collisions in
+        both. <em>n</em> = 120 held-out rollouts per condition, Wilson 95% intervals.
+      </figcaption>
+    </figure>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════ BOUNDARY ═══════════════════════════════ -->
+<section class="band tinted" id="boundary">
+  <div class="wrap">
+    <h2>Where it stops working</h2>
+    <p class="lede">
+      The interesting result is not that distillation works. It is the condition under which it
+      works &mdash; and it is narrower than &ldquo;safety can be learned.&rdquo;
+    </p>
+
+    <p>
+      Replace the teacher. A sampling-based motion planner &mdash; RRT-Connect in joint space with
+      clearance inflation, reading object and goal poses straight out of the scene specification
+      &mdash; is <em>more</em> privileged than the policy, and its demonstrations were collected
+      under the <em>same shield</em>, at matched gradient steps (16,140 against 15,988).
+    </p>
+
+    <div class="tablewrap">
+      <table>
+        <caption>Demonstration source, everything else held constant. No shield at inference.</caption>
+        <thead>
+          <tr><th>Policy</th><th>TSR (95% CI)</th><th>Collision rate (95% CI)</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Base <span class="math">&pi;<sub>0.5</sub></span>, undistilled</td>
+              <td>58.3% <span class="ci">[49.4, 66.8]</span></td>
+              <td>82.5% <span class="ci">[74.7, 88.3]</span></td></tr>
+          <tr class="bad"><td>Distilled on the <b>privileged planner</b></td>
+              <td>54.2% <span class="ci">[45.3, 62.8]</span></td>
+              <td>80.0% <span class="ci">[72.0, 86.2]</span></td></tr>
+          <tr class="highlight"><td>Distilled on its <b>own shielded rollouts</b></td>
+              <td><b>82.5%</b> <span class="ci">[74.7, 88.3]</span></td>
+              <td><b>19.2%</b> <span class="ci">[13.1, 27.1]</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p class="callout">
+      The planner transferred <strong>nothing</strong>. Its confidence interval overlaps the
+      undistilled base policy's on both metrics.
+    </p>
+
+    <h3 class="sub-h">And the planner is not simply a weaker teacher</h3>
+    <p>
+      Run unshielded on spatial task 0 it collides in 5 of 8 episodes &mdash; arm links, gripper,
+      held object, scene objects alike. Run shielded it collides in none. Its demonstrations depend
+      on the shield to exactly the degree the policy's own do. The two sets are matched in
+      correction signal and differ in <em>where those corrections sit</em>.
+    </p>
+
+    <figure class="narrow">
+      <img src="assets/fig_state_coverage.png" alt="Scatter plot, one point per scene: planner coverage of the base policy's states on the x axis against shielded-rollout coverage on the y axis, with a diagonal parity line. Fifteen of eighteen points sit above the diagonal.">
+      <figcaption>
+        <b>The mechanism is state coverage.</b> One point per scene, subsampled to equal size (30
+        resamples). The shielded rollouts land within 2&nbsp;cm of the base policy's own visited
+        states 37.7% of the time against the planner's 22.8%, and cover better in 15 of 18 scenes.
+        Without the size control the two sets look near-identical at 37.7% against 32.8% &mdash;
+        the matching is load-bearing, not cosmetic.
+      </figcaption>
+    </figure>
+
+    <p>
+      The shape of the difference is what you would expect from a scripted controller: it traces
+      near-identical paths from a given initial condition, so its demonstrations form tight,
+      near-deterministic bands, while the states the policy actually visits are diffuse and lie
+      largely between and around them. The two distributions are not disjoint. The planner's
+      density is simply concentrated where the policy is not.
+    </p>
+
+    <div class="note">
+      <h3>An explanation that sounded right and was wrong</h3>
+      <p>
+        The intuitive story for the planner's failure is <em>observation aliasing</em>:
+        <span class="math">&pi;<sub>0.5</sub></span> sees an image and eight proprioceptive
+        dimensions but no joint angles, and a 7-DoF arm can place the end-effector identically with
+        the elbow somewhere else entirely &mdash; so two training samples could look the same while
+        carrying contradictory targets, and behaviour cloning would average them.
+      </p>
+      <p>
+        Measured directly from the demonstration files, at matched observation <em>radius</em>
+        rather than matched neighbour count, the prediction comes out <b>backwards</b>. The
+        planner's demonstrations are roughly <em>twice as well determined</em> by the observation at
+        every radius. The teacher that fails to distil has the cleaner observation-to-action
+        mapping; the teacher that succeeds is the more aliased of the two.
+      </p>
+    </div>
+
+    <p>
+      Two honest limits on the coverage explanation. It is measured on end-effector position &mdash;
+      3 of the 8 observed dimensions &mdash; so it says nothing about joint configuration. And it is
+      descriptive, not causal: the matched comparison establishes <em>that</em> the source mattered,
+      while the coverage figure proposes <em>how</em> the two sources differ.
+    </p>
+
+    <h3 class="sub-h">What the shield cannot reach</h3>
+    <p>
+      Attributing every residual collision to the body that caused it makes the remaining failure
+      legible. Across 360 shielded episodes the gripper displaced the obstacle <b>zero</b> times
+      &mdash; the barrier's authority at the end-effector is essentially total. What survives is arm
+      links and the held object, exactly where the sphere approximation is coarsest.
+    </p>
+    <div class="tablewrap">
+      <table>
+        <caption>Residual collisions by culprit body (counts, pooled).</caption>
+        <thead><tr><th>Condition</th><th>Total</th><th>Gripper</th><th>Arm link</th><th>Held object</th></tr></thead>
+        <tbody>
+          <tr><td>Base, no shield</td><td>99</td><td>71</td><td>17</td><td>36</td></tr>
+          <tr><td>Base + shield</td><td>16</td><td><b class="zero">0</b></td><td>15</td><td>0</td></tr>
+          <tr><td>Round 1, no shield</td><td>23</td><td>7</td><td>13</td><td>9</td></tr>
+          <tr><td>Round 1 + shield</td><td>10</td><td><b class="zero">0</b></td><td>8</td><td>1</td></tr>
+          <tr><td>Round 2, no shield</td><td>21</td><td>8</td><td>8</td><td>7</td></tr>
+          <tr><td>Round 2 + shield</td><td>11</td><td><b class="zero">0</b></td><td>9</td><td>0</td></tr>
+        </tbody>
+      </table>
+      <p class="fineprint">Rows count culprit bodies, not episodes, so a single episode with two
+        contacting bodies appears twice.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════ NEGATIVES ═══════════════════════════════ -->
+<section class="band" id="negatives">
+  <div class="wrap">
+    <h2>Four things that did not work</h2>
+    <p class="lede">
+      Each was tested and rejected for an identified reason. None is a general claim about its
+      method class, and the scope of each negative is stated with it.
+    </p>
+    <div class="tablewrap">
+      <table class="neg">
+        <thead>
+          <tr><th>Mechanism</th><th>What was tested</th><th>Outcome</th><th>Scope of the negative</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><b>Scalar-reward RL</b></td>
+            <td>Flow-SDE GRPO on the action head &mdash; 4 configurations &times; 6 rounds, one scene, same trainable surface as the distillation.</td>
+            <td>Either collapses to inaction or learns nothing. No setting does both.</td>
+            <td>The reward design and budget tested. Not safe RL as a class &mdash; constrained-MDP and world-model methods supply richer signals.</td>
+          </tr>
+          <tr>
+            <td><b>Safety in language</b></td>
+            <td>One safety clause appended to the task instruction, <em>n</em> = 60 per condition, level II obstacles.</td>
+            <td>No safety change; 23% slower and 11.7 points less successful.</td>
+            <td>The single phrasing tested: generic, unnamed referent, manner adverbial.</td>
+          </tr>
+          <tr>
+            <td><b>Best-of-<em>N</em> selection</b></td>
+            <td><em>K</em> &isin; {4, 8} candidate action chunks re-simulated per query, with exact state rewind.</td>
+            <td>No safe candidate exists on ~60% of queries; doubling <em>K</em> buys 8.8 points.</td>
+            <td>This policy and benchmark. The measurement it yields <em>is</em> the result.</td>
+          </tr>
+          <tr>
+            <td><b>Generative uncertainty as a monitor</b></td>
+            <td>Three statistics of the stored flow-denoising chain, scored as AUC for predicting whether an episode collided.</td>
+            <td>At chance for the base policy (0.461). The distilled policy inverts consistently (0.350, i.e. 0.65 flipped) &mdash; but on 23 collision episodes.</td>
+            <td>This policy, benchmark and episode-level prediction. The inversion is ~2 standard errors from chance and is reported as suggestive only.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="fineprint">
+      Best-of-<em>N</em> failing this way is itself a finding: within a given state, the safety
+      outcomes of a VLA's sampled action candidates are near-perfectly correlated. That is
+      <em>why</em> action-level rejection sampling cannot help where episode-level selection can.
+    </p>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════ DEMOS ═══════════════════════════════ -->
+<section class="band tinted" id="demos">
+  <div class="wrap">
+    <h2>Watch it</h2>
+    <p class="lede">
+      Every clip is <strong>base <span class="math">&pi;<sub>0.5</sub></span> on the left</strong> and
+      the <strong>self-distilled policy on the right</strong>, on the same scene from the same
+      held-out initial state, with the outcome burned into the header.
+    </p>
+    <div class="warnbox">
+      <b>These are the difference cases, not a random sample.</b> All 68 clips are episodes where
+      the base policy collided and the distilled policy did not &mdash; they show what the transfer
+      looks like, not how often it happens. For how often, read the
+      <a href="#results">aggregate rates</a> over all 120 held-out rollouts.
+    </div>
+
+    <div class="filters" role="group" aria-label="Filter demonstrations">
+      <div class="filter-group">
+        <span class="filter-label">Suite</span>
+        <button class="chip active" data-filter="suite" data-value="all">All</button>
+        <button class="chip" data-filter="suite" data-value="spatial">Spatial</button>
+        <button class="chip" data-filter="suite" data-value="object">Object</button>
+        <button class="chip" data-filter="suite" data-value="goal">Goal</button>
+      </div>
+      <div class="filter-group">
+        <span class="filter-label">Obstacle level</span>
+        <button class="chip active" data-filter="level" data-value="all">All</button>
+        <button class="chip" data-filter="level" data-value="LI">I &mdash; beside the target</button>
+        <button class="chip" data-filter="level" data-value="LII">II &mdash; blocking the path</button>
+      </div>
+      <div class="filter-group">
+        <span class="filter-label">Playback</span>
+        <button class="chip active" id="autoplay-toggle">Autoplay on scroll</button>
+      </div>
+    </div>
+
+    <div id="demo-count" class="demo-count"></div>
+    <div id="demo-list"></div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════ CLOSING ═══════════════════════════════ -->
+<section class="band">
+  <div class="wrap">
+    <h2>What this does and does not license</h2>
+    <p>
+      Two neighbouring claims would be false and are not made here. Learning safety from
+      CBF-related supervision is not new, and distilling a corrective signal into a
+      vision-language-action policy is not new either. What is new is the conjunction: a
+      control-theoretic safety filter, distilled from a VLA's <em>own</em> shielded rollouts and
+      evaluated with the filter <em>removed</em>, in the setting where runtime shielding is the
+      current state of the art &mdash; and with it, the boundary condition.
+    </p>
+    <p>
+      That condition is narrower than the one it is easily mistaken for. Foreign teachers
+      <em>can</em> transfer safety: SAFE-GIL clones an MPC or PID controller and IntervenGen replays
+      human corrections, and both succeed because both take care that their demonstrations sit where
+      the learner's errors would put it. The planner tested here received no such treatment.
+      Supplying a foreign low-level controller under a matched comparison, and measuring what
+      follows, is what this work contributes.
+    </p>
+    <p class="callout">
+      A runtime filter teaches a policy the regularities it observes and corrects, and those
+      corrections amortise into weights without the per-step optimisation that comparable
+      learned-barrier methods retain at inference. But the learned policy is only as broad as the
+      states, hazards and geometry those corrections represent. Runtime shielding remains necessary
+      outside that envelope. <strong>Distillation reduces dependence on the shield; it does not
+      remove the need for a safety case.</strong>
+    </p>
+  </div>
+</section>
+
+<section class="band cite-band">
+  <div class="wrap">
+    <h2>Cite</h2>
+    <div class="bibwrap">
+      <button class="copy-btn" id="copy-bib">Copy</button>
+<pre id="bibtex">@mastersthesis{rodriguez2026distilling,
+  title  = {Distilling Runtime Safety into VLA Robot Policies},
+  author = {Rodriguez, Alex},
+  school = {University College London},
+  type   = {{MSc} thesis, Robotics and Computation},
+  year   = {2026},
+}</pre>
+    </div>
+    <p class="fineprint">
+      The SafeLIBERO benchmark and the runtime-shielding baseline are due to Hu et al.,
+      <a href="https://arxiv.org/abs/2512.11891"><em>VLSA: Vision-Language-Action Models with
+      Plug-and-Play Safety Constraint Layer</em></a>. The base policy is
+      <span class="math">&pi;<sub>0.5</sub></span> (Physical Intelligence); the environment is
+      LIBERO on robosuite / MuJoCo.
+    </p>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <p>Alex Rodriguez &middot; MSc Robotics and Computation, University College London &middot; 2026</p>
+  <p class="footlinks">
+    <a href="assets/thesis.pdf">Thesis PDF</a>
+    <a href="https://github.com/alejandroRdzGarza/thesis">Code</a>
+  </p>
+</footer>
+
+<script src="data.js"></script>
+<script src="script.js"></script>
+</body>
+</html>
