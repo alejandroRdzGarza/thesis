@@ -30,13 +30,6 @@
 \usepackage{siunitx}       % align numbers on the decimal point in results tables
 \usepackage{subcaption}
 \usepackage{multirow}
-\usepackage{threeparttable}  % table notes tied to the table, for tab:external_validation
-
-% Draft-mode placeholders for assets not yet collected. Set \figuretodofalse before submission:
-% every placeholder box vanishes and any figure still missing becomes a visible ?? instead of a
-% silently absent one.
-\newif\iffiguretodo
-\figuretodotrue
 \graphicspath{{figures/}}
 
 % --- references ------------------------------------------------------------
@@ -90,93 +83,1808 @@
 %  - Scope: SafeLIBERO, pi_0.5, simulation only. Say what is NOT in scope.
 %  - Contributions, as a short list. Be honest about which are negative results.
 
+
 \section{Motivation}
-\section{Problem statement and scope}
+
+Vision-Language-Action (VLA) models represent a paradigm shift in robotics, serving as a primary driver toward general-purpose embodied intelligence. By extending the capabilities of Vision-Language Models (VLMs) into physical execution, VLAs unify multimodal perception and low-level control into single end-to-end architectures, replacing classical modular pipelines. Pretrained on web-scale datasets and heterogeneous cross-embodiment demonstrations, these models exhibit remarkable semantic zero-shot generalization to novel objects, unseen environments, and unscripted multi-step spatial tasks.
+
+However, deploying VLA policies into real-world, human-centric environments introduces severe safety risks. While hallucinations in pure language models merely yield incorrect text, ungrounded actions or spatial errors in VLAs directly cause physical collisions, property damage, or catastrophic injury. Unlike classical control-theoretic frameworks, neural VLA policies are uninterpretable black-box systems lacking deterministic execution bounds and safety guarantees.
+
+Furthermore, current VLAs are highly susceptible to out-of-distribution (OOD) shifts, which trigger severe policy degradation. In long-horizon execution loops, minor perceptual or kinodynamic errors compound exponentially, causing gross trajectory drift. While external safety filters or control barrier functions can mitigate some runtime errors, they do not offer a complete solution; as shown in this work, external filtering introduces distribution shifts that can cause execution deadlocks and policy collapse. Crucially, VLAs lack intrinsic uncertainty calibration: internal policy confidence metrics do not correlate reliably with physical collision risks, rendering the model incapable of self-assessing impending failure.
+
+\section{Problem Statement and Scope}
+
+An unsafe VLA policy can be constrained at runtime using Control Barrier Functions (CBFs) that project unsafe nominal actions into a safe action set via Quadratic Programming (QP). On the \texttt{SafeLIBERO} benchmark, pairing the base policy ($\pi_{0.5}$) with a CBF filter drastically reduced collision rates from $82.5\%$ to $13.3\%$.
+
+However, active runtime shielding imposes significant operational overhead:
+\begin{enumerate}
+    \item \textbf{Computational Overhead:} The filter must run at every control step, consuming valuable inference latency budgets.
+    \item \textbf{Perceptual Dependency:} The system requires perfect, ground-truth obstacle geometry at runtime.
+    \item \textbf{System Complexity:} The safety shield represents an additional single point of failure.
+    \item \textbf{Policy Interactions:} Applying external CBFs post-distillation yields diminishing returns and performance degradation.
+\end{enumerate}
+
+Thus, while runtime filtering increases operational safety, it does not make the underlying policy intrinsically safe.
+
+\paragraph{Hypothesis}
+This thesis investigates whether the safe action space induced by a runtime CBF filter can be amortized directly into the parameters of a VLA policy via self-distillation. By distilling shielded rollouts back into model parameters, physical safety becomes an intrinsic property of the network rather than a runtime dependency. Beyond establishing this positive result, this work formalizes the exact boundary conditions under which such safety transfer occurs.
+
+\paragraph{Scope and Limitations}
+The empirical claims of this work are bounded by four key constraints:
+\begin{itemize}
+    \item \textbf{Environment:} All experiments were conducted in the \texttt{SafeLIBERO} simulated tabletop manipulation benchmark. No physical hardware experiments were performed, and no claims regarding sim-to-real transfer are asserted.
+    \item \textbf{Architecture:} Model evaluations are restricted to $\pi_{0.5}$, a VLA architecture utilizing a flow-matching continuous action head. Findings related to action chunking and denoising-time interventions are specific to this model family.
+    \item \textbf{Perceptual Priors:} The CBF barrier relies on privileged, ground-truth simulator geometry and scene annotations. The collision rates reported herein represent an upper bound for this class of filter, as real-world perception pipelines introduce additional estimation noise.
+    \item \textbf{Statistical Bounds:} Reported statistics reflect single training runs across held-out initial states ($n = 120$ evaluation rollouts per policy configuration) evaluated at $95\%$ confidence intervals.
+\end{itemize}
+
 \section{Contributions}
 
+The primary contributions of this work are as follows:
+
+\begin{enumerate}
+    \item \textbf{Internalization of Physical Safety via Self-Distillation:} We demonstrate that runtime safety constraints can be amortized directly into VLA weights. Without any active shield at inference time, the distilled policy reduced collision rates from $82.5\%$ to $19.2\%$ while increasing task success from $58.3\%$ to $82.5\%$ on held-out initializations. The distilled policy recovers the majority of the teacher's safety performance (Collision Avoidance Rate of $80.8\%$ vs.\ $86.7\%$) in a single behavioral cloning iteration without deployment latency.
+    
+    \item \textbf{Demarcation of Demonstration Sources:} We establish that safety transfer depends strictly on supervising the policy's own error distribution. Distillation using rollouts from a privileged RRT motion planner failed completely; the resulting student was statistically indistinguishable from the baseline. Effective transfer requires correcting the model's own execution failures rather than exposing it to external expert trajectories.
+    
+    \item \textbf{Disambiguation of Correction vs. Success Filtering:} Through matched N=85 control experiments, we prove that safety gains stem from active step-wise CBF corrections during rollout generation rather than outcome-based success filtering alone ($84.2\%$ vs.\ $26.7\%$ success, with disjoint confidence intervals).
+    
+    \item \textbf{Dual-Channel Safety Transfer:} We discover that safety transfers through two distinct mechanisms:
+    \begin{itemize}
+        \item \emph{Direct Correction Imitation:} Where the CBF is precise (end-effector boundaries), the student learns directly from the filter's corrections.
+        \item \emph{Outcome Selection on Imperfect Signals:} The CBF shield eliminated end-effector collisions completely ($71 \to 0$ across $360$ episodes) but permitted $15$ arm-link collisions. Remarkably, the unshielded distilled student achieved only $8$ arm-link collisions—outperforming its own teacher. This occurs because trajectory retention criteria filtered out all link contacts, allowing the student to learn full-body spatial avoidance beyond what the analytical shield explicitly enforced.
+    \end{itemize}
+    
+    \item \textbf{Empirical Analysis of Alternative Adaptation Schemes:} We systematically evaluate and reject four alternative adaptation mechanisms—scalar-reward reinforcement learning, CBF-guided sampling, language-conditioned safety prompting, and best-of-$N$ sample selection—providing mechanistic explanations for why each fails to enforce low-level physical invariance.
+\end{enumerate}
 % ============================================================================
 \chapter{Background and Related Work}\label{ch:background}
-% BUDGET ~5 pages. Concision is explicitly marked for — do not pad this.
-% Must establish that your approach is the logical next step, not a survey.
 
-\section{Vision-language-action models}
-% pi_0.5, flow-matching action head, action chunking. Only the detail a reader
-% needs to follow your method.
+\section{Vision--Language--Action Models and the Safety Problem They Inherit}
+\label{sec:bg:vla}
 
-\section{Control barrier functions for manipulation}
-% h(x) >= 0, the QP projection, why it composes with any policy.
+Vision--language--action models map camera observations and a natural-language instruction
+directly to continuous robot actions, and have become the dominant paradigm for general-purpose
+manipulation. The policy studied here, $\pi_{0.5}$, pairs a pretrained vision--language backbone
+with a flow-matching action expert that emits chunks of continuous actions, and is trained by
+heterogeneous co-training across robot demonstrations, semantic subtask prediction, and
+web-derived multimodal data~\cite{physicalintelligence2025pi05}. The flow-matching action expert
+is inherited from its predecessor~\cite{black2024pi0}.
 
-\section{Safety filters for VLAs}
-% AEGIS is the direct comparison — state exactly what they do and where they
-% stop (their documented distribution-shift limitation is your opening).
+What matters for this thesis is what that training does \emph{not} optimise. These models are
+built and evaluated for breadth --- novel objects, unseen homes, long horizons --- and their
+reported results are generalisation results. Nothing in the objective penalises contact with an
+object that is not the target, and nothing in the data distribution reliably demonstrates
+avoidance, because human demonstrators rarely produce near-collisions worth imitating. Broad task
+competence is therefore not evidence of physical safety, and no collision-safety claim is made in
+the work introducing the model~\cite{physicalintelligence2025pi05}.
 
-\section{Imitation and RL for safety internalisation}
-% DAgger, SafeDAgger, Flow-GRPO, piRL. Position: piRL is task RL for flow VLAs;
-% this project is safety RL / safety distillation.
+The empirical consequence is stark. On the benchmark used throughout this thesis, the unmodified
+policy collides with a non-target obstacle in more than eight of every ten episodes
+(Section~\ref{sec:shield_efficacy}). The problem addressed here is therefore not that VLAs are bad
+at manipulation; it is that competence and safety are separate properties, and only the first has
+been optimised.
 
-% ============================================================================
+\section{Control Barrier Functions}\label{sec:bg:cbf}
+
+Control theory offers a mature answer to constraint satisfaction. A control barrier function
+encodes a safe set $\mathcal{C}$ as the superlevel set of a differentiable function $h$, and
+converts safety into a condition that is affine in the control input: any $u$ satisfying
+$\dot{h}(x,u) \ge -\alpha(h(x))$ renders $\mathcal{C}$ forward invariant, so a system that begins
+safe remains safe~\cite{ames2017cbf}.
+
+Because the condition is affine in $u$, it can be imposed as one linear inequality per constraint
+inside a quadratic program that stays as close as possible to a nominal input,
+\begin{equation}
+  u^{\star} = \arg\min_{u} \tfrac{1}{2}\lVert u - u_{\mathrm{nom}} \rVert^{2}
+  \quad \text{s.t.} \quad
+  \nabla h^{\top}\!\left(f + gu\right) \ge -\alpha(h).
+  \label{eq:cbf_qp}
+\end{equation}
+This is the object the rest of the thesis calls a \emph{shield}: a filter that accepts whatever a
+nominal controller proposes and returns the minimum modification satisfying the constraint. Two
+properties make it attractive as a teacher rather than merely as a guard. It is agnostic to how the
+nominal action was produced, so it composes with a policy it knows nothing about; and because it
+minimises $\lVert u - u_{\mathrm{nom}} \rVert$, its output is not an arbitrary safe action but
+\emph{the closest safe action to what the policy wanted}, which is precisely the form a supervised
+learning target should take.
+
+Two caveats bound what may be claimed later. The guarantee is continuous-time and assumes known
+control-affine dynamics, so a discrete-time implementation on a contact-rich manipulator satisfies
+it only approximately (Section~\ref{sec:shield}). And forward invariance is a property of the
+\emph{closed loop containing the quadratic program}. Remove the program and the guarantee is gone;
+Section~\ref{sec:bg:learned} returns to how much of it can be recovered.
+
+\section{Runtime Shielding for Vision--Language--Action Models}\label{sec:bg:shielding}
+
+The immediate prior work applies this machinery to VLAs directly. AEGIS inserts a safety-constraint
+layer between $\pi_{0.5}$ and the robot: a vision--language module grounds obstacle geometry from
+observations and fused depth, and a CBF-QP modifies the policy's proposed action whenever it
+violates the resulting constraint. That work also contributes SafeLIBERO, the benchmark used
+here~\cite{vlsa2026}, which augments the LIBERO manipulation suite~\cite{liu2023libero} with
+non-target obstacles at two difficulty levels.
+
+The approach works, and this thesis reproduces its unshielded baseline closely --- collision
+avoidance of 17.5\% against their 17.3\%, task success 58.3\% against 58.9\%, on the three suites
+used here (Section~\ref{sec:shield_efficacy}). That agreement is real external validation of the
+setup and is reported as such.
+
+Two features of that work motivate everything which follows. The first is that the layer is
+\emph{permanent}: it runs a quadratic program at every control step, requires obstacle geometry at
+deployment, and adds a component that can itself fail. Its authors report the cost as 0.356\,ms per
+step, which is modest, but the deeper cost is architectural rather than computational --- the
+deployed system is a policy plus an apparatus, and the apparatus never goes away.
+
+The second is a limitation those authors state themselves, and which this thesis measures directly.
+Enforcing safety at inference can push the policy into states its training never covered, where the
+policy may behave erratically and fail to recover --- an effect they name \emph{safety-induced
+distribution shift}~\cite{vlsa2026}. Section~\ref{sec:res:internalise} measures exactly this as a
+success cost of shielding, and it is the strongest argument that a permanent filter is not the end
+state one should want. A policy that has internalised the constraint is never driven off its own
+distribution by the act of being made safe.
+
+One further difference matters for reading Chapter~\ref{ch:results}. That formulation, by its
+authors' own statement, solely constrains the end-effector, and they note that unconstrained
+kinematic links may consequently collide~\cite{vlsa2026}. The barrier built in
+Section~\ref{sec:barrier} additionally constrains links three through seven and the hand --- an
+extension whose consequences Section~\ref{sec:res:scope} quantifies.
+
+\section{Learned Safety Representations, and Why They Still Optimise at Deployment}
+\label{sec:bg:learned}
+
+A parallel line of work removes the requirement for an analytically specified barrier by learning
+one. ConBaT trains a causal transformer with a safety critic from binary safe/unsafe labels,
+requiring no hand-designed constraint, and operates in embedding space rather than state space so
+it applies where geometry is unavailable~\cite{meng2024conbat}. Latent Policy Barrier treats the
+latent manifold of expert demonstrations as an implicit barrier, training a dynamics model on both
+expert data and the policy's own rollouts, then detecting and correcting departures from that
+manifold~\cite{sun2025lpb}.
+
+Latent Policy Barrier is the closer of the two to this thesis, because its recovery data comes from
+the policy's own rollout distribution --- checkpoints saved during training, executed to gather
+deviations without requiring success labels, task rewards or human teleoperation. That is the same
+instinct pursued here.
+
+But both retain the property that motivated this work. ConBaT performs lightweight online
+optimisation at deployment, rectifying actions by backpropagation through its critic until the CBF
+conditions hold~\cite{meng2024conbat}. Latent Policy Barrier performs inference-time steering in
+latent space, running gradient-based corrections through its dynamics model at every step, and
+explicitly advertises plug-and-play compatibility with off-the-shelf pretrained policies without
+requiring retraining or fine-tuning~\cite{sun2025lpb}. Their goal is the inverse of the one here:
+they improve a frozen policy by adding machinery, where this thesis changes the policy so the
+machinery can be discarded.
+
+Between these sits the theoretical question of how much safety can transfer into weights at all.
+Cosner et al.\ establish conditions under which imitating a CBF-based expert yields a learned
+controller with input-to-state-safety guarantees~\cite{cosner2022il_cbf}. The result is genuine but
+demanding: the expert must be a \emph{robust} CBF-QP with explicit disturbance margins, the
+dynamics must be known and control-affine, and the learned controller must satisfy a
+CBF-compliancy condition requiring data density along the safe-set boundary, bounded learning
+error, and a known Lipschitz constant --- and even then the guarantee holds on an \emph{expanded}
+safe set that degrades with data sparsity and learning error.
+
+None of those conditions is met here, and Section~\ref{sec:disc:limitations} says which and why.
+Their Remark~1 is nonetheless the cleanest available statement of this thesis's own logic: the goal
+is to transfer safety guarantees from the expert controller to the learned controller rather than
+to exactly mimic the expert's behaviour~\cite{cosner2022il_cbf}. Safety transfer is not imitation
+fidelity --- a distinction Section~\ref{sec:res:scope} observes empirically, where the distilled
+policy avoids arm-link collisions better than the teacher that supervised it.
+
+\section{What Makes Corrective Data Transfer}\label{sec:bg:corrective}
+
+The central question of this thesis is not whether a policy can be trained on corrected actions,
+but which corrections teach. Three lines of work converge on an answer, and together they supply
+the hypothesis that Chapter~\ref{ch:results} tests.
+
+SAFE-GIL injects reachability-computed adversarial disturbances during data collection, steering a
+fixed expert toward the states a learner's errors would produce so that its recovery behaviour is
+recorded~\cite{ciftci2025safegil}. Their ablation is the decisive one: Gaussian noise, uniform
+noise and DART all fail to reproduce the safety benefit, so it is the \emph{targeting} of the
+disturbance, not augmentation as such, that matters. IntervenGen reaches the same place
+differently, rolling out the current policy so that recorded mistakes are its genuine failures,
+then transforming human recovery segments onto the states reached~\cite{hoque2024intervengen};
+they report that ten interventions expanded synthetically outperform a hundred collected directly.
+
+Both are worth stating carefully, because they discipline the claim this thesis makes. In SAFE-GIL
+the expert is an MPC or PID controller; in IntervenGen the recovery actions come from a human
+teleoperator. \textbf{Neither teacher is the learner, and in both cases safety transfers.} What the
+two share is not the identity of the teacher but the location of the supervision: corrections are
+supplied at states the learner itself would reach. The hypothesis this thesis inherits from them is
+therefore about state coverage, and Section~\ref{sec:res:source}'s planner comparison is a test of
+it rather than a demonstration that foreign controllers cannot teach.
+
+ROAD-VLA carries the same principle into VLAs. It constructs a proximal teacher by perturbing the
+student's own action-token logits with calibrated advantage estimates, and distils that teacher
+along the student's on-policy rollouts, with a policy-improvement bound that holds only while the
+teacher remains close to the current policy~\cite{wang2026roadvla}. Its negative result is
+frequently summarised as a rejection of privileged teachers; it is not. Every rejected variant is
+\emph{textual} --- a retrieved action hint, an egocentric spatial description, and a task plan ---
+and the accepted teacher is derived from the student itself, so no foreign low-level controller is
+tested anywhere in that work. Their explanation is that embodied post-training erodes the
+backbone's in-context language ability and that a modality gap prevents discrete text from
+providing the precise grounding required for continuous control, which is the reading
+Section~\ref{sec:res:channels} adopts for its own language-channel negative.
+
+Finally, one result establishes that the protocol used here is not sufficient on its own. Guerrier
+et al.\ train a reinforcement-learning agent with a CBF filter active throughout training and then
+remove it~\cite{guerrier2025guardrails}. Safety is not retained: the agent collides once the filter
+is disabled, and their critic assigns high value \emph{inside} the obstacle. Their agent's actions
+were overridden, but its objective remained a scalar reward, so no gradient ever pointed toward the
+corrected action. Their curriculum variant, which blends filter and policy actions with the
+filter's weight decayed to zero, does internalise the constraint.
+
+That negative is what makes this thesis's question non-trivial. Being trained under a shield does
+not make a policy safe; what the policy is trained \emph{on} decides the outcome.
+
+\section{Policy-Level Safety Learning as an Alternative Route}\label{sec:bg:saferl}
+
+Runtime filtering and corrective imitation are not the only options, and this thesis does not claim
+they are. SafeVLA formulates VLA safety as a constrained Markov decision process, eliciting unsafe
+behaviour and optimising the policy under explicit constraints~\cite{safevla}. SafeDojo performs
+model-based safe reinforcement learning inside an action-conditioned video world model, estimating
+imagined task progress and safety cost separately and optimising them with Lagrangian constrained
+GRPO --- and evaluates on SafeLIBERO, making it the most direct methodological alternative in this
+literature~\cite{safedojo}.
+
+These matter for calibration rather than contrast. Chapter~\ref{ch:results} reports a negative
+result for scalar-reward reinforcement learning in this setting; neither of these methods is
+scalar-reward reinforcement learning, and both supply substantially richer constraint signals. The
+negative is therefore a result about the reward design tested, and
+Sections~\ref{sec:res:channels} and~\ref{sec:conc} scope it that way. The implementation of that
+ablation draws on policy-gradient methods adapted to flow-matching
+samplers~\cite{liu2025flowgrpo,shao2024grpo}, which belong to the methods appendix rather than to
+this argument.
+
+\section{The Gap}\label{sec:bg:gap}
+
+The literature above establishes five things. Runtime CBF shielding makes VLAs measurably safer and
+is the state of the art for this benchmark, at the cost of a permanent inference-time component and
+a distribution shift its own authors document~\cite{vlsa2026}. Learned barriers relax the need for
+analytic constraints but continue to optimise at
+deployment~\cite{meng2024conbat,sun2025lpb}. Imitation of a CBF-safe expert can in principle
+transfer formal guarantees, under conditions no large visuomotor policy currently
+satisfies~\cite{cosner2022il_cbf}. Corrective data transfer when they cover the states the learner
+reaches, irrespective of who produced
+them~\cite{ciftci2025safegil,hoque2024intervengen,wang2026roadvla}. And exposure to a shield during
+training does not, by itself, internalise anything~\cite{guerrier2025guardrails}.
+
+What has not been asked is the amortisation question: whether the corrections a control-theoretic
+shield produces can be compiled into a VLA's weights so that the shield can be \textbf{removed} at
+deployment, and what bounds that transfer.
+
+The claim of novelty must be stated precisely, because two neighbouring claims would be false.
+Learning safety from CBF-related supervision is not new --- Cosner et al.\ treat it
+theoretically~\cite{cosner2022il_cbf}, and learning from CBF demonstrations in simulation predates
+that work. Distilling a corrective signal into a VLA is not new either; ROAD-VLA does exactly
+that~\cite{wang2026roadvla}. What is new is the conjunction: a control-theoretic safety filter,
+distilled from a VLA's own shielded rollouts, evaluated with the filter removed, in the setting
+where runtime shielding is currently the state of the art --- together with the boundary condition
+that a geometry-privileged planner, safe by construction and supplying well-formed low-level
+actions, does not transfer under a matched comparison. ROAD-VLA's proximity principle predicts that
+boundary; nothing in the literature tests it, because no work in this line uses a foreign low-level
+controller as teacher.
+
+Chapter~\ref{ch:method} describes the shield, the teachers, and the distillation procedure.
+Chapter~\ref{ch:results} reports what transfers, what does not, and where the residual failures
+live.
+
 \chapter{Method}\label{ch:method}
-% BUDGET ~8 pages. This is where the marks for "difficulty and achievement" are
-% won. Use figures — a system diagram and a barrier-geometry figure.
 
-\section{The SafeLIBERO benchmark}
-% Suites, levels, and the three metrics. Define CAR, TSR, ETS PRECISELY here,
-% including the >1mm displacement threshold, and say it matches AEGIS so the
-% comparison is fair. This paragraph is load-bearing for your whole evaluation.
+\section{The SafeLIBERO Benchmark}\label{sec:benchmark}
 
-\section{Obstacle geometry and the barrier}
-% MVEE from the true mesh point cloud; the EE model; sphere decomposition.
+All experiments use SafeLIBERO~\cite{vlsa2026}, which augments the LIBERO manipulation
+suite~\cite{liu2023libero} with non-target obstacles placed in the workspace. The grid is three
+task suites (spatial, object, goal) $\times$ two obstacle levels $\times$ four tasks, giving 24
+distinct scenes, each providing 50 randomised initial states.
 
-\section{The CBF shield}
-% The QP, the AEGIS-faithful every-step application, and the implementation
-% choices that turned out to matter.
+Initial states 0--34 are used for demonstration collection and training; states 35--49 are held out
+and used only for evaluation. Every result in Chapter~\ref{ch:results} evaluates five held-out
+initial states per scene, giving $n = 120$ rollouts per condition. Rollouts run for a horizon of
+300 control steps, with the policy queried every five steps and the next five actions of the
+emitted chunk executed before the next query.
 
-\section{Collision attribution}
-% Raw displacement vs contact-graph attribution, and why the RAW flag is the
-% metric reported (the attribution is a lower bound).
+\subsection{Metrics}\label{sec:metrics}
 
-\section{Teachers}
-\subsection{The shielded policy as its own teacher}
-\subsection{A privileged scripted expert}
-% Per-scene teacher profiles: grasp side by obstacle clearance, grasp target
-% from real object geometry. This is the ablation, not the main line.
+\paragraph{Task success rate (TSR)} is the fraction of rollouts in which the environment's own goal
+predicate, compiled from each task's BDDL specification, is satisfied at any point before the
+horizon expires. That predicate is treated as authoritative throughout; a geometric fallback
+present in the codebase for logging is disabled for every number reported. Success is binary per
+rollout.
 
-\section{Distillation}
-% Flow-matching BC on shielded actions; the clean + shield-active filters;
-% DAgger rounds and why they are capped at two.
+\paragraph{Collision} is recorded when the obstacle's position departs from its position at the
+start of the episode by more than one millimetre in the $\ell_1$ sense,
+\begin{equation}
+  \sum_{k \in \{x,y,z\}} \bigl| p_k(t) - p_k(0) \bigr| > 0.001~\mathrm{m},
+  \label{eq:collision}
+\end{equation}
+and a rollout is marked collided if this holds at any control step. Three properties of the
+definition matter. It is \emph{cumulative} against the episode's initial pose rather than a
+per-step contact test, so an obstacle nudged early stays flagged. It measures the obstacle being
+\emph{displaced} rather than being touched by the robot, so an obstacle knocked over by the carried
+payload counts --- the quantity of interest is disturbance of the scene. And the reference pose
+$p(0)$ is taken after the settling procedure of Section~\ref{sec:benchmark_fixes}, since objects
+otherwise cross the threshold under gravity before the policy has acted.
+\textbf{Collision-avoidance rate (CAR)} is the complement.
+
+The one-millimetre $\ell_1$ threshold is this work's operationalisation. The originating work
+defines its collision metric as the proportion of strictly collision-free episodes and states no
+numeric tolerance~\cite{vlsa2026}, so the threshold here was chosen to sit above simulator noise
+while remaining strict enough that no genuine contact passes it. It is not inherited from that
+work.
+
+\paragraph{Execution time to success (ETS)} is the control step at which the success predicate
+first holds, averaged over successful rollouts only and reported in control steps. Failed rollouts
+are excluded rather than assigned the horizon: substituting the horizon would make a policy appear
+\emph{faster} the more often it fails. ETS is therefore conditional on success and must be read
+alongside TSR. The originating work uses the same name for a different quantity --- mean episode
+length including timeouts --- so values here are internally comparable but not comparable to
+theirs.
+
+\paragraph{CBF activation rate} is the fraction of control steps on which the shield altered the
+action, counted whenever the projected action differs from the nominal by more than $10^{-4}$ in
+norm. It measures how \emph{often} the shield intervened, not how large the corrections were, and
+serves as an independent check on internalisation: a policy that has learned to avoid obstacles
+should need fewer corrections when the shield is reattached.
+
+All proportions are reported with 95\% Wilson score confidence intervals rather than normal
+approximations. At $n = 120$ with rates near zero or one --- where several of these results sit ---
+the normal approximation gives intervals that are too narrow and can extend outside $[0,1]$.
+
+\section{Obstacle Geometry and the Barrier}\label{sec:barrier}
+
+The obstacle's collision mesh is read from the simulator, sampled into a point cloud, and decomposed
+into a small set of spheres. Sphere decomposition is used rather than a single bounding volume
+because a bounding sphere over a non-convex object is a poor approximation: an earlier version of
+this work measured a 5.5\,cm carton as 16\,cm across, enough to distort the grasp it produced
+(Figure~\ref{fig:spheres}a).
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\linewidth]{figures/fig_spheres.png}
+  \caption[The geometric model used by the barrier]{%
+    The geometric model, drawn to scale from the constants the shield uses.
+    \textbf{(a)} A single bounding sphere inflates a 5.5\,cm object to 16\,cm; decomposition tracks
+    the shape.
+    \textbf{(b)} The three-sphere end-effector model. Arm links, not shown, carry one radius each
+    sampled at three points along the link axis --- a coarser representation, which
+    Section~\ref{sec:res:scope} identifies as where residual collisions concentrate.}
+  \label{fig:spheres}
+\end{figure}
+
+The robot is represented by spheres on both sides of the barrier.
+
+\paragraph{End-effector.} Three spheres in the end-effector frame approximate the Franka hand: a
+palm sphere of radius 4.8\,cm at 5.6\,cm behind the grasp site, and two finger-pad spheres of
+radius 2.0\,cm offset 3.6\,cm either side at 10.5\,cm depth. A single sphere would either miss the
+fingers or inflate the palm.
+
+\paragraph{Arm links.} Links three through seven and the hand body are each assigned a radius
+(5.5\,cm to 9.0\,cm, set from the link's maximum transverse extent plus a 15--21\,mm margin) and
+sampled at three positions along the link axis, so a long link is not represented by its origin
+alone.
+
+For each pair of a robot sphere $i$ and an obstacle sphere $j$ the barrier is
+\begin{equation}
+  h_{ij} = \lVert p_i - c_j \rVert^{2} - (r_i + r_j)^{2},
+  \label{eq:barrier}
+\end{equation}
+with $h > 0$ the safe set. Differentiating along the rigid-body velocity gives the constraint row
+\begin{equation}
+  \bigl[\, 2\,s\,(p_i - c_j)^{\top} R_1 \,\bigr]\, u \;+\; k\,h_{ij} \;\ge\; 0,
+  \qquad k = 10,
+  \label{eq:constraint_row}
+\end{equation}
+where $u$ is the commanded end-effector velocity in the body frame, $R_1$ its rotation and $s$ a
+scale factor. For arm links, whose velocity is not the commanded one, the mapping
+$v_{\mathrm{link}} \approx J_{\mathrm{link}} J_{\mathrm{ee}}^{+}\,(s R_1 u)$ is used, with
+$J_{\mathrm{ee}}^{+}$ a damped pseudo-inverse ($\lambda = 10^{-3}$).
+
+Five properties of this construction bear on Chapter~\ref{ch:results} and are stated here rather
+than discovered later.
+
+\begin{itemize}
+  \item \emph{The robot model is approximate, and unevenly so.} The end-effector is covered by
+  three fitted spheres; each arm link by three point samples carrying one radius. The end-effector
+  is represented considerably more faithfully than the links.
+
+  \item \emph{Links one and two are not constrained at all}, being close to the base and rarely
+  near the obstacle in these scenes.
+
+  \item \emph{Arm-link velocities are estimated, not commanded.} The quadratic program optimises an
+  end-effector velocity and infers each link's motion through a damped Jacobian pseudo-inverse.
+  Where that inverse is ill-conditioned --- near singularities, or when the null-space motion the
+  operational-space controller applies differs from the minimum-norm solution --- the predicted
+  link velocity and the realised one diverge, and the constraint is enforced against the
+  prediction.
+
+  \item \emph{The geometry is privileged.} Obstacle poses and sizes are read from the simulator
+  rather than estimated from the policy's observations. The originating work instead derives
+  obstacle geometry through vision-language grounding and fused depth, and attributes its residual
+  collisions primarily to that upstream pipeline rather than to the controller~\cite{vlsa2026}. The
+  figures reported here are therefore an upper bound for this class of filter.
+
+  \item \emph{Arm links are constrained here but not in the originating work}, whose formulation
+  solely constrains the end-effector and which notes that its unconstrained kinematic links may
+  consequently collide~\cite{vlsa2026}. Extending the barrier to the links is a deliberate
+  difference from that baseline, and Section~\ref{sec:shield_efficacy} reports its effect.
+\end{itemize}
+
+\section{The CBF Shield}\label{sec:shield}
+
+At each control step the policy's proposed translation is treated as a nominal end-effector
+velocity $u_{\mathrm{nom}}$, and the shield solves
+\begin{equation}
+  u^{\star} = \arg\min_{u} \lVert u - u_{\mathrm{nom}} \rVert^{2}
+  \quad \text{s.t.} \quad
+  a_m^{\top} u + b_m \ge 0 \;\; \text{for every constraint row } m,
+  \label{eq:shield_qp}
+\end{equation}
+a quadratic program in three variables whose rows are the end-effector/obstacle and arm-link pairs
+of Section~\ref{sec:barrier}. This is the standard CBF-QP form~\cite{ames2017cbf}, instantiated on
+the sphere-pair barrier of Equation~\ref{eq:barrier}; that sphere construction is this work's own
+simplification rather than an adoption of an existing distance formulation. When no constraint is
+active the solution is $u_{\mathrm{nom}}$ and the action passes through unchanged.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\linewidth]{figures/fig_shield_block.png}
+  \caption[The shield, and what it leaves behind]{%
+    The shield during demonstration collection. The policy proposes, the quadratic program
+    projects, the robot executes --- and the corrected action is tapped off as the imitation
+    target. The distinction this work draws is what happens next: the projection block is deleted
+    at deployment, and what remains is the policy alone.}
+  \label{fig:shield_block}
+\end{figure}
+
+The problem is solved with OSQP~\cite{stellato2020osqp} through
+CVXPY~\cite{diamond2016cvxpy}; where CVXPY is unavailable the implementation falls back to SLSQP
+and, if that fails, to the unconstrained action while emitting a warning --- a silent fallback
+would be indistinguishable from a shield that was never needed. An intervention is recorded when
+the returned action differs from the nominal by more than $10^{-4}$, which is what the CBF
+activation rate of Section~\ref{sec:metrics} counts.
+
+Two discrete-time adjustments are required because the barrier's guarantee is continuous-time. The
+effective radius is inflated by a lag buffer covering the distance travelled between control steps
+and the inverse-kinematics tracking error; this value was tuned upward during development after
+collisions were observed at nominally safe margins. Rotation is not constrained: the barrier acts
+on the translational channel only.
+
+\section{Collision Attribution}\label{sec:attribution}
+
+The headline collision metric answers \emph{whether} the obstacle moved, not \emph{what} moved it.
+Because the barrier's authority is uneven across the robot, the distinction is essential to
+interpreting the residual, so each episode additionally records which bodies contacted the
+obstacle, grouped as gripper, arm link, held object, and other scene objects.
+
+Two cautions apply and are observed throughout Chapter~\ref{ch:results}. Contacts with other scene
+objects fire on essentially every episode, including collision-free ones, because an obstacle
+resting on its supporting surface registers a permanent contact; that category is excluded from
+analysis rather than interpreted. And the contact-graph attribution is a documented lower bound ---
+it can miss delayed or indirect pushes --- so demonstration filtering uses the raw displacement
+flag rather than the attributed one, which is the stricter choice.
+
+\section{Teachers}\label{sec:teachers}
+
+Two sources of demonstrations are compared, and the comparison between them is the central
+experiment of this work.
+
+\subsection{The Shielded Policy as Its Own Teacher}\label{sec:teacher_self}
+
+The policy is rolled out with the shield active, and episodes are retained if they succeeded,
+displaced nothing, and the shield intervened at least once. That third criterion matters: a clean
+episode in which the shield never fired is ordinary base-policy behaviour and teaches nothing about
+safety. Because the corrections are applied to actions the policy itself proposed, the
+demonstrations are located at states the policy actually reaches --- the property
+Section~\ref{sec:res:source} identifies as decisive.
+
+\subsection{A Privileged Scripted Expert}\label{sec:teacher_planner}
+
+The alternative teacher is a sampling-based motion planner: RRT-Connect in joint space with
+clearance inflation, followed by inverse kinematics and playback as operational-space deltas. It
+reads object and goal poses directly from the BDDL scene specification~\cite{liu2023libero}, and is
+safe by construction rather than by correction. Unlike the shielded policy, it plans from its own
+initial conditions and is never conditioned on where $\pi_{0.5}$ fails.
+
+\subsection{Why \texorpdfstring{$\pi_{0.5}$}{pi 0.5}, and What Was Tried First}
+\label{sec:base_choice}
+
+The base policy was not the first choice, and the reason for changing it bears on how the results
+should be read. The work began on OpenVLA-7B with a Cartesian CBF filter, and the first
+distillation attempt collected CBF-corrected demonstrations and fine-tuned that model through LoRA.
+It produced no useful learning signal.
+
+Two causes were identified, and only one is about the model. The shield was mis-configured at the
+time of collection, so the corrected actions differed only marginally from the base policy's own
+proposals --- the dataset nominally contained corrections but carried almost no correction signal,
+a failure mode invisible to any check that counts demonstrations rather than measuring how much
+they were changed. Separately, OpenVLA-7B's base competence on LIBERO is low enough that safety and
+capability failures are difficult to separate: a policy that rarely completes the task provides
+little opportunity to observe whether it completes it \emph{safely}.
+
+Both considerations pointed to the same change. $\pi_{0.5}$ has substantially stronger base LIBERO
+performance, which makes the safety question well-posed, and it is the policy the runtime-shielding
+baseline evaluates~\cite{vlsa2026}, which makes the comparison in
+Section~\ref{sec:shield_efficacy} direct. The episode is recorded because it is the origin of a
+check used throughout: demonstration sets are audited for how much the shield actually changed
+them, not merely for whether they were collected successfully.
+
+\section{Distillation}\label{sec:distillation}
+
+Retained demonstrations are behaviour-cloned using the model's native flow-matching
+loss~\cite{physicalintelligence2025pi05,black2024pi0}. Only the parameters selected by the training
+configuration's trainable filter receive gradients --- a LoRA adapter on the action head --- while
+the vision-language backbone is frozen; the saved artefact is the adapter alone, reapplied over the
+base checkpoint at load time. The imitation target is the sequence of actions actually executed,
+that is post-shield, so the policy learns the corrected behaviour rather than its own original
+proposals. Actions are normalised by passing them through the policy's own input transform, so the
+target matches the distribution the model was pretrained on rather than a hand-rolled
+normalisation.
+
+The procedure sits in the DAgger lineage~\cite{ross2011dagger}, and shares with
+SafeDAgger~\cite{zhang2017safedagger} the idea that a safe controller's interventions are
+themselves the informative signal. It is not a new algorithm; the contribution of this work is
+empirical, and Chapter~\ref{ch:background} says so explicitly.
+
+\paragraph{Comparing training runs.}
+Where two distilled policies are compared they are matched on \textbf{gradient steps}, not epochs.
+This is necessary because episode length differs between teachers: a shielded rollout at horizon
+300 yields roughly 35 training examples, while a planner episode at horizon 900 yields roughly 412.
+Matching epochs would have given one policy 16{,}140 gradient steps and the other approximately
+212{,}000, which is not a controlled comparison but a different experiment. The two students
+compared in Section~\ref{sec:res:source} were trained for 16{,}140 and 15{,}988 steps respectively.
+
+\section{Two Corrections to the Benchmark}\label{sec:benchmark_fixes}
+
+Two defects in the simulation had to be fixed before any measurement was trustworthy; both are
+reported with their evidence in Section~\ref{sec:res:benchmark}. Unused obstacles are parked
+off-scene by SafeLIBERO in a heap dense enough to overflow MuJoCo's contact buffer, and on overflow
+contacts are discarded order-dependently, making episodes non-reproducible. Separately, objects
+spawned in unsupported poses fall under gravity while the arm is stationary, and that displacement
+is charged to the robot.
+
+The fixes are to clear collision flags on parked bodies and to allow the scene to settle before
+measurement begins --- in that order, since settling before the first fix reintroduces the
+non-determinism it is meant to precede.
+
+
+\chapter{Experiments and Results}\label{ch:results}
+
+\section{Experimental Setup}
+
+All experimental work is grounded on the \texttt{SafeLIBERO} benchmark, from which three task suites were selected: Spatial, Object, and Goal. Each suite consists of two difficulty levels across four distinct task scenes, yielding a total of 24 unique scenes. Every scene contains 50 randomized initial states, split into 35 states for demonstration collection and policy training, and 15 held-out states reserved exclusively for evaluation. All reported evaluation results are conducted across 5 held-out initial states per scene, providing an evaluation sample size of $n = 120$ rollouts per policy.
+
+Rollouts are executed over a horizon of 300 control steps. The policy is queried every 5 steps, emitting an action chunk from which the subsequent 5 control actions are derived.
+
+\paragraph{Action Generation and Integration Dynamics}
+Each action chunk is generated by integrating the velocity field of $\pi_{0.5}$. Under the linear flow transport equation:
+\begin{equation}
+    x_t = t \epsilon + (1 - t) a,
+\end{equation}
+the latent variable at $t = 1$ is a Gaussian sample $\epsilon \sim \mathcal{N}(0, \mathbf{I})$, and the latent variable at $t = 0$ corresponds to the generated action $a$. Generating an action chunk thus requires numerical integration of the learned velocity field from $t = 1$ to $t = 0$, for which ten Euler integration steps are used. Following conventions in flow-matching and diffusion literature, these integration steps are referred to as \emph{denoising steps} throughout this chapter.
+
+Two distinct sources of randomness exist within this sampling procedure:
+\begin{enumerate}
+    \item \textbf{Initial Latent Noise ($\epsilon$):} The initial latent vector $\epsilon$ seeds the generation process and is always present; without it, the model has no boundary condition from which to integrate.
+    \item \textbf{Per-Step Stochastic Perturbation:} An optional per-step perturbation converts the deterministic ODE integration path into an equivalent SDE by adding fresh Gaussian noise at each of the ten denoising steps. 
+\end{enumerate}
+
+The magnitude of this per-step perturbation is governed by a parameter termed the \emph{noise level}. Except for the reinforcement learning and best-of-$N$ selection experiments, this noise level is set to zero across all evaluations. At a noise level of zero, the per-step standard deviation vanishes, reducing the sampler exactly to a deterministic ODE. Consequently, a fixed initial latent $\epsilon$ deterministically yields the identical action chunk, rendering rollouts fully reproducible from fixed initial states.
+
+This distinction is critical for two evaluation settings:
+\begin{itemize}
+    \item \textbf{Reinforcement Learning:} A non-zero noise level is strictly required. Deterministic sampling collapses probability mass onto a single point, yielding zero action log-probability variance and preventing policy gradient calculation.
+    \item \textbf{Best-of-$N$ Selection:} A non-zero noise level is necessary to ensure diversity across samples; at zero noise, all $K$ candidate samples collapse to identical actions.
+\end{itemize}
+
+\paragraph{Evaluation Metrics}
+Policy performance is evaluated across four primary metrics:
+\begin{itemize}
+    \item \textbf{Task Success Rate (TSR):} The proportion of rollouts in which the environment's goal predicate—compiled directly from the task's BDDL specification—is satisfied at any point before the horizon expires. TSR is recorded as a binary outcome per rollout based solely on authoritative environment predicates (geometric fallback evaluation is disabled throughout).
+    \item \textbf{Collision Avoidance Rate (CAR):} Defined as the fraction of completely collision-free rollouts. A collision is registered if any obstacle displacement exceeds $1\text{ mm}$ at any control step during the episode.
+    \item \textbf{Execution Time to Success (ETS):} The mean number of control steps required to complete the task, computed strictly over successful rollouts.
+    \item \textbf{CBF Activation Rate:} The fraction of control steps in which the safety shield modifies the policy's action, registered whenever the projected safe action differs from the nominal action by more than $10^{-4}$ in Euclidean norm. This metric quantifies intervention frequency rather than correction magnitude, serving as an independent indicator of safety internalization: a policy that has intrinsically learned obstacle avoidance requires fewer shield interventions when evaluated with the active safety filter attached.
+\end{itemize}
+
+All reported proportions are presented with $95\%$ Wilson score confidence intervals.
+
+\paragraph{Training Control and Alignment}
+When comparing distilled policies, training runs are matched strictly on the total number of gradient steps rather than the number of epochs. This controls for disparities in episode lengths across demonstration sources: a shielded VLA rollout over a horizon of 300 steps yields approximately 35 training samples, whereas a scripted motion planner episode over a 900-step horizon yields approximately 412 samples. Matching by epoch count would result in severe step imbalances ($16{,}140$ vs.\ $\approx 212{,}000$ gradient steps). The distilled policies compared are matched at $16{,}140$ and $15{,}988$ gradient steps respectively (a variance of $<1\%$).
+
+
+\section{Does the Shield Make \texorpdfstring{$\pi_{0.5}$}{pi 0.5} Safe?}\label{sec:shield_efficacy}
+
+The first question is whether a control barrier function shield, applied as a runtime filter, makes
+a pretrained VLA safe on this benchmark at all. Table~\ref{tab:shield_efficacy} and
+Figure~\ref{fig:shield_efficacy} report the comparison.
+
+\begin{table}[htbp]
+\centering
+\caption{Safety and task performance for base $\pi_{0.5}$ with and without the CBF runtime shield.
+  Pooled over 24 scenes, $n = 120$ held-out rollouts per condition, Wilson 95\% intervals.}
+\label{tab:shield_efficacy}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Policy} & \textbf{TSR (95\% CI)} & \textbf{Collision rate (95\% CI)} & \textbf{CAR} \\
+\midrule
+Base, no shield & 58.3\% [49.4, 66.8] & 82.5\% [74.7, 88.3] & 17.5\% \\
+Base + shield   & 71.7\% [63.0, 79.0] & 13.3\% [\phantom{0}8.4, 20.6] & 86.7\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\linewidth]{figures/shield-efficacy.png}
+  \caption{Effect of the CBF runtime shield on base $\pi_{0.5}$, pooled over all 24 scenes.
+    Error bars are Wilson 95\% intervals at $n = 120$ per condition.}
+  \label{fig:shield_efficacy}
+\end{figure}
+
+Unshielded, $\pi_{0.5}$ displaces the obstacle in 82.5\% of episodes. With the shield active this
+falls to 13.3\%, a reduction of 69 percentage points with disjoint confidence intervals.
+
+Success also rises, from 58.3\% to 71.7\%. This is not incidental: a collision frequently derails
+the episode, knocking the target object out of reach or displacing the goal, so preventing
+collisions helps the policy complete the task. This point is worth holding onto, because in
+Section~\ref{sec:res:internalise} the same shield applied to an already-avoidant policy has the
+opposite effect on success, and the two observations are only consistent once the mechanism is
+stated.
+
+\paragraph{Caveat on privileged information.}
+The barrier is constructed from ground-truth obstacle geometry taken directly from the simulator,
+not from perception. A deployed system would have to estimate that geometry from sensors and would
+inherit the resulting error. The numbers here should therefore be read as an upper bound on what
+this class of shield achieves, with the perception gap removed by construction.
+
+\paragraph{External validation.}
+The evaluation pipeline can be checked against the figures reported for $\pi_{0.5}$ by the work
+that introduced \texttt{SafeLIBERO}. Table~\ref{tab:external_validation} places the two side by
+side. The unshielded rows agree to within a fraction of a point on both metrics, which supports the
+view that this pipeline recovers the published baseline rather than producing an artefact of the
+present implementation --- a check worth making explicitly, since every subsequent result in this
+chapter is measured relative to that baseline.
+
+\begin{table}[htbp]
+\centering
+\begin{threeparttable}
+\caption[External validation against the published baseline]{%
+  External validation against the originating work. The measured figures repeat those of
+  Table~\ref{tab:shield_efficacy}; they appear again here so that each can be read directly
+  against its published counterpart. The unshielded rows agree to within a fraction of a point on
+  both metrics. The shielded rows are \emph{not} like-for-like --- see note (c).}
+\label{tab:external_validation}
+\begin{tabular}{llcc}
+\toprule
+\textbf{Condition} & \textbf{Source} & \textbf{CAR} & \textbf{TSR} \\
+\midrule
+\multirow{2}{*}{Base $\pi_{0.5}$, no shield}
+  & Published\tnote{a} & 17.3\%          & 58.9\%          \\
+  & This work\tnote{b} & \textbf{17.5\%} & \textbf{58.3\%} \\
+\addlinespace[2pt]
+\multicolumn{2}{l}{\emph{difference}} & $0.2$ pp & $0.6$ pp \\
+\midrule
+\multirow{2}{*}{With runtime CBF shield}
+  & Published\tnote{a} & 71.9\%          & 74.6\%          \\
+  & This work\tnote{b} & 86.7\%          & 71.7\%          \\
+\addlinespace[2pt]
+\multicolumn{2}{l}{\emph{difference}\tnote{c}} & $+14.8$ pp & $-2.9$ pp \\
+\bottomrule
+\end{tabular}
+\begin{tablenotes}[flushleft]\footnotesize
+\item[a] Averaged over the three suites used in this work (spatial, goal, object) from the
+  originating work's reported per-suite results in the full action space. Their printed averages
+  additionally include a Long suite and are therefore not quoted directly.
+\item[b] $n = 120$ held-out rollouts, pooled over 24 scenes. CAR is the complement of the collision
+  rate defined in Section~\ref{sec:metrics}. The originating work defines collision avoidance as
+  the proportion of strictly collision-free episodes without stating a numeric tolerance, so the
+  1\,mm threshold used here is this work's operationalisation of that definition.
+\item[c] The shielded rows are not like-for-like and the gap is expected; both causes are
+  deliberate and are discussed in the text below.
+\end{tablenotes}
+\end{threeparttable}
+\end{table}
+
+The shielded rows diverge, and the divergence is worth stating rather than smoothing: the shield
+used here is roughly fifteen points safer and three points less successful. Two deliberate
+differences in the constraint account for it. The published formulation, by its authors' own
+statement, ``solely constrains the end-effector'', and its limitations section notes that
+unconstrained kinematic links may consequently collide; the barrier used here additionally
+constrains links three through seven and the hand body (Section~\ref{sec:barrier}), and
+Section~\ref{sec:res:scope} shows that arm links are exactly where residual collisions concentrate.
+Separately, this barrier reads ground-truth geometry from the simulator, whereas the published
+layer grounds its constraints through vision-language perception and fused depth, and attributes
+its own residual collisions primarily to that upstream pipeline rather than to the controller.
+Both differences favour the shield used here, so these figures are an upper bound for this class of
+filter rather than a like-for-like improvement over that method.
+
+\section{Can the Shield's Safety Be Internalised?}\label{sec:res:internalise}
+
+A runtime filter must run forever. It occupies inference budget on every control step, requires
+obstacle geometry at deployment, and is a component that can fail. The central question of this
+work is whether the behaviour it induces can instead be absorbed into the policy, so that the
+policy is safe with the filter switched off.
+
+Demonstrations were collected by rolling out the shielded policy and retaining episodes that
+succeeded, displaced nothing, and in which the shield actually intervened at least once. That last
+criterion matters: a clean episode in which the shield never fired is ordinary base-policy
+behaviour and teaches nothing about safety. The retained set was 186 demonstrations from 480
+rollouts, a 39\% yield. These were behaviour-cloned into the policy's action head, and the
+procedure was repeated for a second round.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\linewidth]{figures/fig-internalization.png}
+  \caption[Internalisation of the shield's safety]{%
+    The central result. The self-distilled policy, running with \emph{no shield at inference}
+    (solid), is both safer and more successful than the base policy it was distilled from, and
+    recovers most of the safety of the shielded baseline (hatched). Error bars are Wilson 95\%
+    intervals at $n = 120$ held-out rollouts per condition.}
+  \label{fig:internalisation}
+\end{figure}
+
+\begin{table}[htbp]
+\centering
+\begin{threeparttable}
+\caption[Effect of self-distillation on safety and task performance]{%
+  Effect of self-distillation, with and without the shield at inference. Rows in bold are the
+  shield-free distilled policies, which are the claim of this work. $n = 120$ held-out rollouts
+  per row, pooled over 24 scenes; intervals are Wilson 95\%.}
+\label{tab:internalisation}
+\begin{tabular}{lcccrr}
+\toprule
+\textbf{Policy} & \textbf{TSR (95\% CI)} & \textbf{Collision (95\% CI)} & \textbf{CAR}
+  & $\lvert r_{\mathrm{cbf}}\rvert$\tnote{a} & \textbf{ETS}\tnote{b} \\
+\midrule
+Base, no shield        & 58.3\% [49.4, 66.8] & 82.5\% [74.7, 88.3] & 17.5\% & ---   & 138.6 \\
+Base + shield          & 71.7\% [63.0, 79.0] & 13.3\% [\phantom{0}8.4, 20.6] & 86.7\% & 0.533 & 160.6 \\
+\addlinespace[3pt]
+\textbf{Round 1, no shield} & \textbf{82.5\% [74.7, 88.3]} & \textbf{19.2\% [13.1, 27.1]}
+  & \textbf{80.8\%} & --- & 157.3 \\
+Round 1 + shield       & 70.8\% [62.2, 78.2] & \phantom{0}8.3\% [\phantom{0}4.6, 14.7] & 91.7\% & 0.265 & 170.0 \\
+\addlinespace[3pt]
+\textbf{Round 2, no shield} & \textbf{80.8\% [72.9, 86.9]} & \textbf{17.5\% [11.7, 25.3]}
+  & \textbf{82.5\%} & --- & 158.8 \\
+Round 2 + shield       & 72.5\% [63.9, 79.7] & \phantom{0}9.2\% [\phantom{0}5.2, 15.7] & 90.8\% & 0.273 & 176.7 \\
+\bottomrule
+\end{tabular}
+\begin{tablenotes}[flushleft]\footnotesize
+\item[a] Mean absolute CBF reward term, a proxy for how much the shield had to correct. Necessarily
+  zero when no shield is running, shown as ---.
+\item[b] Execution time to success, in control steps, over successful rollouts only
+  (Section~\ref{sec:metrics}). Conditional on success and must be read alongside TSR.
+\end{tablenotes}
+\end{threeparttable}
+\end{table}
+
+The headline result is the third row. With no shield running at inference, the distilled policy
+displaces the obstacle in 19.2\% of episodes, against 82.5\% for the policy it was distilled
+from~--- and its success rate rises from 58.3\% to 82.5\%. Both intervals are disjoint from the
+base policy's. The distilled policy is simultaneously safer and more capable than its own teacher,
+without the teacher's filter.
+
+It is worth noting how close this comes to the shielded baseline: CAR 80.8\% shield-free against
+86.7\% with the shield active. Most of the shield's safety benefit survives its removal.
+
+\paragraph{One round is enough.}
+Rounds one and two overlap on both metrics, so the second round buys nothing measurable. It also
+does not erode performance, which is worth stating explicitly: an earlier DAgger-style experiment
+in this project degraded across rounds (Section~\ref{sec:res:source}), and the absence of that
+degradation here is informative rather than merely convenient.
+
+\paragraph{Stacking the shield costs success.}
+Applying the shield to the distilled policy improves safety further (CAR 80.8\% to 91.7\%) but
+reduces success (82.5\% to 70.8\%). This is the mirror image of Section~\ref{sec:shield_efficacy}
+and has the same explanation. The shield operates by projecting the policy's action onto the safe
+set. When the policy frequently proposes unsafe actions, that projection is a net benefit. When the
+policy already avoids the obstacle, the projection instead perturbs actions that were already both
+safe and competent, displacing them from the distribution the policy was trained to produce~---
+safe, but no longer a well-formed grasp. The claim of this work is therefore about shield-free
+operation, not about stacking the two.
+
+\paragraph{The cost of internalised caution.}
+ETS rises from 138.6 to 157.3 steps, roughly 14\% slower. The distilled policy takes a more
+conservative route. This is a real cost and is reported rather than omitted.
+
+\paragraph{Characterising the training data.}
+Because the demonstrations are the mechanism, their content is worth quantifying. Across the 186
+retained demonstrations the shield was active on a median of 32\% of control steps, with a median
+of 51 activations per episode, a minimum of nine, and no demonstration below five. The mean
+correction norm was 0.33 against actions bounded at $\pm 1$ per axis. Roughly one imitated action
+in three was therefore modified by the barrier, and modified substantially: the imitated action
+distribution differs materially from the base policy's own.
+
+% =====================================================================================
+%  FIGURE 4.3 — qualitative filmstrip.  NOT YET BUILDABLE.
+%
+%  Intent: same scene and same held-out initial state, base pi0.5 (collides) above and the
+%  distilled policy (avoids) below, 4-5 frames each, contact frame boxed or arrowed. Every other
+%  figure in this chapter reports a rate; none shows the behaviour, so this is the largest
+%  qualitative gain available to the chapter.
+%
+%  BLOCKED ON: videos/ contains task3_ep0.mp4, task3_ep1.mp4, task3_ep3.mp4 with no record of
+%  which policy produced them, which scene they are, or whether any contains a collision. Pairing
+%  them by guesswork would risk captioning a distilled rollout as the base policy.
+%
+%  TO UNBLOCK, record for two rollouts of the SAME scene and SAME held-out init:
+%    (i) base policy, an episode that collides;  (ii) round-1 distilled, an episode that does not.
+%  Then:  PYTHONPATH=. python -m experiments.make_fig_filmstrip \
+%             --base <base.mp4> --distilled <distilled.mp4> --contact-frame <N>
+%  (that script does not exist yet either -- write it once the inputs are known.)
+%
+%  \begin{figure}[htbp]
+%    \centering
+%    \includegraphics[width=\linewidth]{figures/fig_filmstrip.pdf}
+%    \caption{...}
+%    \label{fig:filmstrip}
+%  \end{figure}
+% =====================================================================================
+\section{Does the Source of the Demonstrations Matter?}\label{sec:res:source}
+
+Section~\ref{sec:res:internalise} distilled the policy from its own shielded rollouts. An obvious
+alternative is to distil from a stronger, purpose-built expert. This section reports that
+comparison, and it is the sharpest result in this chapter.
+
+A sampling-based motion planner was implemented as a privileged expert: RRT-Connect in joint space
+with clearance inflation, followed by inverse kinematics and playback as operational-space deltas.
+Unlike the shielded policy, this expert is self-safe by construction rather than by correction. It
+produced 318 demonstrations that succeeded and displaced nothing, across 18 of the 24 scenes~---
+six scenes it could not solve at all.
+
+\begin{table}[htbp]
+\centering
+\caption{Comparison of demonstration sources for policy distillation. $n = 120$ held-out rollouts
+  per row, pooled over 24 scenes; intervals are Wilson 95\%.}
+\label{tab:demo_source_comparison}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Policy} & \textbf{TSR (95\% CI)} & \textbf{Collision rate (95\% CI)} \\
+\midrule
+Base, no shield                     & 58.3\% [49.4, 66.8] & 82.5\% [74.7, 88.3] \\
+Planner-distilled, no shield        & 54.2\% [45.3, 62.8] & 80.0\% [72.0, 86.2] \\
+Self-distilled (round 1), no shield & \textbf{82.5\% [74.7, 88.3]} & \textbf{19.2\% [13.1, 27.1]} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The planner-distilled policy is statistically indistinguishable from the undistilled base policy on
+both metrics. It learned essentially nothing.
+
+This is a controlled contrast. Both students start from the same checkpoint, are trained with the
+same objective, learning rate and batch size, are matched on gradient steps to within one percent,
+and are evaluated by the same code on the same 24 scenes and the same held-out initial states. The
+only difference is where the demonstrations came from. Distilling safety from a foreign expert
+failed; distilling it from the policy's own shielded rollouts succeeded.
+
+\paragraph{Interactive distillation, and the diagnostic that located its failure.}
+Before the offline comparison reported above, the classical expert was distilled interactively in
+the DAgger manner: the student drives, the expert labels the states the student visits, and the
+aggregated dataset is retrained. This is the textbook remedy for exactly the coverage problem
+identified below, and it made matters worse. Collision rose monotonically across rounds, from 44\%
+to 75\%, with success pinned near zero.
+
+The cause was not the coverage principle but a violated precondition. DAgger's correctness argument
+requires a Markov oracle $\pi^{*}(s)$: the expert's label must be a function of the state it is
+shown. The classical expert was implemented as a latched phase machine carrying hidden internal
+state, so when the student drove erratically the expert's phase desynchronised from the observation
+and the same image received contradictory labels across rounds. Behaviour cloning averaged them.
+
+Isolating this required ruling out the alternative, that the imitation machinery itself was broken.
+Hard-overfitting behaviour cloning on a single clean demonstration and evaluating on that same
+episode returned success $1.0$ with zero collisions, establishing that normalisation, the
+observation pipeline and adapter capacity were all sound, and that the fault lay in the labels. The
+expert was then rewritten as a stateless reactive oracle, inferring its phase from observables at
+every call~--- grasp from the measured gripper finger separation, transport from end-effector
+height~--- and validated against the original on the same episodes, where it produced identical
+outcomes episode-for-episode.
+
+The rewrite made the expert Markov, and distillation still failed. That is what moved the
+investigation from the interactive protocol to the teacher itself, and ultimately to the matched
+offline comparison reported above. It is recorded here because the negative is easy to misattribute:
+an interactive method failing against a non-Markov expert is a statement about the expert, not about
+DAgger or about coverage.
+
+\paragraph{The expert is not self-safe.}
+One measurement sharpens what the planner's demonstrations actually contain. Running the classical
+expert as the driver on spatial task~0 with the shield active gives $5/8$ success and $0/8$
+collisions. Running the same expert unshielded gives $7/8$ success and $5/8$ collisions, with
+contact from arm links, gripper, held object and scene objects alike. The safety of its
+demonstrations is therefore a property of the shield correcting it, not of the expert itself, and
+the label ``safe by construction'' applies to the planned path rather than to the executed
+trajectory.
+
+It is tempting to conclude from this that the corrections depend on state the student cannot
+observe, and that behaviour cloning must therefore average contradictory targets. That explanation
+was tested directly and rejected (Section~\ref{sec:res:mechanism}): the planner's demonstrations
+are roughly twice as well determined by the observation as the shielded ones at every matching
+radius. The teacher that fails to distil has the \emph{cleaner} observation-to-action mapping. Some
+other account is required.
+
+\paragraph{The mechanism is state coverage.}
+The account that survives concerns where the supervision sits rather than who produced it, and it
+is measurable. Figure~\ref{fig:state_coverage} takes the base policy's own visited states and asks
+how closely each demonstration set approaches them.
+
+The comparison must control for sample density, and this is not a detail. Planner episodes run to
+horizon 900 against 300 for a shielded rollout, so per scene the planner contributes roughly thirty
+times more state points, and nearest-neighbour coverage rises monotonically with density. Compared
+without that control the two sets are nearly indistinguishable, at 37.7\% against 32.8\%.
+Subsampling both to equal size per scene, averaged over 30 resamples, separates them: the shielded
+rollouts cover 37.7\% of the policy's own states within 2\,cm against the planner's 22.8\%, and
+cover better in 15 of the 18 scenes holding both demonstration types.
+
+Panel~(b) of Figure~\ref{fig:state_coverage} shows the shape of the difference. The planner is a
+scripted controller and traces near-identical paths from a given initial condition, so its
+demonstrations form tight deterministic bands; the states the policy actually visits are diffuse
+and lie largely between and around them. The two distributions are not disjoint~--- the claim is
+not that the planner visits a different region of the workspace~--- but the planner's density is
+concentrated where the policy is not.
+
+This is the distinction the contrast isolates, and it is narrower than ``foreign experts cannot
+teach''. A foreign expert can teach safety: SAFE-GIL clones an MPC or PID controller and obtains
+substantially safer policies, having first used reachability analysis to force that fixed expert to
+demonstrate recovery from the states a learner's errors would produce. The planner tested here
+received no such treatment. Its trajectories were generated from its own initial conditions and
+were never conditioned on where $\pi_{0.5}$ fails. That, rather than its foreignness, is what
+separates the two teachers.
+
+Two caveats bound the measurement. Coverage is computed on end-effector position, three of the
+eight observed dimensions, so it does not speak to joint configuration. And it is a property of the
+demonstration sets rather than a demonstration that coverage is what the policy learned from~---
+the causal claim rests on the controlled contrast in Table~\ref{tab:demo_source_comparison}, with
+the coverage measurement as its most direct available evidence.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\linewidth]{figures/fig_state_coverage.png}
+  \caption[State coverage of the base policy's own trajectories]{%
+    The mechanism, measured. Coverage is the fraction of the base policy's visited
+    end-effector states lying within 2\,cm of some demonstration state, with both
+    demonstration sets subsampled to equal size per scene (30 resamples) so that the
+    comparison is not confounded by the planner's longer episodes.
+    \textbf{(a)} One point per scene: the shielded rollouts cover the policy's own states
+    better in 15 of 18 scenes, 37.7\% against 22.8\% pooled.
+    \textbf{(b)} The same comparison on the widest-gap scene. The planner's demonstrations
+    form tight, near-deterministic trajectory bands, while the states the policy actually
+    visits are diffuse and largely elsewhere.
+    Coverage is computed on end-effector position only --- three of the eight observed
+    dimensions, and not joint configuration --- so it supports the state-coverage account
+    without exhausting it.}
+  \label{fig:state_coverage}
+\end{figure}
+
+\paragraph{Coverage limitations of the teacher itself.}
+Six of the 24 scenes contained no planner demonstrations, so roughly 30 of the 120 evaluation
+rollouts test the expert's coverage rather than the distillation itself. That gap is not random:
+per-task inspection on the spatial suite shows the expert succeeding $5/8$ and $6/8$ on the two
+table-height tasks but $0/8$ on the elevated-target task, where the goal sits on a stove and a moka
+pot obstructs the approach. Failures there occur across every phase rather than at one, which is
+the signature of a kinematic and controller-posture limit rather than of occlusion or collision
+avoidance. The teacher's competence is therefore geometry-dependent, and this is a limitation of
+the comparison rather than a property of privileged planners in general.
+
+Restricting to the 18 scenes with training data does not rescue the result~--- the pooled figure is
+already flat against base~--- but both slices should be reported, since the 24-scene number
+conflates two distinct failures: scenes where the teacher had nothing to say, and scenes where it
+spoke and was not understood.
+
+\section{What Can the Shield Not Reach?}\label{sec:res:scope}
+
+The shield reduces collisions to 13.3\% but not to zero. This section identifies what the residual
+consists of, using per-body collision attribution recovered from the evaluation logs. Contacts
+attributed to other scene objects are excluded throughout: that category fires on every episode of
+every condition, including collision-free ones, because an obstacle resting on its supporting
+surface registers a permanent contact.
+
+\begin{table}[htbp]
+\centering
+\begin{threeparttable}
+\caption[Residual collisions by culprit body]{%
+  Per-body attribution of collisions. Counts are episodes out of $n = 120$ in which the named body
+  was implicated. Categories are not mutually exclusive, so a row need not sum to its collided
+  count.\tnote{a}}
+\label{tab:culprits}
+\begin{tabular}{lrrrrr}
+\toprule
+\textbf{Policy} & \textbf{Episodes} & \textbf{Collided} & \textbf{Gripper} & \textbf{Arm link}
+  & \textbf{Held object} \\
+\midrule
+Base, no shield        & 120 & 99 & 71          & 17 & 36 \\
+Base + shield          & 120 & 16 & \textbf{0}  & 15 & \phantom{0}0 \\
+\addlinespace[2pt]
+Round 1, no shield     & 120 & 23 & \phantom{0}7 & 13 & \phantom{0}9 \\
+Round 1 + shield       & 120 & 10 & \textbf{0}  & \phantom{0}8 & \phantom{0}1 \\
+\addlinespace[2pt]
+Round 2, no shield     & 120 & 21 & \phantom{0}8 & \phantom{0}8 & \phantom{0}7 \\
+Round 2 + shield       & 120 & 11 & \textbf{0}  & \phantom{0}9 & \phantom{0}0 \\
+\bottomrule
+\end{tabular}
+\begin{tablenotes}[flushleft]\footnotesize
+\item[a] For example the base row records 124 attributions across 99 collided episodes, because a
+  single episode may implicate more than one body.
+\end{tablenotes}
+\end{threeparttable}
+\end{table}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\linewidth]{figures/fig_culprits.png}
+  \caption[Collision attribution by body across conditions]{%
+    What the shield reaches. The end-effector channel is eliminated wherever the shield is running
+    (shaded columns): zero gripper collisions across all 360 shielded episodes. Arm-link contacts
+    survive it almost unchanged. Bars are grouped rather than stacked because the categories
+    overlap, and the dotted line marks the number of episodes with any collision at all.}
+  \label{fig:culprits}
+\end{figure}
+
+\paragraph{The shield eliminates the end-effector channel completely.}
+Gripper collisions fall from 71 to zero, and across all 360 shielded episodes there is not a single
+one. Of the 16 residual collisions in the shielded baseline, 15 involve an arm link.
+
+\paragraph{The residual is a fidelity limit, not a scope limit.}
+Arm links are not absent from the barrier: links three to seven and the hand are constrained
+(Section~\ref{sec:barrier}). But they are represented far more coarsely than the end-effector ---
+three point samples per link carrying a single sphere radius, against three fitted spheres for the
+hand and fingers. More importantly, an arm link's velocity is not the quantity the quadratic
+program optimises. The program solves for an end-effector velocity and infers link motion through a
+damped Jacobian pseudo-inverse, so the constraint is enforced against a \emph{predicted} link
+velocity that diverges from the realised one wherever the inverse is ill-conditioned or the
+controller's null-space motion differs from the minimum-norm solution.
+
+The pattern in Table~\ref{tab:culprits} is therefore the expected one: collisions are eliminated
+exactly where the barrier's model of the robot is precise and its velocity is the controlled
+variable, and they persist where the model is coarse and the velocity is estimated. The corollary
+for reading Section~\ref{sec:res:internalise} still holds --- the distilled policy's shield-free
+figure is within a few points of what its teacher actually achieved, not a degraded approximation
+of a perfect one --- but the teacher's own ceiling is set by approximation error in the constraint,
+not by an absence of authority.
+
+\paragraph{A second transfer channel.}
+Arm-link collisions fall from 17 to 8 between the base and twice-distilled policies, while the
+shielded baseline --- with the arm-link constraints active --- still shows 15. The improvement is
+therefore not inherited from the barrier's own arm-link performance, which is worse than the
+student's. It must come instead from the selection criterion: demonstrations were retained only if
+nothing at all was displaced, arm links included, and the student learned that. Safety appears to
+transfer through two distinguishable channels --- imitation of the filter's corrections where the
+filter has authority, and outcome selection where it does not.
+
+This second channel is stated with less confidence than the first. As proportions, 17/120 against
+8/120 is 14.2\% [9.0, 21.5] versus 6.7\% [3.4, 12.6]; those Wilson intervals overlap, so the
+arm-link trend is suggestive rather than established. The gripper result is not in doubt.
+
+\paragraph{Independent corroboration.}
+A separate experiment measured the end-effector's closest approach to the obstacle during level-II
+episodes that were scored as collisions. The minimum was 0.231\,m against a barrier radius of
+0.15\,m: the end-effector never came close, yet the episode collided. Together with the attribution
+table and the inert guided-sampling result of Section~\ref{sec:res:channels}, three independent
+measurements point at the same conclusion.
+
+
+\section{What Explains the Improvement?}\label{sec:res:mechanism}
+
+Section~\ref{sec:res:internalise} showed that distilling the shielded policy's own clean rollouts
+makes it dramatically safer without the shield. It does not, on its own, establish \emph{why}. The
+demonstrations were filtered on three properties at once --- the shield fired, the episode
+succeeded, and nothing was displaced --- and two mechanisms are bundled inside that filter.
+
+Under the first, \textbf{distillation}, the policy imitates the shield's avoidance corrections.
+This is the claim of this work. Under the second, \textbf{selection}, the improvement comes from
+training a policy on its own successful episodes, a known self-improvement effect requiring no
+shield at all; successful episodes also happen to be the ones in which nothing was knocked over. If
+the second mechanism accounts for the result, the shield is incidental and the contribution is a
+rediscovery of filtered behaviour cloning.
+
+Nothing in the six-condition evaluation of Section~\ref{sec:res:internalise} distinguishes them, so
+a matched control was run.
+
+\subsection*{The matched control}
+
+Demonstrations were collected with the shield \textbf{switched off}, filtered by exactly the same
+criteria --- succeeded and displaced nothing --- and used to train a student with identical
+hyperparameters. The shielded pool was then subsampled to the same size, so the two conditions
+differ in one respect only: whether the shield was active while the demonstrations were being
+generated.
+
+\begin{table}[htbp]
+\centering
+\caption{The matched control. Both distilled conditions use 85 demonstrations passing an identical
+  filter; they differ only in whether the shield was active during collection. $n = 120$ held-out
+  rollouts per row, Wilson 95\% intervals.}
+\label{tab:matched_control}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Condition} & \textbf{Demos} & \textbf{TSR (95\% CI)} & \textbf{Collision (95\% CI)} \\
+\midrule
+Undistilled base & ---            & 58.3\% [49.4, 66.8] & 82.5\% [74.7, 88.3] \\
+Control, shield \textbf{off}  & 85 & 50.0\% [41.2, 58.8] & 84.2\% [76.6, 89.6] \\
+Matched, shield \textbf{on}   & 85 & \textbf{75.8\% [67.4, 82.6]} & \textbf{26.7\% [19.6, 35.2]} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\linewidth]{figures/fig_matched_control.png}
+  \caption[The matched control: selection versus correction]{%
+    Separating selection from correction. Training on the policy's own successful, collision-free
+    episodes (centre) leaves it indistinguishable from the undistilled baseline. Applying the same
+    filter to demonstrations collected while the shield was active (right) produces the effect.
+    Since the two distilled conditions use the same number of demonstrations, the same filter and
+    the same hyperparameters, the difference is attributable to the shield.}
+  \label{fig:matched_control}
+\end{figure}
+
+\paragraph{Success-filtering alone achieves nothing.}
+The control sits at 84.2\% collision, statistically indistinguishable from the undistilled base
+policy at 82.5\%. Training a policy on its own successful, collision-free episodes did not make it
+safer on this benchmark.
+
+\paragraph{The shield's corrections are what transfers.}
+At the same demonstration count and under the same filter, the shielded condition reaches 26.7\%,
+with a confidence interval disjoint from the control's. The difference between the two conditions
+is attributable to the shield and to nothing else in the pipeline. This is the experiment that
+answers the most natural objection to Section~\ref{sec:res:internalise}, and it answers it directly
+rather than by argument.
+
+\paragraph{Two further pieces of evidence.}
+The conclusion is corroborated by two measurements taken for other purposes. First, the CBF
+activation proxy falls from 0.533 to 0.265 between the shielded base and the shielded distilled
+policy: after distillation the shield finds materially less to correct. Success-filtering alone
+does not predict this --- a policy that merely completes tasks more often would not require
+\emph{less} safety intervention. Second, the demonstrations are pervasively shield-shaped, with the
+barrier active on a median 32\% of control steps and a mean correction norm of 0.33 against actions
+bounded at $\pm 1$, so the imitated action distribution differs substantially from the base
+policy's own.
+
+\paragraph{A nuance worth preserving.}
+The control is not uniformly inert. Its per-body attribution shows arm-link collisions falling from
+17 to 6 while gripper collisions remained high at 44, which is why the total did not move. Outcome
+selection therefore \emph{does} transfer avoidance in the channel the barrier cannot express ---
+exactly the second transfer channel identified in Section~\ref{sec:res:scope} --- but it is not
+sufficient on its own. The two mechanisms are complementary rather than competing, and only one of
+them addresses the end-effector channel that dominates the collision count.
+
+\paragraph{The cost of collecting without a shield.}
+One further number deserves reporting. The unshielded collection retained 85 usable demonstrations
+from 480 rollouts, a yield of 18\%, against 39\% for the shielded collection. Safe demonstrations
+are roughly twice as expensive to obtain without a shield. This is a second, independent sense in
+which the shield earns its place: beyond supplying the corrections that transfer, it makes the
+collection of a safe demonstration set tractable in the first place.
+
+\subsection*{Two alternative explanations tested and rejected}
+
+Section~\ref{sec:res:source} established that distilling from a foreign expert fails while
+self-distillation succeeds. Two explanations for that boundary were tested directly, and both were
+rejected.
+
+\paragraph{Observation aliasing.}
+Earlier analysis in this project attributed the failure to the policy's observation space:
+$\pi_{0.5}$ sees an image and eight proprioceptive dimensions, with no joint angles, so a
+correction depending on the full arm configuration is not a function of anything the policy
+observes, and behaviour cloning would average contradictory targets. This was asserted but never
+measured, and it is measurable from the demonstration files alone. For each dataset, samples whose
+observations are near neighbours were found and the disagreement between their target actions
+measured, normalised by the disagreement between random pairs. Comparison is made at matched
+observation \emph{radius} rather than matched neighbour count, because a nearest-neighbour ratio
+conflates aliasing with sampling density and the planner's trajectories are far denser.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.72\linewidth]{figures/fig_aliasing.png}
+  \caption[Observation aliasing does not explain the transfer failure]{%
+    A prediction of this project, refuted by its own data. If the planner's corrections were
+    poorly determined by what the policy observes, its curve would lie \emph{above} the shielded
+    one. It lies consistently below, by a factor of roughly two at every radius: the teacher that
+    fails to distil has the cleaner observation-to-action mapping.}
+  \label{fig:aliasing}
+\end{figure}
+
+\begin{table}[htbp]
+\centering
+\caption{Action disagreement among observation-neighbours, normalised by random-pair disagreement.
+  Lower values mean the action is better determined by the observation.}
+\label{tab:aliasing}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Radius (z-scored)} & \textbf{Shielded (distils)} & \textbf{Planner (does not)} \\
+\midrule
+0.10 & 0.103 & 0.051 \\
+0.25 & 0.174 & 0.093 \\
+0.50 & 0.237 & 0.118 \\
+1.00 & 0.376 & 0.174 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The ordering is the reverse of the prediction. The planner's demonstrations are roughly twice as
+\emph{well} determined by the observation at every radius: the teacher that fails to distil has the
+cleaner observation-to-action mapping, and the teacher that succeeds is the more aliased of the
+two. In hindsight the direction is unsurprising --- a scripted planner is close to a deterministic
+function of state --- but it means aliasing is not the binding constraint, and the prior
+explanation does not survive contact with the data. The prediction was recorded before the planner
+figure was computed. The surviving candidates are distribution shift and action-distribution
+mismatch, and Section~\ref{sec:res:source} takes up the first of them.
+
+\paragraph{Generative uncertainty as a collision predictor.}
+$\pi_{0.5}$ produces each action by integrating a flow ordinary differential equation, and every
+rollout stores that denoising chain. If the policy were less certain in states where safe and
+unsafe behaviours are both plausible, the chain geometry would carry a risk signal, and a runtime
+monitor could use it with no barrier and no obstacle geometry. Scored as the area under the ROC
+curve for predicting whether an episode collided, the result is negative: 0.461 for the base
+policy, which is chance. The distilled policy shows a consistent inverted association across all
+three chain statistics (AUC 0.350, equivalently 0.65 when flipped, so \emph{lower} uncertainty is
+associated with collision), but on 23 collision episodes that is roughly two standard errors from
+chance and far short of deployable. The suggestive reading, if it is real, is that the distilled
+policy's failures are \emph{confident} ones, which would make uncertainty-based monitoring
+structurally unsuited to this failure mode.
+
+\section{Are There Other Channels for Safety?}\label{sec:res:channels}
+
+Four further mechanisms were tested and none replaced the shielded-imitation route. They are
+reported together because a characterised negative bounds the claim of this work in a way a
+positive result cannot, and because each fails for a different and identifiable reason.
+Table~\ref{tab:negatives} summarises them; the subsections give the evidence.
+
+\begin{table}[htbp]
+\centering
+\begin{threeparttable}
+\caption[Mechanisms tested and rejected]{%
+  Mechanisms tested and rejected, with the scope at which each negative is claimed. None is a
+  general claim about its method class.}
+\label{tab:negatives}
+\footnotesize
+\begin{tabular}{p{0.17\linewidth}p{0.24\linewidth}p{0.22\linewidth}p{0.27\linewidth}}
+\toprule
+\textbf{Mechanism} & \textbf{What was tested} & \textbf{Outcome} & \textbf{Scope of the negative} \\
+\midrule
+Scalar-reward RL
+  & Flow-SDE GRPO on the action head, 4 configurations $\times$ 6 rounds, one scene
+  & Either collapses to inaction or learns nothing; no setting does both
+  & The reward design and budget tested. Not safe RL as a class; constrained-MDP and
+    world-model methods supply richer signals \\
+\addlinespace[3pt]
+Language-expressed constraint
+  & One safety clause appended to the instruction, $n=60$ per condition, level II
+  & No safety change; 23\% slower, 11.7 points less successful
+  & The single phrasing tested: generic, unnamed referent, manner adverbial \\
+\addlinespace[3pt]
+CBF-guided sampling
+  & Barrier gradient injected into the flow integration, validated on a synthetic barrier
+  & Never activates on real scenes; closest approach 0.231\,m against a 0.15\,m barrier
+  & Guidance built on an \emph{end-effector} barrier. Untested with the full arm-link
+    constraint set \\
+\addlinespace[3pt]
+Best-of-$N$ selection
+  & $K \in \{4, 8\}$ candidates re-simulated per query, exact state rewind
+  & No safe candidate on $\sim$60\% of queries; doubling $K$ buys 8.8 points
+  & This policy and benchmark. The measurement it yields is reported as the result \\
+\bottomrule
+\end{tabular}
+\begin{tablenotes}[flushleft]\footnotesize
+\item Two further \emph{explanations}, as opposed to mechanisms, were also tested and rejected in
+  Section~\ref{sec:res:mechanism}: observation aliasing and generative uncertainty.
+\end{tablenotes}
+\end{threeparttable}
+\end{table}
+
+\subsection*{Scalar-reward reinforcement learning}
+
+Reinforcement learning was tried first, and its failure is what motivated the imitation approach
+that the rest of this chapter evaluates. It is reported at length because the failure is
+structural, and because four runs are needed to establish that.
+
+The setup was flow-SDE GRPO on $\pi_{0.5}$'s flow-matching action head: the deterministic sampling
+ODE is converted to an equivalent SDE so that log-probabilities exist and a policy gradient can be
+taken. A LoRA adapter on the action head received gradients with the backbone frozen, matching the
+trainable surface used for distillation in Section~\ref{sec:res:internalise}, so the comparison
+between the two learning signals is not confounded by capacity. Rollouts used the CPS sampler at
+noise 0.7 with ten denoising steps and clipping 0.2, on one level-II scene, with $K = 8$ rollouts
+per group over six rounds. The reward combined success, direct collision, CBF activation rate and
+progress terms.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\linewidth]{figures/fig_rl_bracket.png}
+  \caption[Scalar-reward RL bracketed from both sides]{%
+    The two informative configurations. \textbf{Left:} admitting real collisions to the reward
+    moves the policy, and it collapses --- success reaches zero \emph{in the shielded condition
+    too}, which the shield alone cannot cause, so the policy has found the trivial zero-collision
+    optimum of doing nothing. \textbf{Right:} a lower learning rate with an annealed shield fixes
+    the collapse and learns nothing, with unshielded collision pinned at 1.0 for six rounds.
+    Neither panel alone is an argument; together they are the two sides of one knob.}
+  \label{fig:rl_bracket}
+\end{figure}
+
+\paragraph{Too weak.}
+With the shield active on every rollout, collisions never enter the reward directly --- the shield
+prevents them --- so the only safety signal is the CBF activation penalty. Raising the learning
+rate to $5 \times 10^{-5}$ and the activation weight to 1.5 left the policy flat.
+
+\paragraph{Too strong.}
+Running half of each group's rollouts unshielded puts real collisions into the reward, widening the
+within-group spread to roughly $\Delta = 1.0$. The safety metric improved immediately and the task
+collapsed with it. Two causes compound: the adapter diverged, since the mixed reward is far higher
+variance than the flat one at the same learning rate; and the collision penalty punishes progress,
+because in these scenes the obstacle lies between the gripper and the goal, so nearly all forward
+motion collides early in training.
+
+\paragraph{What the bracket establishes.}
+The only configuration that moved the policy's behaviour collapsed it; every configuration stable
+enough to preserve the task learned no avoidance. That is not a gap between two tuned settings but
+the two sides of a single one. The learning signal and the destabilising signal are the same knob,
+for two compounding reasons. A single scalar episode reward gives no per-step spatial credit, so
+the policy cannot separate ``detour around the obstacle'' from ``stop moving toward the goal'' when
+the obstacle lies on the path to the goal. And in a flow-matching policy, exploration \emph{is}
+sampling noise, which is also what degrades the actions being evaluated.
+
+This is precisely what the shield supplies and the reward does not. The barrier already computes
+the correct action at every step it intervenes, in the same space the policy emits, so the credit
+assignment the reward could not infer is simply given.
+
+\subsection*{Safety expressed in language}
+
+Every mechanism examined so far acts on the action. A vision-language-action model exposes a
+channel none of them use, and one a classical controller does not possess at all --- the
+instruction itself.
+
+The experiment is minimal by design: the same checkpoint, seed, held-out initial states and
+evaluation code for both conditions, differing only in a clause appended to the instruction. Twelve
+level-II scenes at five initial states each give $n = 60$ per condition; level II was chosen
+because collisions concentrate there.
+
+\begin{quote}\small
+\textbf{plain:} \texttt{pick up the black bowl between the plate and the ramekin and place it on
+the plate}\\[3pt]
+\textbf{safety:} \texttt{\dots{} and place it on the plate, being careful not to touch or knock
+over any other objects}
+\end{quote}
+
+The suffix is reproduced verbatim because a negative about language is only as strong as the
+language tested. The phrasing is generic: it names no object, gives no spatial reference, and
+states the constraint as a manner adverbial rather than a prohibition. Each is a design choice that
+could plausibly matter, and none was varied.
+
+\begin{table}[htbp]
+\centering
+\caption{Effect of appending a safety clause to the instruction. $n = 60$ per condition, twelve
+  level-II scenes, Wilson 95\% intervals.}
+\label{tab:language}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Condition} & \textbf{TSR (95\% CI)} & \textbf{Collision (95\% CI)} & \textbf{ETS} \\
+\midrule
+Plain instruction       & 66.7\% [54.1, 77.3] & 70.0\% [57.5, 80.1] & 132.4 \\
+Safety clause appended  & 55.0\% [42.5, 66.9] & 68.3\% [55.8, 78.7] & 162.4 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Collisions fall by 1.7 percentage points, with almost coincident intervals. But the policy is not
+ignoring the text: execution time rises 23\% and success falls 11.7 points, while the per-body
+attribution shows no meaningful redistribution. The policy responds to the safety clause by acting
+more slowly and completing fewer tasks, without touching anything less often.
+
+The natural reading is that safety language elicits a general behavioural prior --- hesitancy,
+reduced speed --- rather than a grounded avoidance behaviour. The model has learned that
+safety-flavoured instructions correspond to cautious-looking motion, and that association is not
+connected to the geometry of the scene. It produces the appearance of caution without its
+substance. The distinction matters: it separates ``the model ignores safety language'' from ``the
+model responds to safety language but does not ground it'', and only the second says anything about
+what such a channel would need.
+
+\subsection*{CBF-guided sampling}
+
+The shield corrects an action after the policy has produced it. A flow-matching policy offers an
+earlier point of intervention: the action is generated by integrating an ODE over several denoising
+steps, so a barrier gradient can be injected \emph{into} that integration, steering generation
+toward safe actions rather than projecting unsafe ones afterwards.
+
+The implementation was validated before deployment, because two sign and scheduling conventions
+produce plausible-looking but incorrect behaviour. On a synthetic barrier with a known closed-form
+projection, $\lambda = 1$ reproduces the projection endpoint exactly.
+
+On real scenes it never fired. Across level-II episodes the end-effector's closest approach to the
+obstacle was 0.231\,m against a barrier radius of 0.15\,m --- the guidance term was identically
+zero for the entire rollout --- while those same episodes collided. The reason is the one
+Section~\ref{sec:res:scope} identifies: the barrier is a function of the end-effector, and the
+contacts that occur are made by the arm links. Guidance inherits the scope of the barrier it steers
+by, so steering generation cannot reach a failure the barrier cannot see. This is a scope-limited
+negative, and it would be worth revisiting on a barrier carrying the full arm-link constraint set.
+
+\subsection*{Best-of-$N$ selection, and what it measured instead}
+
+If safety varied across the actions a policy might sample from a given state, it could be obtained
+by rejection: draw $K$ candidate action chunks, simulate each, execute the safest. The sampler must
+be stochastic for candidates to differ, so the matched control is $K = 1$ at the same noise level
+rather than the deterministic policy used elsewhere in this chapter. Making the measurement
+trustworthy required the simulator to be rewound exactly between candidates; snapshot and restore
+were verified to machine precision before any result was recorded.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.82\linewidth]{figures/fig_bon_correlation.png}
+  \caption[Within-state safety correlation in a VLA policy]{%
+    Why rejection sampling cannot help here. In every configuration the fraction of individually
+    safe candidates coincides with the fraction of queries in which \emph{all} $K$ are safe, so a
+    query is $0$-of-$K$ or all-of-$K$ safe and almost never in between. Independent sampling would
+    make the all-$K$-safe rate two to three orders of magnitude smaller (right-hand bars).}
+  \label{fig:bon}
+\end{figure}
+
+As a method this is negative: on roughly 60\% of queries no candidate was safe, and buying more
+candidates barely moved it --- doubling $K$ from four to eight recovered 8.8 percentage points for
+twice the compute, and raising the noise recovered 3.7.
+
+The measurement underneath it is the more interesting result. The mean safe fraction and the
+all-$K$-safe fraction coincide in all three configurations. Were the candidates independent draws,
+the all-$K$-safe rate would be $p^{K}$: 1.1\% at $K = 4$ and 0.08\% at $K = 8$, against observed
+values of 32\% and 41\%. The policy's samples from a given state are therefore near-perfectly
+correlated in their safety outcome.
+
+Safety in this policy is consequently \textbf{state-determined rather than sample-determined}, at
+least on this benchmark. Once a state is reached the outcome is largely fixed, and no amount of
+choosing among actions recovers it --- the leverage lies in not reaching the state. This also
+explains a result that would otherwise look inconsistent: episode-level filtering worked
+(Section~\ref{sec:res:mechanism}) while action-level selection cannot, because episode-level
+selection chooses between trajectories that reached \emph{different states}, which is the axis
+along which variation actually exists.
+
+The correlation measurement is offered here as the contribution rather than the selection method.
+It is, as far as this work is aware, the first measurement of candidate-level safety correlation in
+a vision-language-action policy, and it is the sharpest available statement of the reachability
+theme running through Sections~\ref{sec:res:scope}, \ref{sec:res:mechanism} and the discussion that
+follows.
+
+
+
+\section{Does a privileged scripted teacher do better?}
+% The per-scene teacher work. Honest answer: no, and the action-distribution
+% mismatch explains why.
+
+\section{Ablations}
+% Success filter on/off; shield-active filter; number of DAgger rounds.
 
 % ============================================================================
-\chapter{Experiments and Results}\label{ch:results}
-% BUDGET ~9 pages. Organised by QUESTION, not by experiment: questions are stable, experiments
-% accumulate under them. Each section follows the same template --- setup, table, how to read it,
-% caveat --- so a new result is a fill-in rather than a restructure. Sections live in
-% thesis/sections/ so adding one is a new file plus one \input line.
-
-\input{sections/res_setup}
-\input{sections/res_q1_shield}
-\input{sections/res_q2_internalise}
-\input{sections/res_q3_source}
-\input{sections/res_q4_scope}
-\input{sections/res_q5_mechanism}
-\input{sections/res_q6_channels}
-\input{sections/res_benchmark}
-
 \chapter{Discussion}\label{ch:discussion}
-% BUDGET ~3 pages. "Critical analysis of method and results" is an explicit
-% marking criterion — this chapter is worth real marks. Do not skip the
-% limitations; naming them yourself reads as strength, not weakness.
 
-\section{Why imitation succeeds where scalar-reward RL fails}
-\section{The cost of internalised caution}
-% Success erodes across DAgger rounds. Explain the mechanism.
-\section{Limitations}
-% Simulation only; privileged geometry; OSC_POSE action-space limits on the
-% wedged-object tasks; single seed where applicable.
-\section{Future work}
+\section{Why Imitation Succeeds Where Scalar-Reward RL Fails}\label{sec:disc:mechanism}
+
+Both approaches attempted in this work aim at the same target --- move the policy toward the
+behaviour the shield induces --- and they differ in the signal used to do it.
+
+Scalar-reward reinforcement learning communicates that target through a single number per
+trajectory. The policy must infer, from a reward that fell, which of several hundred actions was
+responsible. In a flow-matching policy the only lever available for that inference is the sampling
+noise: exploration and credit assignment are the same knob. Increasing the noise enough to
+distinguish good actions from bad also degrades the actions being evaluated, so the signal that
+drives learning is the signal that destabilises it. This is not a tuning difficulty but a
+structural one, and Section~\ref{sec:res:channels} brackets it from both sides: the single
+configuration that moved the policy's behaviour collapsed it to inaction, with success reaching
+zero even in the shielded condition, while every configuration stable enough to preserve the task
+left the unshielded collision rate pinned near 1.0 across six rounds. Those are not two tuned
+settings with a working point between them; they are the two sides of one knob.
+
+Imitation replaces the scalar with a dense, per-step target. The shield does not report that a
+trajectory was unsafe; it reports what should have been done instead, at every control step where
+it intervened, in the same action space the policy emits. Credit assignment is therefore not
+inferred but given. The learning signal is also on-distribution by construction: the corrected
+actions were produced from states the policy itself visited, so the supervision does not require
+the policy to be evaluated in regions it never reaches.
+
+There is a sharper control on this point in the literature, and it is the reason the result
+reported here is not a foregone conclusion. Guerrier et al.\ train a reinforcement-learning agent
+with a CBF filter active throughout training and then remove it, which is superficially the same
+protocol used here~\cite{guerrier2025guardrails}. Their agent does not internalise the constraint:
+with the filter disabled it collides, and their critic visualisation shows high positive value
+\emph{inside} the obstacle, meaning the policy never represented the hazard at all. The shield had
+been present for the entire training run.
+
+The difference is what the policy was trained on. Their agent's actions are overridden by the
+filter but the learning signal remains a scalar reward; no gradient ever points toward the
+corrected action. The method here behaviour-clones the corrected action itself, so the correction
+is the target rather than an intervention the policy is merely subjected to. Their result therefore
+establishes something this work depends on: exposure to a shield during training does not by itself
+transfer safety, and the imitation objective is doing the work. It also disposes of the obvious
+deflationary reading of Chapter~\ref{ch:results} --- that any policy trained under a shield would
+end up safe. Their curriculum variant, in which the executed action is a blend of filter and policy
+with the filter's weight decayed to zero, does internalise both goal-reaching and obstacle
+avoidance, which suggests the present result is an instance of something more general rather than a
+property of behaviour cloning specifically.
+
+\subsection*{What the Boundary Result Does and Does Not Show}
+
+The measured contrast in Section~\ref{sec:res:source} sharpens this. Cross-policy distillation,
+where the targets were dense and per-step but came from a \emph{foreign} expert, failed as
+completely as reinforcement learning did. Dense supervision is therefore not sufficient on its own
+--- it must also be supervision at states the policy actually reaches.
+
+It is tempting to state this more strongly, as the claim that what transfers is correction of the
+policy's own behaviour and never instruction from outside it. That claim would be false, and the
+literature already falsifies it. SAFE-GIL trains a behaviour-cloning policy on demonstrations from
+an MPC or PID expert --- foreign controllers, not the learner --- and obtains substantially safer
+policies than vanilla behaviour cloning~\cite{ciftci2025safegil}. What makes those demonstrations
+work is not the teacher's identity but where they are collected: Hamilton--Jacobi reachability
+computes the disturbance that most steers the system toward failure, that disturbance is injected
+during collection, and the fixed expert is thereby forced to demonstrate recovery from precisely
+the states a learner's errors would produce. Their ablation confirms that this targeting is the
+active ingredient, since Gaussian noise, uniform noise and DART all fail to reproduce the benefit.
+
+IntervenGen reaches the same place by a different route. It rolls out the \emph{current} policy in
+new scene configurations so that the mistakes it records are that policy's genuine failures rather
+than replayed ones, detects each mistake on contact, and transforms a \emph{human} recovery segment
+onto the state reached~\cite{hoque2024intervengen}. The recovery actions are again foreign to the
+policy; only the states are its own. Two methods, with different teachers --- an optimal controller
+in one case, a human operator in the other --- and different means of arriving at the failure
+states, therefore locate the active ingredient in the same place.
+
+The correct reading of Section~\ref{sec:res:source} is consequently narrower and more useful. The
+planner did not fail because it was foreign. It failed because its trajectories were generated from
+its own initial conditions and were never conditioned on where $\pi_{0.5}$ goes wrong, so at
+matched sampling it covers the states the student reaches substantially less well ---
+Figure~\ref{fig:state_coverage}. The shield succeeded because its corrections are applied, by
+construction, at states the policy reached on its own. The operative variable is the \emph{state
+distribution the supervision covers}, and self-distillation is one way, not the only way, of
+guaranteeing that coverage. Its practical advantage over the adversarial route is that no
+disturbance model is needed, because the policy visits its own failure states unprompted.
+
+\section{The Cost of Internalised Caution}\label{sec:disc:cost}
+
+Internalised safety is not free, and this work measured its price in two forms.
+
+The first is time. The distilled policy takes 157.3 control steps to complete a task against 138.6
+for the base policy, roughly 14\% slower. It takes a more conservative route, and on a benchmark
+where speed is not scored, that cost is invisible in the headline metrics. In a production setting
+with cycle-time targets it would not be.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\linewidth]{figures/fig_stacking.png}
+  \caption[The cost of combining mechanisms]{%
+    The same shield helps one policy and harms the other. Attaching it raises the base policy's
+    success by 13.3 points and lowers the distilled policy's by 11.7; the lines cross. The reversal
+    is confined to the success channel --- collisions fall in both cases --- so safety and
+    capability come apart, and only one of them reverses.}
+  \label{fig:stacking}
+\end{figure}
+
+The second is more interesting, because it is a cost of \emph{combining} mechanisms rather than of
+distillation itself. Applying the shield to the already-distilled policy improves safety further
+(CAR 80.8\% to 91.7\%) but reduces success from 82.5\% to 70.8\%. The mechanism is visible in how
+the shield works: it projects the proposed action onto the safe set, minimising deviation subject
+to the barrier constraint. When the policy frequently proposes unsafe actions that projection is a
+net benefit --- which is exactly what Section~\ref{sec:shield_efficacy} shows, where the shield
+\emph{raises} base success from 58.3\% to 71.7\%. When the policy already avoids the obstacle, the
+same projection perturbs actions that were already both safe and competent, displacing them from
+the distribution the policy was trained to produce. The result is an action that satisfies the
+barrier and no longer executes a well-formed grasp.
+
+This effect is not peculiar to the setup here. The authors of the benchmark report the same
+phenomenon independently, observing that enforcing safety with their layer can drive the system
+into out-of-distribution states in which the policy may behave erratically and fail to
+recover~\cite{vlsa2026}. That an author-acknowledged limitation of runtime shielding is precisely
+what distillation removes is, if anything, the clearest argument for internalisation: the distilled
+policy is safe without ever being pushed off its own distribution.
+
+Notably, the anticipated cost did not appear. A second distillation round neither improved nor
+eroded performance, in contrast to an earlier DAgger-style experiment in this project that degraded
+across rounds (Section~\ref{sec:res:source}). One round was sufficient, and iterating was not
+harmful.
+
+\section{Limitations}\label{sec:disc:limitations}
+
+\paragraph{Simulation only.}
+Every result is from SafeLIBERO. No physical robot was used and no claim of sim-to-real transfer is
+made. The two benchmark defects documented in Section~\ref{sec:res:benchmark} are themselves a
+reminder that a simulator's measurements are artefacts of its implementation as much as of the
+policy under test.
+
+\paragraph{No formal guarantee is inherited.}
+The student is no longer protected by the online constraint satisfaction that establishes forward
+invariance~\cite{ames2017cbf}, and this work does not establish a replacement. Conditions under
+which a learned controller inherits input-to-state safety from a CBF-based expert do
+exist~\cite{cosner2022il_cbf}, but they are demanding and none is met here: they require a robust
+CBF-QP expert with explicit disturbance margins, where the shield used here is a nominal QP with an
+empirically tuned lag buffer; they require known control-affine dynamics, where the plant is a
+seven-degree-of-freedom arm under operational-space control with contact; and they require a
+CBF-compliancy condition on data density along the safe-set boundary, bounded learning error, and a
+known Lipschitz constant, none of which holds for a three-billion-parameter flow-matching policy.
+Even when satisfied, the guarantee holds on an expanded safe set that degrades with data sparsity.
+What is demonstrated here is an empirical reduction in collisions, and it should be described that
+way.
+
+\paragraph{Privileged geometry.}
+The barrier is constructed from obstacle poses and meshes read directly from the simulator. A
+deployed system would estimate that geometry from perception and inherit the resulting error, so
+every shielded figure reported here is an upper bound for this class of filter. The distilled
+policy uses no geometry at inference --- a point in favour of internalisation --- but the
+dependency remains during \emph{training}.
+
+\paragraph{Approximate robot model.}
+The barrier represents the end-effector with three fitted spheres and each arm link with three
+point samples carrying a single radius, and infers link velocities through a damped Jacobian
+pseudo-inverse rather than optimising them directly (Section~\ref{sec:barrier}).
+Section~\ref{sec:res:scope} argues the residual collisions concentrate where that model is
+coarsest; that argument is an interpretation of the attribution data, not an independent
+measurement of constraint fidelity.
+
+\paragraph{Single training seed.}
+Each distilled policy is one training run and seed variance is unquantified. A replication was
+attempted but could not be reconciled across compute environments, and is reported rather than
+omitted. This is the weakest methodological point in the work.
+
+\paragraph{Single policy and action space.}
+One vision-language-action model, one flow-matching action head, one operational-space action
+representation. The chunk-level and denoising-time results depend on that architecture and do not
+obviously generalise to policies that emit single actions.
+
+\paragraph{Scope of the negative results.}
+The reinforcement-learning result is a finding about the reward design and budget tested, not about
+safe reinforcement learning as a class; constrained-MDP~\cite{safevla} and world-model
+approaches~\cite{safedojo} supply materially richer constraint signals, and the latter is evaluated
+on this same benchmark. Similarly, the best-of-$N$ measurement supports a state-dominant account of
+collision risk in this policy and benchmark rather than a general claim about generative policies.
+
+\paragraph{Attribution caveats.}
+The per-body attribution is a documented lower bound that can miss delayed or indirect contacts,
+and the scene-object category is excluded as an artefact rather than interpreted
+(Section~\ref{sec:attribution}).
+
+\section{Future Work}\label{sec:disc:future}
+
+The most direct extension is a \textbf{whole-body barrier with a faithful robot model} --- proper
+link geometry and directly constrained link velocities rather than a pseudo-inverse estimate.
+Section~\ref{sec:res:scope} predicts this would lower the shield's own floor; whether the
+improvement then distils is a separate and testable question. It would also make the guided-sampling
+negative worth revisiting, since that mechanism was inert only because it inherited the
+end-effector scope of the barrier it steered by.
+
+\textbf{Perception-grounded barriers} would remove the privileged-geometry dependency and measure
+how much of the reported safety survives estimation error. Learned safety representations offer one
+route~\cite{meng2024conbat,sun2025lpb}, though both retain an inference-time correction that this
+work is trying to eliminate.
+
+\textbf{Cheaper corrective coverage} is suggested by the scaling argument in
+IntervenGen~\cite{hoque2024intervengen}, where corrective data synthesised from ten interventions
+outperform a hundred collected directly at a fraction of the cost. The analogous move here is
+generating shielded corrective coverage without re-running the shield online for every episode.
+
+\textbf{Dynamic obstacles and human proximity} would test whether the same distillation holds when
+the constraint moves, which is the case that matters for the deployment settings this work is
+motivated by.
+
+Finally, the boundary result invites a \textbf{mechanism study}. Cross-policy distillation failed;
+observation aliasing was measured and rejected as the explanation
+(Section~\ref{sec:res:mechanism}), and state coverage is supported but measured only on
+end-effector position. Distribution shift and action-distribution mismatch remain as candidates,
+and separating them would say something general about when demonstrations transfer between
+controllers. A direct comparison against a model-based safe-RL method on this
+benchmark~\cite{safedojo} would place the distillation route against the strongest current
+alternative.
+
 
 % ============================================================================
 \chapter{Conclusion}\label{ch:conclusion}
-% BUDGET ~1 page. Short. Nothing new.
+\label{sec:conc}
+
+This thesis asked whether the collision avoidance supplied by an inference-time control-barrier
+function shield can be amortised into a vision-language-action policy, so that the shield need not
+run at deployment. In the SafeLIBERO setting studied here the answer is yes, but only under a
+specific form of supervision. Distilling $\pi_{0.5}$ on rollouts corrected by its own CBF shield
+reduced collision episodes from 82.5\% to 19.2\% \textbf{without running the shield at inference},
+while increasing task success from 58.3\% to 82.5\% on held-out initial states. The resulting
+policy achieved a collision-avoidance rate of 80.8\%, approaching the shielded policy's 86.7\%, and
+one distillation round was sufficient.
+
+This extends the question posed by the work that introduced the benchmark~\cite{vlsa2026}. That
+work improves $\pi_{0.5}$ on SafeLIBERO by \emph{retaining} a perception-grounded constraint layer
+at inference; the present work asks what remains when its corrective behaviour is instead used as
+training data and the layer is removed. What is demonstrated is an empirical reduction in
+collisions, not a transfer of the CBF's formal safety guarantee: the student is no longer protected
+by the online constraint satisfaction that establishes forward invariance~\cite{ames2017cbf}.
+Conditions under which a learned controller does inherit input-to-state safety from a CBF-based
+expert exist~\cite{cosner2022il_cbf}, but they require a robust expert, known control-affine
+dynamics and explicit learning-theoretic assumptions, none of which this experiment establishes
+(Section~\ref{sec:disc:limitations}).
+
+\section*{The Boundary Condition}
+
+The central boundary concerns the source and location of correction. A safe-by-construction,
+geometry-privileged sampling-based planner did not improve the same student under a comparison
+matched for gradient steps, hyperparameters and evaluation. Conversely, filtering only for
+successful episodes also produced no measurable gain. Taken together, these controls support a
+hypothesis about the \emph{states} supervision covers rather than about who produces it:
+transferable supervision must correct errors on, or near, the states the learner itself reaches
+when it begins to fail. Access to successful trajectories, even trajectories that are safe by
+construction, is insufficient when they are drawn from a distribution the student does not visit.
+
+The distinction matters because the stronger claim --- that a foreign controller cannot teach
+safety --- is false, and the literature already shows it. SAFE-GIL trains behaviour cloning on
+demonstrations from an MPC or PID expert, neither of which is the learner, and obtains
+substantially safer policies~\cite{ciftci2025safegil}. What makes those demonstrations work is that
+a reachability-computed disturbance is injected during collection, so the fixed expert is forced to
+demonstrate recovery from the safety-critical states a learner's errors would produce; their
+ablation confirms this targeting is the active ingredient, since undirected noise does not
+reproduce the benefit. Their expert is privileged and foreign, and the demonstrations still
+transfer. The planner tested here differs precisely in that its trajectories were generated from
+its own initial conditions and were never conditioned on where $\pi_{0.5}$ goes wrong, and
+Figure~\ref{fig:state_coverage} measures the consequence: at matched sampling it covers the
+policy's own states substantially less well than the shielded rollouts do.
+
+IntervenGen constructs the same idea independently, rolling out the \emph{current} policy so that
+recorded mistakes are its genuine failures, then transforming a \emph{human} recovery segment onto
+each state reached~\cite{hoque2024intervengen}. Its recovery actions, like SAFE-GIL's, come from
+outside the policy, while the states they annotate come from the policy's own execution. Two
+methods, with different teachers and different means of reaching the failure states, therefore
+locate the active ingredient in the same place, and neither supports the stronger reading that the
+teacher must be the policy itself.
+
+The remaining alignment is with policy-proximal self-distillation~\cite{wang2026roadvla}, whose
+design principle anticipates this result without testing it. That work constructs its teacher by
+perturbing the student's own action-token logits, and derives a policy-improvement bound holding
+only while the teacher stays proximal to the current policy. The relationship is a gap rather than
+a disagreement: every teacher it rejects is a \emph{textual} one and every teacher it accepts is
+derived from the student itself, so no foreign low-level controller appears anywhere in that work.
+Its proximity principle predicts the planner result reported here, while the experiment that would
+confirm it --- a privileged controller supplying well-formed low-level actions from outside the
+policy --- is the one this thesis contributes.
+
+Two features of the present result are not anticipated by that literature. Where SAFE-GIL reports a
+safety--performance tradeoff, its own ablation showing task cost rising monotonically as more of
+the training data moves into unsafe states, the distillation reported here improved collision
+avoidance and task success \emph{together}. And where SAFE-GIL must synthesise the safety-critical
+states adversarially, because its expert would not otherwise visit them, the shield supplies
+corrections at states the policy reaches unprompted, so no disturbance model is required. Both
+differences follow from correcting a policy on its own rollouts rather than steering a foreign
+expert into the policy's likely failures.
+
+\section*{What Bounds the Claim}
+
+The remaining results sharpen, rather than universalise, that conclusion.
+
+The distilled student avoided collisions involving arm links more effectively than the shield that
+supervised it, indicating that trajectory imitation alone does not fully describe the learned
+behaviour. That comparison is possible only because the barrier used here constrains links three
+through seven and the hand, where the formulation it is measured against constrains the
+end-effector alone by its authors' own statement~\cite{vlsa2026}. The effect is suggestive rather
+than established --- the relevant Wilson intervals overlap (Section~\ref{sec:res:scope}).
+
+Scalar-reward reinforcement learning, CBF-guided sampling, language-specified safety and
+best-of-$N$ action selection did not provide an effective substitute under the implementations and
+budgets tested. Each negative is scoped rather than general. The reinforcement-learning result
+concerns the reward design tested and not safe reinforcement learning as a class: neither
+constrained-MDP~\cite{safevla} nor model-based world-model approaches~\cite{safedojo} are
+scalar-reward methods, and the latter is evaluated on this same benchmark. An independent study of
+CBF-guided reinforcement learning reaches the same conclusion about the reward
+channel~\cite{guerrier2025guardrails}, and supplies the control that makes the present result
+non-trivial: training under an active shield and then removing it leaves their agent colliding, so
+shield exposure alone does not transfer safety and the imitation objective is what does the work.
+Best-of-$N$ likewise found little useful variation among samples drawn from the same state, which
+supports a state-dominant account of collision risk \textbf{in this policy and benchmark} rather
+than a general claim about generative policies.
+
+\section*{What Is New, Stated Precisely}
+
+Two neighbouring claims would be false and are not made. Learning safety from CBF-related
+supervision is not new; it has been treated theoretically~\cite{cosner2022il_cbf}, and learning
+from CBF demonstrations in simulation predates that work. Distilling a corrective signal into a
+vision-language-action policy is not new either~\cite{wang2026roadvla}.
+
+What is new is the conjunction: a control-theoretic safety filter, distilled from a VLA's own
+shielded rollouts, evaluated with the filter \emph{removed}, in the setting where runtime shielding
+is the current state of the art --- together with the boundary condition that a geometry-privileged
+planner, safe by construction and supplying well-formed low-level actions, does not transfer under
+a matched comparison. To this is added a measurement rather than a method: within a given state,
+the safety outcomes of a VLA's sampled action candidates are near-perfectly correlated, which is
+why action-level rejection sampling cannot help where episode-level selection can
+(Section~\ref{sec:res:channels}).
+
+The practical conclusion is therefore narrower than ``safety can be learned''. A runtime filter can
+teach a policy the regularities that it observes and corrects, and policy-proximal corrections can
+amortise a substantial part of that benefit without the per-step optimisation that comparable
+learned-barrier methods retain at inference~\cite{meng2024conbat,sun2025lpb}. But the learned
+policy is only as broad as the states, hazards and geometry represented in those corrections.
+Runtime shielding remains necessary outside that validated envelope. Distillation reduces
+dependence on the shield; it does not remove the need for a safety case.
+
 
 % ============================================================================
 \bibliographystyle{plainnat}
