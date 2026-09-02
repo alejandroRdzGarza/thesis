@@ -5,7 +5,7 @@
 # Prereq: job must be running and openvla_node.txt must be written on Myriad.
 
 UCL_USER="${1:?Usage: $0 <ucl-username>}"
-MYRIAD="myriad.rc.ucl.ac.uk"
+MYRIAD="<cluster>.rc.ucl.ac.uk"
 LOCAL_PORT=8000
 REMOTE_PORT=8000
 

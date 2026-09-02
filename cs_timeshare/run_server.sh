@@ -14,7 +14,7 @@ set -e
 # UCL CS machines require CS_OS; not always set on vanilla's login shell.
 export CS_OS="${CS_OS:-linux}"
 
-THESIS_DIR="/cs/student/project_msc/2025/rai/jesusr01/thesis"
+THESIS_DIR="${CS_BASE:?set CS_BASE to your project directory on the host}/thesis"
 VENV_DIR="${THESIS_DIR}/venv"
 MODEL_PATH="${OPENVLA_MODEL_PATH:-${THESIS_DIR}/vla_model}"
 SERVER_SCRIPT="${THESIS_DIR}/VLA-Model/openvla/openvla_server.py"

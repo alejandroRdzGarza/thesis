@@ -52,10 +52,10 @@ Non-zero stdevs → good.
 
 ```bash
 rsync -avz --exclude='__pycache__' results_rwfm/round0 \
-    jesusr01@knuckles.cs.ucl.ac.uk:/cs/student/project_msc/2025/rai/jesusr01/thesis/results_rwfm/
+    <user>@<gateway>.cs.ucl.ac.uk:$BASE/thesis/results_rwfm/
 # also sync the experiments/ code if changed
 rsync -avz --exclude='__pycache__' experiments \
-    jesusr01@knuckles.cs.ucl.ac.uk:/cs/student/project_msc/2025/rai/jesusr01/thesis/
+    <user>@<gateway>.cs.ucl.ac.uk:$BASE/thesis/
 ```
 
 ---
@@ -63,8 +63,8 @@ rsync -avz --exclude='__pycache__' experiments \
 ## 3. Convert → weighted LeRobot dataset (UCL, openpi env)
 
 ```bash
-ssh jesusr01@knuckles.cs.ucl.ac.uk ; ssh <gpu-node> ; bash
-cd /cs/student/project_msc/2025/rai/jesusr01/openpi
+ssh <user>@<gateway>.cs.ucl.ac.uk ; ssh <gpu-node> ; bash
+cd $BASE/openpi
 
 # filter (DEFAULT) = group-relative filtered BC (RAFT/hard-RWR); no openpi change.
 uv run python ../thesis/experiments/convert_rwfm_to_lerobot.py \
@@ -101,10 +101,10 @@ Checkpoints land in `checkpoints/pi05_libero_cbf/rwfm_r0/<step>`.
 ## 5. Serve the new checkpoint + evaluate
 
 ```bash
-OPENPI_DATA_HOME=/cs/student/project_msc/2025/rai/jesusr01/openpi_cache \
+OPENPI_DATA_HOME=$BASE/openpi_cache \
 uv run scripts/serve_policy.py policy:checkpoint \
     --policy.config=pi05_libero_cbf \
-    --policy.dir=/cs/student/project_msc/2025/rai/jesusr01/openpi/checkpoints/pi05_libero_cbf/rwfm_r0/<step>
+    --policy.dir=$BASE/openpi/checkpoints/pi05_libero_cbf/rwfm_r0/<step>
 ```
 Then LOCALLY, eval this checkpoint and read the headline metrics:
 ```bash

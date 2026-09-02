@@ -4,7 +4,7 @@
 # Everything routes to project_msc ($BASE); NOTHING touches the (quota-full) home dir.
 # HOME is pointed into $BASE so LIBERO's ~/.libero and jax's cache land on project_msc.
 
-export BASE=/cs/student/project_msc/2025/rai/jesusr01
+export BASE="${UCL_BASE:?set UCL_BASE to your project directory on the lab machine}"
 mkdir -p "$BASE/.home"
 
 export MUJOCO_GL=egl                     # headless rendering on compute nodes

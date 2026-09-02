@@ -5,10 +5,10 @@
 # Usage:
 #   bash cs_timeshare/upload_project.sh
 
-CS_USER="jesusr01"
-GATEWAY="knuckles.cs.ucl.ac.uk"
-MACHINE="cream.cs.ucl.ac.uk"
-REMOTE_THESIS="/cs/student/project_msc/2025/rai/jesusr01/thesis"
+CS_USER="${CS_USER:?set CS_USER to your UCL CS username}"
+GATEWAY="${CS_GATEWAY:?set CS_GATEWAY, e.g. gateway.cs.ucl.ac.uk}"
+MACHINE="${CS_MACHINE:?set CS_MACHINE to the compute host}"
+REMOTE_THESIS="${CS_BASE:?set CS_BASE to your project directory on the host}/thesis"
 
 echo "=== Creating thesis directory on cream (if needed) ==="
 ssh -J "${CS_USER}@${GATEWAY}" "${CS_USER}@${MACHINE}" "mkdir -p ${REMOTE_THESIS}"

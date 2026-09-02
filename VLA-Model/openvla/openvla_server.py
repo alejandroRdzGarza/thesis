@@ -73,12 +73,14 @@ except ImportError as e:
     ) from e
 
 # ── Config ────────────────────────────────────────────────────────────────────
-# Auto-detect local weights — checks RunPod path first, then UCL path, then HF.
+# Auto-detect local weights — checks RunPod path first, then the cluster path, then HF.
+# The cluster path is site-specific, so it comes from $UCL_BASE rather than being hardcoded.
 _LOCAL_DEFAULT     = "/workspace/vla_model"
-_UCL_DEFAULT       = "/cs/student/project_msc/2025/rai/jesusr01/vla_model"
+_UCL_BASE          = os.environ.get("UCL_BASE")
+_UCL_DEFAULT       = os.path.join(_UCL_BASE, "vla_model") if _UCL_BASE else None
 _HF_DEFAULT        = "moojink/openvla-7b-oft-finetuned-libero-spatial"
 _default_path = next(
-    (p for p in (_LOCAL_DEFAULT, _UCL_DEFAULT) if os.path.isdir(p)),
+    (p for p in (_LOCAL_DEFAULT, _UCL_DEFAULT) if p and os.path.isdir(p)),
     _HF_DEFAULT,
 )
 

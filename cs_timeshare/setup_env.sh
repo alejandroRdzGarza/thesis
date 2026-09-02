@@ -8,7 +8,7 @@ set -e
 # UCL CS machines require CS_OS to be set; vanilla's login shell doesn't always set it.
 export CS_OS="${CS_OS:-linux}"
 
-THESIS_DIR="/cs/student/project_msc/2025/rai/jesusr01/thesis"
+THESIS_DIR="${CS_BASE:?set CS_BASE to your project directory on the host}/thesis"
 VENV_DIR="${THESIS_DIR}/venv"
 REQUIREMENTS="${THESIS_DIR}/VLA-Model/openvla/requirements_server.txt"
 export PIP_CACHE_DIR="${THESIS_DIR}/.pip_cache"

@@ -5,19 +5,19 @@
 #   4 suites × 4 tasks × 2 levels × 50 episodes = 1,600 episodes
 #
 # PREREQUISITES:
-#   1. On gadwall-l (in tmux):
-#        BASE=/cs/student/project_msc/2025/rai/jesusr01
+#   1. On <gpu-host> (in tmux):
+#        BASE=$BASE
 #        cd $BASE/openpi
 #        XLA_PYTHON_CLIENT_PREALLOCATE=false UV_CACHE_DIR=$BASE/.uv-cache \
 #          uv run scripts/serve_policy.py --env LIBERO
 #
 #   2. Tunnel open on Mac (keep running):
-#        GPU_HOST=gadwall-l bash runpod/tunnel_ucl.sh
+#        GPU_HOST=<gpu-host> bash runpod/tunnel_ucl.sh
 #
 #   3. Rsync latest code to UCL first:
 #        rsync -avz --exclude='__pycache__' --exclude='.git' \
 #          --exclude='openpi' --exclude='data' \
-#          . jesusr01@knuckles.cs.ucl.ac.uk:/cs/student/project_msc/2025/rai/jesusr01/thesis/
+#          . <user>@<gateway>.cs.ucl.ac.uk:$BASE/thesis/
 #
 # USAGE:
 #   bash run_dagger_collection.sh                          # full run, 50 ep/scenario
@@ -95,7 +95,7 @@ except Exception as e:
 "; then
     echo ""
     echo "  ERROR: Cannot reach π0.5 server at ${PI05_HOST}:${PORT}"
-    echo "  Make sure the tunnel is running: GPU_HOST=gadwall-l bash runpod/tunnel_ucl.sh"
+    echo "  Make sure the tunnel is running: GPU_HOST=<gpu-host> bash runpod/tunnel_ucl.sh"
     exit 1
 fi
 

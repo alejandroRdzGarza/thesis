@@ -14,15 +14,15 @@
 # missing (truly fresh setup), run these FROM THE MAC first, then re-run this script:
 #   1) the openpi flow-SDE GRPO patch:
 #        rsync -avz openpi_patches/flow_sde_grpo.patch \
-#          jesusr01@knuckles.cs.ucl.ac.uk:$BASE/openpi_patches/    # then: cd $BASE/openpi && git apply ../openpi_patches/flow_sde_grpo.patch
+#          <user>@<gateway>.cs.ucl.ac.uk:$BASE/openpi_patches/    # then: cd $BASE/openpi && git apply ../openpi_patches/flow_sde_grpo.patch
 #      (or rsync the changed openpi/src files directly)
 #   2) the SafeLIBERO fork into libero_repo (benchmark, bddl, init, obstacle objects, assets):
 #        MACLIB=/Users/.../miniforge3/envs/libero/lib/python3.10/site-packages/libero/libero/
 #        rsync -avz --exclude='datasets' --exclude='__pycache__' "$MACLIB" \
-#          jesusr01@knuckles.cs.ucl.ac.uk:$BASE/libero_repo/libero/libero/
+#          <user>@<gateway>.cs.ucl.ac.uk:$BASE/libero_repo/libero/libero/
 
 set -euo pipefail
-export BASE=/cs/student/project_msc/2025/rai/jesusr01
+export BASE="${UCL_BASE:?set UCL_BASE to your project directory on the lab machine}"
 
 echo "== 1/3  libero runtime deps into openpi/.venv (pinned; keep numpy<2) =="
 cd "$BASE/openpi"

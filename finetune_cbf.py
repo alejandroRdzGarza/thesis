@@ -50,10 +50,20 @@ from torch.optim.lr_scheduler import MultiStepLR
 from torch.utils.data import DataLoader, IterableDataset
 from transformers import AutoConfig, AutoImageProcessor, AutoModelForVision2Seq, AutoProcessor
 
-# ── Path setup: add openvla-oft-main to sys.path ──────────────────────────────
+# ── Path setup: add openvla-oft to sys.path ───────────────────────────────────
+# openvla-oft is a third-party dependency, not vendored here. Clone it alongside this
+# repo (or anywhere) and point $OPENVLA_OFT_DIR at it:
+#     git clone https://github.com/moojink/openvla-oft.git ../openvla-oft
+#     export OPENVLA_OFT_DIR=../openvla-oft
 _SCRIPT_DIR = Path(__file__).parent
-_OFT_DIR = _SCRIPT_DIR / "openvla-oft-main"
-if _OFT_DIR.exists() and str(_OFT_DIR) not in sys.path:
+_OFT_DIR = Path(os.environ.get("OPENVLA_OFT_DIR", _SCRIPT_DIR.parent / "openvla-oft"))
+if not _OFT_DIR.exists():
+    raise SystemExit(
+        f"openvla-oft not found at {_OFT_DIR}.\n"
+        "  git clone https://github.com/moojink/openvla-oft.git ../openvla-oft\n"
+        "  export OPENVLA_OFT_DIR=../openvla-oft"
+    )
+if str(_OFT_DIR) not in sys.path:
     sys.path.insert(0, str(_OFT_DIR))
 
 from prismatic.extern.hf.configuration_prismatic import OpenVLAConfig
